@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "code_graph_indexer"
+version = "0.1.0"
+description = "Memory-efficient library to index codebases into a Knowledge Graph using Tree-sitter and SCIP."
+requires-python = ">=3.10"
+dependencies = [
+    "networkx>=3.0",
+    "tree-sitter==0.21.3",
+    "tree-sitter-languages==1.8.0",
+    "GitPython>=3.1"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

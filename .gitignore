@@ -1,0 +1,15 @@
+.git/
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+env/
+venv/
+.venv/
+dist/
+build/
+*.egg-info/
+*.scip
+*.json
+*.db
+*.graphml

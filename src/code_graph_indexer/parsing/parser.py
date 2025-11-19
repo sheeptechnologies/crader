@@ -1,0 +1,128 @@
+import os
+import uuid
+import datetime
+from typing import List, Dict, Any, Optional, Generator, Tuple
+
+from tree_sitter import Parser
+from tree_sitter_languages import get_language
+
+# Import relativi ai modelli e provider
+from ..models import FileRecord, ChunkNode, ChunkContent, ParsingResult
+from ..providers.metadata import MetadataProvider, GitMetadataProvider, LocalMetadataProvider
+
+class TreeSitterRepoParser:
+    LANGUAGE_MAP = {
+        ".py": "python", ".js": "javascript", ".ts": "typescript", ".go": "go", 
+        ".java": "java", ".c": "c", ".cpp": "cpp", ".html": "html", ".css": "css", ".scss": "css"
+    }
+    
+    # LISTA DI ESCLUSIONE AGGIORNATA E PIÙ AMPIA
+    IGNORE_DIRS = {
+        ".git", "node_modules", "target", "build", "dist", 
+        ".venv", "venv", "env", ".env", "__pycache__", ".idea", ".vscode",
+        "site-packages", "bin", "obj", "lib", "include", "eggs", ".eggs"
+    }
+    
+    MAX_MERGE_BYTES = 1024 
+    CONTAINER_TYPES = {"module", "program", "class_definition", "class_declaration", "interface_declaration", "export_statement"}
+    BIG_ATOM_TYPES = {"function_definition", "method_definition", "constructor", "if_statement", "ruleset", "mixin_declaration", "function_declaration"}
+
+    def __init__(self, repo_path: str, metadata_provider: Optional[MetadataProvider] = None):
+        self.repo_path = os.path.abspath(repo_path)
+        if not os.path.isdir(self.repo_path): raise FileNotFoundError(f"Invalid path: {repo_path}")
+        
+        self.metadata_provider = metadata_provider or (GitMetadataProvider(self.repo_path) if os.path.isdir(os.path.join(self.repo_path, ".git")) else LocalMetadataProvider(self.repo_path))
+        self.repo_info = self.metadata_provider.get_repo_info()
+        self.repo_id = self.repo_info['repo_id']
+        self.languages = {ext: get_language(lang) for ext, lang in self.LANGUAGE_MAP.items() if self._safe_get_lang(lang)}
+        self.parser = Parser()
+
+    def _safe_get_lang(self, lang):
+        try: get_language(lang); return True
+        except: return False
+
+    def stream_semantic_chunks(self, file_list: Optional[List[str]] = None) -> Generator[Tuple[FileRecord, List[ChunkNode], List[ChunkContent]], None, None]:
+        files_to_process = set(file_list) if file_list else None
+        
+        for root, dirs, files in os.walk(self.repo_path, topdown=True):
+            # FIX: Filtro Case-Insensitive per le directory
+            # Rimuove le directory ignorate dalla lista 'dirs' in-place, così os.walk non ci entra
+            dirs[:] = [d for d in dirs if d.lower() not in self.IGNORE_DIRS]
+            
+            for file_name in files:
+                _, ext = os.path.splitext(file_name)
+                if ext not in self.LANGUAGE_MAP: continue
+                
+                full_path = os.path.join(root, file_name)
+                rel_path = os.path.relpath(full_path, self.repo_path)
+                
+                # Doppio controllo: se il path contiene una cartella ignorata (es. src/env/main.py)
+                path_parts = rel_path.split(os.sep)
+                if any(part.lower() in self.IGNORE_DIRS for part in path_parts):
+                    continue
+
+                if files_to_process and rel_path not in files_to_process: continue
+
+                try:
+                    with open(full_path, 'rb') as f: content = f.read()
+                    
+                    file_rec = FileRecord(
+                        id=str(uuid.uuid4()), repo_id=self.repo_id, commit_hash=self.repo_info['commit_hash'],
+                        file_hash=self.metadata_provider.get_file_hash(rel_path, content), path=rel_path,
+                        language=self.LANGUAGE_MAP[ext], size_bytes=len(content),
+                        category=self.metadata_provider.get_file_category(rel_path),
+                        indexed_at=datetime.datetime.utcnow().isoformat() + "Z"
+                    )
+
+                    self.parser.set_language(self.languages[ext])
+                    tree = self.parser.parse(content)
+                    
+                    nodes = []; contents = {}
+                    self._recursive_chunker(tree.root_node, rel_path, file_rec.id, content, nodes, contents, [])
+                    
+                    if nodes:
+                        nodes.sort(key=lambda c: c.byte_range[0])
+                        yield (file_rec, nodes, list(contents.values()))
+                except Exception as e: print(f"[ERROR] Parsing {rel_path}: {e}")
+
+    def extract_semantic_chunks(self) -> ParsingResult:
+        files, nodes, contents = [], [], {}
+        for f, n, c in self.stream_semantic_chunks():
+            files.append(f); nodes.extend(n)
+            for item in c: contents[item.chunk_hash] = item
+        return ParsingResult(files, nodes, contents)
+
+    def _recursive_chunker(self, node, file_path, file_id, content, nodes, contents, buffer):
+        children = node.child_by_field_name("body").named_children if node.child_by_field_name("body") else node.named_children
+        local_buffer = list(buffer)
+        for child in children:
+            cat = "CONTAINER" if child.type in self.CONTAINER_TYPES else "BIG_ATOM" if child.type in self.BIG_ATOM_TYPES else "SMALL_ATOM"
+            if cat == "SMALL_ATOM":
+                local_buffer.append(child)
+                if local_buffer and (child.end_byte - local_buffer[0].start_byte > self.MAX_MERGE_BYTES):
+                    self._flush(local_buffer, file_path, file_id, content, nodes, contents)
+            elif cat == "BIG_ATOM":
+                start = local_buffer[0] if local_buffer else child
+                if local_buffer and (child.end_byte - start.start_byte < self.MAX_MERGE_BYTES):
+                    self._create(content[start.start_byte:child.end_byte].decode('utf-8', 'ignore'), start, child, file_path, file_id, f"merged_{child.type}", nodes, contents)
+                else:
+                    self._flush(local_buffer, file_path, file_id, content, nodes, contents)
+                    self._create(child.text.decode('utf-8', 'ignore'), child, child, file_path, file_id, child.type, nodes, contents)
+                local_buffer.clear()
+            elif cat == "CONTAINER":
+                self._recursive_chunker(child, file_path, file_id, content, nodes, contents, local_buffer)
+                local_buffer.clear()
+        self._flush(local_buffer, file_path, file_id, content, nodes, contents)
+
+    def _flush(self, buffer, path, fid, content, nodes, contents):
+        if not buffer: return
+        self._create(content[buffer[0].start_byte:buffer[-1].end_byte].decode('utf-8', 'ignore'), buffer[0], buffer[-1], path, fid, "small_block", nodes, contents)
+        buffer.clear()
+
+    def _create(self, text, start_node, end_node, path, fid, ctype, nodes, contents):
+        import hashlib
+        h = hashlib.sha256(text.encode('utf-8')).hexdigest()
+        if h not in contents: contents[h] = ChunkContent(h, text)
+        s = start_node.start_point[0]+1 if hasattr(start_node, 'start_point') else start_node['start_point'][0]+1
+        e = end_node.end_point[0]+1 if hasattr(end_node, 'end_point') else end_node['end_point'][0]+1
+        nodes.append(ChunkNode(str(uuid.uuid4()), fid, path, h, ctype, s, e, [start_node.start_byte, end_node.end_byte]))
