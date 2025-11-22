@@ -10,10 +10,6 @@ from .storage.sqlite import SqliteGraphStorage
 logger = logging.getLogger(__name__)
 
 class CodebaseIndexer:
-    """
-    Facade principale della libreria.
-    """
-    
     def __init__(self, repo_path: str):
         self.repo_path = os.path.abspath(repo_path)
         if not os.path.isdir(self.repo_path):
@@ -33,29 +29,28 @@ class CodebaseIndexer:
             future_scip = executor.submit(self.scip_runner.run_to_disk)
             
             files_count = 0
-            for f_rec, nodes, contents_list in self.parser.stream_semantic_chunks():
+            # Streaming: (File, Nodes, Contents, Relations)
+            for f_rec, nodes, contents_list, rels_list in self.parser.stream_semantic_chunks():
                 
-                # 1. Salva FILE (Metadati)
+                # 1. Salva FILE
                 self.builder.add_files([f_rec])
                 
-                # 2. Merge e Salva NODI (Struttura)
-                content_map = {c.chunk_hash: c.content for c in contents_list}
-                enriched_nodes = []
-                for node in nodes:
-                    node_dict = node.to_dict()
-                    node_dict['content'] = content_map.get(node.chunk_hash, "")
-                    enriched_nodes.append(node_dict)
+                # 2. Salva NODI (ChunkNode)
+                self.builder.add_chunks(nodes)
                 
-                self.builder.add_chunks(enriched_nodes)
-                
-                # 3. Salva CONTENUTI (Dati Deduplicati)
+                # 3. Salva CONTENUTI (ChunkContent)
                 self.builder.add_contents(contents_list)
+                
+                # 4. Salva RELAZIONI STRUTTURALI (child_of)
+                if rels_list:
+                    self.builder.add_relations(rels_list)
                 
                 files_count += 1
             
             logger.info(f"Parsing completato: {files_count} file processati.")
             scip_json = future_scip.result()
 
+        # 5. FASE LINKING SCIP
         if scip_json:
             logger.info("Linking relazioni SCIP...")
             rel_gen = self.scip_indexer.stream_relations_from_file(scip_json)
@@ -73,28 +68,13 @@ class CodebaseIndexer:
 
         self.storage.commit()
         stats = self.storage.get_stats()
-        logger.info(f"✅ Indexing completato. Stats: {stats}")
+        logger.info(f"✅ Indexing completato. Staging Area pronta: {stats}")
 
-    # --- API DI ACCESSO ---
-    
-    def get_files(self) -> Generator[Dict[str, Any], None, None]:
-        """Ritorna tutti i record dei file indicizzati."""
-        return self.storage.get_all_files()
-
-    def get_nodes(self) -> Generator[Dict[str, Any], None, None]:
-        return self.storage.get_all_nodes()
-
-    def get_contents(self) -> Generator[Dict[str, Any], None, None]:
-        return self.storage.get_all_contents()
-
-    def get_edges(self) -> Generator[Dict[str, Any], None, None]:
-        return self.storage.get_all_edges()
-
-    def get_stats(self):
-        return self.storage.get_stats()
-        
-    def close(self):
-        self.storage.close()
-    
-    def __del__(self):
-        self.close()
+    # --- API ---
+    def get_nodes(self): return self.storage.get_all_nodes()
+    def get_contents(self): return self.storage.get_all_contents()
+    def get_edges(self): return self.storage.get_all_edges()
+    def get_files(self): return self.storage.get_all_files() # Utile per debug
+    def get_stats(self): return self.storage.get_stats()
+    def close(self): self.storage.close()
+    def __del__(self): self.close()

@@ -1,20 +1,6 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
-
-@dataclass
-class CodeRelation:
-    """
-    Rappresenta un arco (connessione) tra due punti del codice.
-    """
-    source_file: str
-    target_file: str
-    relation_type: str
-    source_line: int = -1 
-    target_line: int = -1
-    source_byte_range: Optional[List[int]] = None
-    target_byte_range: Optional[List[int]] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+from ..models import CodeRelation
 
 class BaseGraphIndexer(ABC):
     """
