@@ -323,7 +323,15 @@ function updateDetailsPanel(node, allEdges, allNodes) {
     html += `<div style="font-family:'Consolas', monospace; color:#858585; font-size:12px;">${node.file_path}:${node.start_line}</div>`;
     html += `</div>`;
 
-    html += `<h4 style="color:#cccccc; margin:10px 0; font-size:12px; text-transform:uppercase;">Connections (${connections.length})</h4>`;
+    // Node Details Section
+    const nodeData = { ...node };
+    delete nodeData.content; // Don't show full content in details
+    const nodeJson = JSON.stringify(nodeData, null, 2);
+
+    html += `<h4 style="color:#cccccc; margin:15px 0 10px 0; font-size:12px; text-transform:uppercase;">Chunk Data</h4>`;
+    html += `<pre style="margin:0; padding:10px; background:#1e1e1e; color:#9cdcfe; font-size:11px; overflow:auto; border-radius:4px; border:1px solid #3e3e42; max-height:200px;">${escapeHtml(nodeJson)}</pre>`;
+
+    html += `<h4 style="color:#cccccc; margin:15px 0 10px 0; font-size:12px; text-transform:uppercase;">Connections (${connections.length})</h4>`;
     html += `<div style="display:flex; flex-direction:column; gap:8px;">`;
 
     connections.forEach(c => {

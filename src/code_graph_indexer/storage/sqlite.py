@@ -45,7 +45,8 @@ class SqliteGraphStorage(GraphStorage):
                 byte_start INTEGER,
                 byte_end INTEGER,
                 chunk_hash TEXT,
-                size INTEGER
+                size INTEGER,
+                metadata_json TEXT
             )
         """)
         self._cursor.execute("CREATE INDEX idx_spatial ON nodes (file_path, byte_start)")
@@ -88,14 +89,16 @@ class SqliteGraphStorage(GraphStorage):
             d = n.to_dict() if hasattr(n, 'to_dict') else n
             b_start = d['byte_range'][0]
             b_end = d['byte_range'][1]
+            meta = json.dumps(d.get('metadata', {}))
             sql_batch.append((
                 d['id'], d['type'], d['file_path'], 
                 d['start_line'], d['end_line'],
                 b_start, b_end, d.get('chunk_hash', ''),
-                b_end - b_start
+                b_end - b_start,
+                meta
             ))
         if sql_batch:
-            self._cursor.executemany("INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", sql_batch)
+            self._cursor.executemany("INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", sql_batch)
             self._conn.commit()
 
     def add_contents(self, contents: List[Any]):
@@ -166,7 +169,15 @@ class SqliteGraphStorage(GraphStorage):
     def get_all_nodes(self):
         self._cursor.execute("SELECT * FROM nodes")
         cols = [d[0] for d in self._cursor.description]
-        for row in self._cursor: yield dict(zip(cols, row))
+        for row in self._cursor: 
+            d = dict(zip(cols, row))
+            if d.get('metadata_json'):
+                try:
+                    d['metadata'] = json.loads(d['metadata_json'])
+                except:
+                    d['metadata'] = {}
+                del d['metadata_json']
+            yield d
 
     def get_all_contents(self):
         self._cursor.execute("SELECT * FROM contents")

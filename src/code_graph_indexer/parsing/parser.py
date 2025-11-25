@@ -19,7 +19,7 @@ class TreeSitterRepoParser:
     2. Group Buffer: Raggruppa istruzioni piccole (import, var) per evitare micro-chunk.
     3. Barriers: Classi e Funzioni interrompono i gruppi e assorbono il Glue Buffer.
     4. Header Flow-Down: Le firme vengono unite al corpo (docstring) per preservare il contesto.
-    5. Surrogate Parenting: In caso di split, il primo chunk diventa il padre logico dei successivi.
+    5. Metadata Enrichment: Normalizza i tipi e estrae tag senza alterare lo splitting.
     """
     
     LANGUAGE_MAP = {
@@ -38,17 +38,46 @@ class TreeSitterRepoParser:
     # Limite dimensione chunk (~20-30 righe)
     MAX_CHUNK_SIZE = 800 
     
-    # Tolleranza anti-widow (evita di tagliare ultimi statement se siamo vicini alla fine)
+    # Tolleranza anti-widow
     CHUNK_TOLERANCE = 400
 
     CONTAINER_TYPES = {
         "class_definition", "class_declaration", "function_definition", "method_definition", 
         "function_declaration", "arrow_function", "interface_declaration", "impl_item", "mod_item",
-        "async_function_definition", "decorated_definition"
+        "async_function_definition", "decorated_definition", "export_statement"
     }
 
     GLUE_TYPES = {
         "comment", "decorator", "line_comment", "block_comment", "string_literal"
+    }
+
+    # Mappa di normalizzazione (Raw Type -> Macro Type per DB)
+    NORMALIZED_TYPES = {
+        # Classi
+        "class_definition": "class_definition", "class_declaration": "class_definition",
+        "struct_specifier": "class_definition", "impl_item": "class_definition",
+        "interface_declaration": "interface_definition", "protocol_definition": "interface_definition",
+        # Funzioni
+        "function_definition": "function_definition", "function_declaration": "function_definition",
+        "arrow_function": "function_definition", "async_function_definition": "function_definition",
+        "generator_function": "function_definition", "generator_function_declaration": "function_definition",
+        # Metodi
+        "method_definition": "method_definition", "constructor": "method_definition",
+        "method_declaration": "method_definition",
+        # Moduli
+        "module": "module_definition", "namespace_definition": "module_definition",
+    }
+
+    # Mappa: tipo semantico -> categoria macro per il DB / ranking
+    CHUNK_KIND_MAP = {
+        "class_definition": "class",
+        "interface_definition": "class",
+        "function_definition": "function",
+        "method_definition": "method",
+        "module_definition": "module",
+        "comment_block": "comments",
+        "code_fragment": "fragment",
+        "code_block": "block",
     }
 
     def __init__(self, repo_path: str, metadata_provider: Optional[MetadataProvider] = None):
@@ -59,12 +88,24 @@ class TreeSitterRepoParser:
         self.repo_info = self.metadata_provider.get_repo_info()
         self.repo_id = self.repo_info.get('repo_id', str(uuid.uuid4()))
         
-        self.languages = {ext: get_language(lang) for ext, lang in self.LANGUAGE_MAP.items() if self._safe_get_lang(lang)}
-        self.parser = Parser()
+        self.languages: Dict[str, Any] = {}
+        lang_cache: Dict[str, Any] = {}
+        
+        # Costruiamo una mappa estensione -> Language, riusando le istanze per lo stesso linguaggio
+        for ext, lang_name in self.LANGUAGE_MAP.items():
+            if lang_name in lang_cache:
+                # Riusa la stessa Language per tutte le estensioni che puntano allo stesso linguaggio
+                self.languages[ext] = lang_cache[lang_name]
+                continue
+            try:
+                lang_obj = get_language(lang_name)
+            except Exception:
+                # Se la grammatica non è disponibile (es. non compilata), salta TUTTE le estensioni che la usano
+                continue
+            lang_cache[lang_name] = lang_obj
+            self.languages[ext] = lang_obj
 
-    def _safe_get_lang(self, lang):
-        try: get_language(lang); return True
-        except: return False
+        self.parser = Parser()
 
     def _set_parser_language(self, lang_object):
         if hasattr(self.parser, 'set_language'): self.parser.set_language(lang_object)
@@ -78,7 +119,10 @@ class TreeSitterRepoParser:
             
             for file_name in files:
                 _, ext = os.path.splitext(file_name)
-                if ext not in self.LANGUAGE_MAP: continue
+                lang_object = self.languages.get(ext)
+                if not lang_object:
+                    # Nessuna grammatica disponibile per questa estensione, saltiamo il file
+                    continue
                 
                 full_path = os.path.join(root, file_name)
                 rel_path = os.path.relpath(full_path, self.repo_path)
@@ -96,7 +140,7 @@ class TreeSitterRepoParser:
                         indexed_at=datetime.datetime.utcnow().isoformat() + "Z"
                     )
 
-                    self._set_parser_language(self.languages[ext])
+                    self._set_parser_language(lang_object)
                     tree = self.parser.parse(content)
                     
                     nodes = []; contents = {}; relations = []
@@ -117,32 +161,124 @@ class TreeSitterRepoParser:
             for item in c: contents[item.chunk_hash] = item
         return ParsingResult(files, nodes, contents, all_rels)
 
+    # --- HELPERS PER METADATA ---
+
+    def _get_canonical_type(self, raw_type: str, parent_type: str = None) -> str:
+        """Converte tipi specifici in macro-categorie per il RAG."""
+        
+        # Mappatura diretta se esiste
+        if raw_type in self.NORMALIZED_TYPES:
+            canonical = self.NORMALIZED_TYPES[raw_type]
+            # Se è una funzione, controlla il contesto per promuoverla a metodo
+            if canonical == "function_definition":
+                # Se il padre è una classe, allora è un metodo
+                if parent_type and self.NORMALIZED_TYPES.get(parent_type) == "class_definition":
+                    return "method_definition"
+            return canonical
+            
+        # Fallback per firme
+        if raw_type.endswith("_signature") or raw_type.endswith("_header"):
+             base = raw_type.replace("_signature", "").replace("_header", "")
+             return self._get_canonical_type(base, parent_type)
+
+        return "code_block"
+
+    def _extract_tags(self, node: Node) -> List[str]:
+        """
+        Estrae tag semantici dal nodo e dai figli immediati.
+        Non usa node.text (non disponibile nel binding Python),
+        solo i tipi sintattici.
+        """
+        tags: List[str] = []
+
+        # Async: function/method async o con keyword async tra i figli
+        if node.type.startswith("async_") or any(c.type == "async" for c in node.children):
+            tags.append("async")
+
+        # Decorated: @decorator o wrapped in decorated_definition
+        if node.type == "decorated_definition" or any(c.type == "decorator" for c in node.children):
+            tags.append("decorated")
+
+        # Export (TS/JS)
+        if node.type == "export_statement" or (node.parent and node.parent.type == "export_statement"):
+            tags.append("exported")
+
+        # Constructor (TS/Java, ecc.)
+        if "constructor" in node.type:
+            tags.append("constructor")
+
+        # Static methods / fields
+        for child in node.children:
+            if child.type == "static":
+                tags.append("static")
+            # Se in futuro vuoi vedere public/private/protected,
+            # qui potrai usare content[start_byte:end_byte] con un helper.
+
+        # Rimuovi duplicati
+        return list(set(tags))
+
+    def _determine_effective_type(self, node: Node) -> str:
+        # 1. Identifica il tipo "interno" se wrappato
+        effective_child_type = node.type
+        if node.type == 'decorated_definition':
+            defn = node.child_by_field_name('definition')
+            if defn:
+                effective_child_type = defn.type
+        elif node.type == 'export_statement':
+             decl = node.child_by_field_name('declaration') or node.child_by_field_name('value')
+             if decl:
+                 effective_child_type = decl.type
+
+        # 2. Identifica il tipo del genitore semantico
+        p_node = node.parent
+        semantic_parent_type = None
+        
+        # Risaliamo la catena dei genitori ignorando i wrapper non semantici
+        while p_node:
+            # Se il padre è un blocco generico, continua a salire
+            if p_node.type in ["block", "body", "declaration_list", "program", "module"]:
+                p_node = p_node.parent
+                continue
+            
+            # Se il padre è un wrapper (decorated/export), dobbiamo vedere cosa contiene
+            check_type = p_node.type
+            if check_type == 'decorated_definition':
+                defn = p_node.child_by_field_name('definition')
+                if defn: check_type = defn.type
+            elif check_type == 'export_statement':
+                decl = p_node.child_by_field_name('declaration') or p_node.child_by_field_name('value')
+                if decl: check_type = decl.type
+            
+            # Trovato un genitore significativo?
+            if check_type in self.NORMALIZED_TYPES:
+                semantic_parent_type = check_type
+                break
+                
+            # Altrimenti continua a salire (es. if_statement, try_statement)
+            p_node = p_node.parent
+        
+        return self._get_canonical_type(effective_child_type, semantic_parent_type)
+
     # ==============================================================================
-    #  LOGICA DI CHUNKING
+    #  LOGICA DI CHUNKING (Conservativa)
     # ==============================================================================
 
     def _process_scope(self, parent_node: Node, content: bytes, file_path: str, file_id: str, parent_chunk_id: Optional[str],
                        nodes: List, contents: Dict, relations: List, 
                        initial_glue: bytes = b"", initial_glue_start: Optional[int] = None,
-                       is_breakdown_mode: bool = False):
+                       is_breakdown_mode: bool = False,
+                       active_override_type: Optional[str] = None):
         
         body_node = parent_node.child_by_field_name("body") or parent_node.child_by_field_name("block") or parent_node.child_by_field_name("consequence")
         iterator_node = body_node if body_node else parent_node
         
         cursor = iterator_node.start_byte
-        
-        # Buffer 1: Glue (Commenti/Spazi)
         glue_buffer_bytes = initial_glue 
         glue_start_byte = initial_glue_start 
         if initial_glue and glue_start_byte is None:
             glue_start_byte = iterator_node.start_byte 
 
-        # Buffer 2: Group (Istruzioni piccole)
-        group_buffer_bytes = b""
-        group_start_byte = None
-        group_end_byte = None
-
-        # Stato per Surrogate Parenting (se in breakdown)
+        group_buffer_bytes = b""; group_start_byte = None; group_end_byte = None
         current_active_parent = parent_chunk_id
         first_chunk_created_in_scope = False
 
@@ -155,88 +291,83 @@ class TreeSitterRepoParser:
         def flush_group():
             nonlocal group_buffer_bytes, group_start_byte, group_end_byte
             if group_buffer_bytes:
+                ctype = "code_block"
+                if is_breakdown_mode and not first_chunk_created_in_scope and active_override_type:
+                    ctype = active_override_type
+
                 cid = self._create_chunk(
                     group_buffer_bytes, group_start_byte, group_end_byte, content,
-                    "code_block", file_path, file_id, current_active_parent,
+                    ctype, file_path, file_id, current_active_parent,
                     nodes, contents, relations
                 )
                 register_chunk_creation(cid)
-                
-                group_buffer_bytes = b""
-                group_start_byte = None
-                group_end_byte = None
+                group_buffer_bytes = b""; group_start_byte = None; group_end_byte = None
 
         for child in iterator_node.children:
-            # 1. CATTURA GAP
             if child.start_byte > cursor:
                 gap = content[cursor : child.start_byte]
                 glue_buffer_bytes += gap
                 if glue_start_byte is None: glue_start_byte = cursor
 
-            # 2. CLASSIFICAZIONE
-            child_type = child.type
-            is_glue = (
-                child_type in self.GLUE_TYPES or 
-                child_type.startswith('comment') or
-                (child_type == 'expression_statement' and child.child_count > 0 and child.children[0].type == 'string')
-            )
-            
-            is_barrier = (child_type in self.CONTAINER_TYPES)
+            is_glue = (child.type in self.GLUE_TYPES or child.type.startswith('comment'))
+            is_barrier = (child.type in self.CONTAINER_TYPES)
             
             child_bytes = content[child.start_byte : child.end_byte]
             
             if is_glue:
-                # === GLUE ===
                 glue_buffer_bytes += child_bytes
                 if glue_start_byte is None: glue_start_byte = child.start_byte
             
             elif is_barrier:
-                # === BARRIERA ===
                 flush_group()
-                
                 full_barrier_text = glue_buffer_bytes + child_bytes
                 barrier_start = glue_start_byte if glue_start_byte is not None else child.start_byte
                 barrier_end = child.end_byte
                 
+                # Override inheritance logic
+                override_to_pass = active_override_type if (is_breakdown_mode and not first_chunk_created_in_scope) else None
+
                 if len(full_barrier_text) > self.MAX_CHUNK_SIZE:
                     self._handle_large_node(
                         child, content, glue_buffer_bytes, barrier_start, file_path, file_id, current_active_parent,
-                        nodes, contents, relations
+                        nodes, contents, relations,
+                        inherited_override_type=override_to_pass
                     )
-                    # Nota: _handle_large_node gestisce internamente i figli, 
-                    # ma non aggiorna first_chunk_created_in_scope qui perché è un ramo parallelo.
+                    # Update state to prevent override from leaking to siblings
+                    if is_breakdown_mode and not first_chunk_created_in_scope:
+                         first_chunk_created_in_scope = True
                 else:
+                    # --- CALCOLO CANONICAL TYPE ---
+                    canonical_type = self._determine_effective_type(child)
+                    
+                    # Apply override if applicable
+                    if is_breakdown_mode and not first_chunk_created_in_scope and active_override_type:
+                        canonical_type = active_override_type
+
                     cid = self._create_chunk(
                         full_barrier_text, barrier_start, barrier_end, content,
-                        child_type, file_path, file_id, current_active_parent,
-                        nodes, contents, relations
+                        canonical_type, file_path, file_id, current_active_parent,
+                        nodes, contents, relations, tags=self._extract_tags(child)
                     )
                     register_chunk_creation(cid)
                 
-                glue_buffer_bytes = b""
-                glue_start_byte = None
+                glue_buffer_bytes = b""; glue_start_byte = None
 
             else:
-                # === ISTRUZIONE PICCOLA ===
                 if group_buffer_bytes == b"":
                     group_start_byte = glue_start_byte if glue_start_byte is not None else child.start_byte
                 
                 group_buffer_bytes += glue_buffer_bytes
-                glue_buffer_bytes = b""
-                glue_start_byte = None
-                
+                glue_buffer_bytes = b""; glue_start_byte = None
                 group_buffer_bytes += child_bytes
                 group_end_byte = child.end_byte
                 
-                # Controllo dimensione + Anti-Widow
                 if len(group_buffer_bytes) > self.MAX_CHUNK_SIZE:
                     remaining = iterator_node.end_byte - child.end_byte
-                    if remaining > self.CHUNK_TOLERANCE:
-                        flush_group()
+                    if remaining > self.CHUNK_TOLERANCE: flush_group()
 
             cursor = child.end_byte
 
-        # FINAL FLUSH
         flush_group()
         
         if cursor < iterator_node.end_byte:
@@ -247,18 +378,22 @@ class TreeSitterRepoParser:
              self._create_chunk(
                 glue_buffer_bytes, start, iterator_node.end_byte, content,
                 "comment_block", file_path, file_id, current_active_parent,
-                nodes, contents, relations
+                nodes, contents, relations, tags=[]
             )
 
     def _handle_large_node(self, node: Node, content: bytes, prefix: bytes, prefix_start: int, 
                            file_path: str, file_id: str, parent_chunk_id: Optional[str],
-                           nodes: List, contents: Dict, relations: List):
+                           nodes: List, contents: Dict, relations: List,
+                           inherited_override_type: Optional[str] = None):
         
         target_node = node
         if node.type == 'decorated_definition':
             definition = node.child_by_field_name('definition')
             if definition: target_node = definition
-        
+        elif node.type == 'export_statement':
+            d = node.child_by_field_name('declaration') or node.child_by_field_name('value')
+            if d: target_node = d
+
         body_node = target_node.child_by_field_name("body") or target_node.child_by_field_name("block")
         
         if not body_node:
@@ -270,76 +405,95 @@ class TreeSitterRepoParser:
 
         header_node_text = content[node.start_byte : body_node.start_byte]
         full_header = prefix + header_node_text
-        header_start = node.start_byte - len(prefix)
         
         HEADER_SPLIT_THRESHOLD = self.MAX_CHUNK_SIZE * 0.6 
         is_header_huge = (len(full_header) > HEADER_SPLIT_THRESHOLD)
         
         if is_header_huge:
             # Header Separato -> Diventa Parent Esplicito
+            # Calculate type for the header chunk
+            my_type = self._determine_effective_type(node)
+            
+            header_type = inherited_override_type if inherited_override_type else f"{my_type}_signature"
+
             header_id = self._create_chunk(
                 full_header, prefix_start, body_node.start_byte, content,
-                f"{node.type}_signature", file_path, file_id, parent_chunk_id,
-                nodes, contents, relations
+                header_type, file_path, file_id, parent_chunk_id,
+                nodes, contents, relations, tags=self._extract_tags(node)
             )
             self._process_scope(target_node, content, file_path, file_id, header_id, nodes, contents, relations)
         else:
             # Flow-Down -> Primo figlio diventa Parent (Surrogate)
+            # Determine what override to pass down
+            my_type = self._determine_effective_type(node)
+            next_override = inherited_override_type if inherited_override_type else my_type
+
             self._process_scope(
                 target_node, content, file_path, file_id, parent_chunk_id, 
                 nodes, contents, relations, 
                 initial_glue=full_header, initial_glue_start=prefix_start,
-                is_breakdown_mode=True 
+                is_breakdown_mode=True,
+                active_override_type=next_override
             )
 
     def _create_hard_split(self, text_bytes: bytes, start_offset: int, full_content: bytes,
                            fpath: str, fid: str, pid: str,
                            nodes: List, contents: Dict, relations: List):
-        total = len(text_bytes)
-        cursor = 0
+        total = len(text_bytes); cursor = 0
         first_fragment_id = None
         
         while cursor < total:
             end = min(cursor + self.MAX_CHUNK_SIZE, total)
             if end < total:
                 nl = text_bytes.rfind(b'\n', cursor, end)
-                if nl > cursor + (self.MAX_CHUNK_SIZE // 2):
-                    end = nl + 1
-            
+                if nl > cursor + (self.MAX_CHUNK_SIZE // 2): end = nl + 1
             chunk = text_bytes[cursor:end]
-            current_pid = pid
-            if first_fragment_id and pid:
-                current_pid = first_fragment_id
-
+            current_pid = pid if not first_fragment_id else first_fragment_id
+            
             cid = self._create_chunk(
                 chunk, start_offset + cursor, start_offset + end, full_content,
-                "code_fragment", fpath, fid, current_pid, nodes, contents, relations
+                "code_fragment", fpath, fid, current_pid, nodes, contents, relations, tags=[]
             )
-            
-            if first_fragment_id is None:
-                first_fragment_id = cid
-                
+            if not first_fragment_id: first_fragment_id = cid
             cursor = end
 
     def _create_chunk(self, text_bytes: bytes, s_byte: int, e_byte: int, full_content: bytes,
                       ctype: str, fpath: str, fid: str, pid: Optional[str], 
-                      nodes: List, contents: Dict, relations: List) -> str:
+                      nodes: List, contents: Dict, relations: List,
+                      tags: List[str] = None) -> Optional[str]:
+        """
+        Crea un ChunkNode + ChunkContent.
         
+        - ctype: tipo semantico specifico (es. 'function_definition', 'class_definition', 'code_block')
+        - ChunkNode.type: categoria macro ('function', 'class', 'method', 'block', ecc.)
+        - metadata.original_type: mantiene il tipo originale specifico.
+        - metadata.tags: async/static/exported... se presenti.
+        """
         text = text_bytes.decode('utf-8', 'ignore')
         if not text.strip(): return None
         
         h = hashlib.sha256(text.encode('utf-8')).hexdigest()
         if h not in contents: contents[h] = ChunkContent(h, text)
-        
         cid = str(uuid.uuid4())
-        
         if s_byte < 0: s_byte = 0
         s_line = full_content[:s_byte].count(b'\n') + 1
         e_line = s_line + text.count('\n')
         
+        # Canonicalizziamo il tipo in una categoria macro leggibile
+        # Normalizza tipi signature/header prima di mappare il kind
+        base_ctype = ctype
+        if ctype.endswith("_signature") or ctype.endswith("_header"):
+            base_ctype = ctype.replace("_signature", "").replace("_header", "")
+        
+        kind = self.CHUNK_KIND_MAP.get(base_ctype, "block")
+
+        metadata = {"original_type": ctype}
+        if tags: metadata["tags"] = tags
+
         nodes.append(ChunkNode(
-            cid, fid, fpath, h, ctype,
-            s_line, e_line, [s_byte, e_byte]
+            cid, fid, fpath, h, kind,
+            s_line, e_line, [s_byte, e_byte],
+            metadata=metadata
         ))
         
         if pid:

@@ -170,12 +170,10 @@ class SCIPRunner:
                             cwd=project_root, check=False, capture_output=True, env=env
                         )
                         
-                        # Controllo Errori Aggressivo
                         if res.returncode != 0:
                             logger.error(f"[SCIP FAIL] {indexer} failed (code {res.returncode}):")
                             logger.error(res.stderr.decode('utf-8', errors='replace'))
                         
-                        # Check se il file esiste ed è valido
                         if not os.path.exists(tmp_idx) or os.path.getsize(tmp_idx) < 10:
                             logger.warning(f"[SCIP WARN] Indice vuoto o mancante per {project_root}")
                             continue
@@ -190,12 +188,11 @@ class SCIPRunner:
                         for line in proc.stdout:
                             if line.strip():
                                 try:
-                                    # Gestione sia JSON Lines che JSON Array
                                     payload = json.loads(line)
                                     docs = []
-                                    if isinstance(payload, list): docs = payload # Array
-                                    elif "documents" in payload: docs = payload["documents"] # Wrapper object
-                                    else: docs = [payload] # Single doc (JSONL)
+                                    if isinstance(payload, list): docs = payload
+                                    elif "documents" in payload: docs = payload["documents"]
+                                    else: docs = [payload]
                                     
                                     for doc in docs:
                                         wrapper = {"project_root": project_root, "document": doc}
@@ -237,7 +234,7 @@ class SCIPIndexer(BaseGraphIndexer):
     def stream_relations_from_file(self, json_path: str, exclude_definitions: bool = True, exclude_externals: bool = False) -> Generator[CodeRelation, None, None]:
         symbol_table = DiskSymbolTable()
         try:
-            # FASE 1
+            # FASE 1: Popolamento definizioni (Invariata)
             with open(json_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     if not line.strip(): continue
@@ -254,7 +251,7 @@ class SCIPIndexer(BaseGraphIndexer):
                     except ValueError: pass
             symbol_table.flush()
 
-            # FASE 2
+            # FASE 2: Generazione Relazioni (Arricchita)
             with open(json_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     if not line.strip(): continue
@@ -263,44 +260,153 @@ class SCIPIndexer(BaseGraphIndexer):
                         if "relative_path" in doc and root:
                             abs_p = os.path.join(root, doc["relative_path"])
                             norm_p = sys.intern(os.path.relpath(abs_p, self.repo_path))
-                            if not norm_p.startswith(".."):
-                                for o in doc.get("occurrences", []):
-                                    roles = o.get("symbol_roles", 0)
-                                    if exclude_definitions and (roles & SCIP_ROLE_DEFINITION): continue
-                                    sym = o["symbol"]
-                                    tgt_info = symbol_table.get(sym, norm_p)
-                                    
-                                    ext = False
-                                    if tgt_info: tgt, tgt_rng = tgt_info
-                                    elif not sym.startswith("local"):
-                                        ext = True
-                                        parts = sym.split()
-                                        tgt = sys.intern(f"EXTERNAL::{parts[2]}::{parts[3]}") if len(parts)>=4 else "EXTERNAL::UNKNOWN"
-                                        tgt_rng = []
-                                    else: continue
+                            
+                            if norm_p.startswith(".."): continue
 
-                                    if exclude_externals and ext: continue
+                            for o in doc.get("occurrences", []):
+                                roles = o.get("symbol_roles", 0)
+                                if exclude_definitions and (roles & SCIP_ROLE_DEFINITION): continue
+                                
+                                raw_sym = o["symbol"]
+                                is_local_id = raw_sym.startswith("local")
+                                
+                                tgt_info = symbol_table.get(raw_sym, norm_p)
+                                
+                                ext = False
+                                if tgt_info: 
+                                    tgt, tgt_rng = tgt_info
+                                elif not is_local_id:
+                                    ext = True
+                                    parts = raw_sym.split()
+                                    tgt = sys.intern(f"EXTERNAL::{parts[2]}::{parts[3]}") if len(parts)>=4 else "EXTERNAL::UNKNOWN"
+                                    tgt_rng = []
+                                else: 
+                                    continue 
 
-                                    verb = get_relation_verb(roles)
-                                    s_bytes = self._bytes(norm_p, o["range"])
-                                    t_bytes = None if ext else self._bytes(tgt, tgt_rng)
+                                if exclude_externals and ext: continue
 
-                                    yield CodeRelation(
-                                        norm_p, tgt, verb,
-                                        source_line=o["range"][0]+1, target_line=tgt_rng[0]+1 if not ext else 1,
-                                        source_byte_range=s_bytes, target_byte_range=t_bytes,
-                                        metadata={"tool": self.INDEXER_NAME, "description": self._make_desc(norm_p, tgt, verb, self._clean_symbol(sym), ext), "is_external": ext}
-                                    )
+                                verb = get_relation_verb(roles)
+                                s_bytes = self._bytes(norm_p, o["range"])
+                                t_bytes = None if ext else self._bytes(tgt, tgt_rng)
+                                
+                                # --- FIX NOME SIMBOLO ---
+                                if is_local_id:
+                                    # Simbolo locale: leggiamo il nome vero dal codice
+                                    real_name = self._extract_symbol_name(norm_p, o["range"])
+                                    clean_sym = sys.intern(real_name)
+                                    sym_type = "variable" 
+                                else:
+                                    # Simbolo globale: pulizia intelligente
+                                    clean_sym = self._clean_symbol(raw_sym)
+                                    sym_type = self._infer_symbol_type(raw_sym)
+
+                                if not clean_sym or clean_sym == "unknown": continue
+
+                                yield CodeRelation(
+                                    norm_p, tgt, verb,
+                                    source_line=o["range"][0]+1, target_line=tgt_rng[0]+1 if not ext else 1,
+                                    source_byte_range=s_bytes, target_byte_range=t_bytes,
+                                    metadata={
+                                        "tool": self.INDEXER_NAME,
+                                        "description": self._make_desc(norm_p, tgt, verb, clean_sym, ext),
+                                        "is_external": ext,
+                                        "symbol": clean_sym,
+                                        "symbol_type": sym_type,
+                                        "edge_category": "semantic"
+                                    }
+                                )
                     except ValueError: pass
         finally: symbol_table.close()
 
+    @lru_cache(maxsize=128)
+    def _get_file_content_cached(self, rel_path: str) -> Optional[List[str]]:
+        """Cache per lettura file sorgenti (necessaria per simboli locali)."""
+        abs_path = os.path.join(self.repo_path, rel_path)
+        if not os.path.exists(abs_path): return None
+        try:
+            # Skip file enormi per performance
+            if os.path.getsize(abs_path) > 1024 * 1024: return None 
+            with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                return f.readlines()
+        except: return None
+
+    def _extract_symbol_name(self, rel_path: str, rng: List[int]) -> str:
+        """Estrae il nome variabile dal codice sorgente dato il range."""
+        lines = self._get_file_content_cached(rel_path)
+        if not lines: return "unknown"
+        try:
+            sl, sc = rng[0], rng[1]
+            el, ec = (sl, rng[2]) if len(rng) == 3 else (rng[2], rng[3])
+            
+            if sl >= len(lines): return "unknown"
+            if sl == el:
+                line = lines[sl]
+                if sc >= len(line) or ec > len(line): return "unknown"
+                return line[sc:ec]
+            return "unknown" 
+        except: return "unknown"
+
     def _clean_symbol(self, raw: str) -> str:
+        """
+        Pulisce il simbolo rimuovendo path file e path modulo (package).
+        Input:  '.../server.py/debug_tool.server.DbAdapter#NodeView.'
+        Output: 'DbAdapter.NodeView'
+        """
         parts = raw.split()
         if not parts: return sys.intern(raw)
-        cand = parts[-1].rstrip('.:`')
-        if not cand or (cand[0].isdigit() and len(parts) > 1): cand = parts[-2].rstrip('.:`')
-        return sys.intern(cand.replace('/', '.').replace('`', '')) if cand else "unknown"
+        
+        descriptor = parts[-1]
+        
+        # 1. Strip File Extension Prefix (es. .../server.py/)
+        common_extensions = ['.py', '.ts', '.js', '.jsx', '.tsx', '.java', '.go', '.rs', '.php', '.c', '.cpp', '.h']
+        for ext in common_extensions:
+            token = ext + "/"
+            if token in descriptor:
+                split_idx = descriptor.rfind(token)
+                if split_idx != -1:
+                    descriptor = descriptor[split_idx + len(token):]
+                    break
+        
+        # 2. Normalizzazione caratteri
+        clean = descriptor.replace('`', '').replace('/', '.').replace('#', '.')
+        clean = clean.replace('().', '.').replace('()', '').rstrip('.')
+        while '..' in clean: clean = clean.replace('..', '.')
 
+        # 3. Strip Module Path (Heuristic: drop leading lowercase parts)
+        # Es: code_graph_indexer.graph.base.BaseGraphIndexer -> BaseGraphIndexer
+        if '.' in clean:
+            parts = clean.split('.')
+            start_idx = 0
+            for i, p in enumerate(parts):
+                # Se è l'ultimo, lo teniamo (es. funzione top-level 'my_func')
+                if i == len(parts) - 1: 
+                    start_idx = i
+                    break
+                # Se inizia con Maiuscola, è una Classe/Tipo -> Inizio parte rilevante
+                if p and p[0].isupper():
+                    start_idx = i
+                    break
+                # Se è minuscolo, assumiamo sia un package/modulo -> Drop
+            
+            clean = ".".join(parts[start_idx:])
+
+        return sys.intern(clean)
+
+    def _infer_symbol_type(self, raw: str) -> str:
+        """Deduce il tipo dal descrittore SCIP grezzo."""
+        parts = raw.split()
+        if not parts: return "unknown"
+        desc = parts[-1]
+        
+        if desc.endswith(").") or desc.endswith(")"): return "method"
+        if "(__init__)" in desc or "constructor" in desc.lower(): return "constructor"
+        if desc.endswith("."): return "variable" # SCIP terms
+        if "$" in desc: return "parameter"
+        if desc.endswith("#"): return "class" # SCIP types
+            
+        return "symbol"
+    
+    # ... _make_desc, _lines, _bytes rimangono uguali ...
     def _make_desc(self, src, tgt, verb, lbl, ext) -> str:
         src_n = os.path.basename(src)
         if ext:

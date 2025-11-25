@@ -253,7 +253,43 @@ button:hover {
 }
 
 .chunk:hover {
-    background: rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.1) !important;
+    /* Override type colors on hover */
+    outline: 1px solid #666;
+}
+
+.chunk.type-class {
+    background: rgba(0, 140, 255, 0.25);
+    /* Vivid Blue */
+    border: 1px solid #008cff;
+    box-shadow: 0 0 10px rgba(0, 140, 255, 0.1);
+    /* Glow effect */
+}
+
+.chunk.type-func {
+    background: rgba(255, 180, 0, 0.2);
+    /* Vivid Orange/Gold */
+    border: 1px solid #ffb400;
+    box-shadow: 0 0 10px rgba(255, 180, 0, 0.1);
+    /* Glow effect */
+}
+
+/* Label for chunk type */
+.chunk::before {
+    content: attr(data-type);
+    font-size: 10px;
+    font-weight: bold;
+    color: #fff;
+    background-color: rgba(0, 0, 0, 0.6);
+    padding: 2px 5px;
+    border-radius: 3px;
+    margin-right: 8px;
+    vertical-align: middle;
+    text-transform: uppercase;
+    font-family: 'Segoe UI', sans-serif;
+    pointer-events: none;
+    display: inline-block;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
 }
 
 /* Scrollbar */

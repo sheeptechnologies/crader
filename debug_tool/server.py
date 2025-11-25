@@ -38,6 +38,7 @@ class DbAdapter:
         start_line: int
         end_line: int
         byte_range: List[int]
+        metadata: Dict[str, Any]
 
     @staticmethod
     def adapt_nodes(db_nodes: List[Dict]) -> List[Any]:
@@ -55,7 +56,8 @@ class DbAdapter:
                 type=n['type'],
                 start_line=n.get('start_line', 0),
                 end_line=n.get('end_line', 0),
-                byte_range=[b_start, b_end]
+                byte_range=[b_start, b_end],
+                metadata=n.get('metadata', {})
             ))
         return res
 
@@ -117,8 +119,8 @@ class HtmlGenerator:
                 if "class" in node.type: cls += " type-class"
                 elif "function" in node.type or "method" in node.type: cls += " type-func"
                 
-                # Add data-id attribute for JS to pick up
-                html_parts.append(f'<span class="{cls}" data-id="{node.id}" onclick="window.selectChunk(\'{node.id}\', event)">')
+                # Add data-id and data-type attributes for JS and CSS
+                html_parts.append(f'<span class="{cls}" data-id="{node.id}" data-type="{node.type}" onclick="window.selectChunk(\'{node.id}\', event)">')
             else: # End
                 html_parts.append('</span>')
             last_idx = idx

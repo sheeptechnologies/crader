@@ -26,6 +26,8 @@ class ChunkNode:
     start_line: int
     end_line: int
     byte_range: List[int]
+    # Contiene tag, modificatori e tipo originale (es. {"tags": ["async"], "original_type": "method_definition"})
+    metadata: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
