@@ -184,21 +184,29 @@ class SqliteGraphStorage(GraphStorage):
 
     # --- BATCH OPTIMIZATION ---
 
-    def get_nodes_cursor(self, repo_id: str = None) -> Generator[Dict[str, Any], None, None]:
-        """Stream leggero di candidati. Supporta filtro opzionale per repo_id."""
+    def get_nodes_cursor(self, repo_id: str = None, branch: str = None) -> Generator[Dict[str, Any], None, None]:
+        """Stream di candidati filtrato per repo e branch."""
         iter_cursor = self._conn.cursor()
         
+        # Aggiungiamo JOIN con repositories per controllare lo stato del branch
         base_query = """
             SELECT n.id, n.type, n.file_path, n.chunk_hash, n.start_line, n.end_line, 
                    f.repo_id, f.language, f.category
             FROM nodes n
             LEFT JOIN files f ON n.file_path = f.path 
+            LEFT JOIN repositories r ON f.repo_id = r.id  -- <--- JOIN NUOVA
             WHERE n.type NOT IN ('external_library', 'program', 'module')
         """
+        
         params = []
         if repo_id:
             base_query += " AND f.repo_id = ?"
             params.append(repo_id)
+            
+        if branch:
+            # Filtro sul branch attivo nella tabella repositories
+            base_query += " AND r.branch = ?"
+            params.append(branch)
             
         iter_cursor.execute(base_query, params)
         if iter_cursor.description:
@@ -206,7 +214,7 @@ class SqliteGraphStorage(GraphStorage):
             for row in iter_cursor:
                 yield dict(zip(cols, row))
         iter_cursor.close()
-
+        
     def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]:
         if not chunk_hashes: return {}
         BATCH_SIZE = 900

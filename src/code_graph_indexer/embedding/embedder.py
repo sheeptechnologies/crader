@@ -14,17 +14,19 @@ class CodeEmbedder:
         self.storage = storage
         self.provider = provider
 
-    def run_indexing(self, batch_size: int = 32, yield_debug_docs: bool = False) -> Generator[Dict[str, Any], None, None]:
+    def run_indexing(self, repo_id: str, branch: str, batch_size: int = 32, yield_debug_docs: bool = False) -> Generator[Dict[str, Any], None, None]:
         """
-        Esegue l'embedding.
+        Esegue l'embedding filtrando per repo_id e branch.
         
         Args:
+            repo_id: ID della repository target.
+            branch: Branch corrente per filtrare e taggare i vettori.
             batch_size: Dimensione del batch per l'API.
             yield_debug_docs: Se True, yielda anche i documenti generati (PER DEBUG/TEST).
                               Se False (Prod), yielda solo lo stato di avanzamento.
         """
-        # 1. Cursore leggero (Query 1)
-        nodes_cursor = self.storage.get_nodes_cursor()
+        # 1. Cursore filtrato per repo e branch (Query ottimizzata)
+        nodes_cursor = self.storage.get_nodes_cursor(repo_id=repo_id, branch=branch)
         
         current_batch = []
         processed_count = 0
@@ -33,8 +35,8 @@ class CodeEmbedder:
             current_batch.append(node)
             
             if len(current_batch) >= batch_size:
-                # Processa e salva (Passiamo il flag debug)
-                saved_docs = self._process_and_save(current_batch, debug=yield_debug_docs)
+                # Processa e salva (Passiamo repo_id, branch e flag debug)
+                saved_docs = self._process_and_save(current_batch, repo_id, branch, debug=yield_debug_docs)
                 
                 # Aggiorna contatori
                 processed_count += len(current_batch)
@@ -50,7 +52,7 @@ class CodeEmbedder:
         
         # Flush finale
         if current_batch:
-            saved_docs = self._process_and_save(current_batch, debug=yield_debug_docs)
+            saved_docs = self._process_and_save(current_batch, repo_id, branch, debug=yield_debug_docs)
             processed_count += len(current_batch)
             
             yield {"status": "completed", "processed": processed_count}
@@ -58,7 +60,7 @@ class CodeEmbedder:
             if yield_debug_docs:
                 for doc in saved_docs: yield doc
 
-    def _process_and_save(self, nodes: List[Dict], debug: bool = False) -> List[Dict]:
+    def _process_and_save(self, nodes: List[Dict], repo_id: str, branch: str, debug: bool = False) -> List[Dict]:
         """
         Orchestra Arricchimento -> Embedding -> Salvataggio.
         """
@@ -107,12 +109,12 @@ class CodeEmbedder:
             doc = {
                 "id": str(uuid.uuid4()),
                 "chunk_id": node['id'],
-                "repo_id": file_info.get('repo_id'),
+                "repo_id": repo_id,         # Usiamo il parametro passato
                 "file_path": node.get('file_path'),
                 "directory": os.path.dirname(node.get('file_path', '')),
                 "language": file_info.get('language'),
                 "category": file_info.get('category'),
-                "branch": "main",
+                "branch": branch,           # Usiamo il parametro passato (Dynamic Branch)
                 "chunk_type": node.get('type'),
                 "start_line": node.get('start_line'),
                 "end_line": node.get('end_line'),
@@ -122,7 +124,7 @@ class CodeEmbedder:
                 "created_at": datetime.datetime.utcnow().isoformat()
             }
             
-            # [MODIFICA] Aggiungi contesto solo se in debug
+            # Aggiungi contesto solo se in debug
             if debug:
                 doc["_debug_context"] = full_text
                 

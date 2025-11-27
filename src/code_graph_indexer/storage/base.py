@@ -49,8 +49,8 @@ class GraphStorage(ABC):
 
     # --- READ (Batch & Optimization) ---
     @abstractmethod
-    def get_nodes_cursor(self, repo_id: str = None) -> Generator[Dict[str, Any], None, None]: pass
-
+    def get_nodes_cursor(self, repo_id: str = None, branch: str = None) -> Generator[Dict[str, Any], None, None]: pass
+    
     @abstractmethod
     def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]: pass
 

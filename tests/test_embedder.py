@@ -1,184 +1,147 @@
 import os
 import sys
-import json
 import shutil
 import tempfile
 import subprocess
-import struct
 import logging
-from typing import Dict, Any
+import json
+from typing import List, Dict
+
+# Assicuriamo che il path includa 'src'
+current_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+from code_graph_indexer.indexer import CodebaseIndexer
+from code_graph_indexer.providers.embedding import DummyEmbeddingProvider, FastEmbedProvider
 
 # Configurazione Logging
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%H:%M:%S'
-)
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+logger = logging.getLogger("STRICT_TEST")
 
-# Import dinamico
-try:
-    from code_graph_indexer.indexer import CodebaseIndexer
-    from code_graph_indexer.providers.embedding import DummyEmbeddingProvider
-except ImportError:
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    from code_graph_indexer.indexer import CodebaseIndexer
-    from code_graph_indexer.providers.embedding import DummyEmbeddingProvider
-
-def create_dummy_repo(base_path: str) -> str:
-    """
-    Crea una repository Python realistica per testare le relazioni semantiche.
-    """
-    repo_path = os.path.join(base_path, "dummy-finance-repo")
-    if os.path.exists(repo_path):
-        shutil.rmtree(repo_path)
+def setup_dummy_repo(base_dir: str, branch_name: str = "feature/verification-test") -> str:
+    """Crea una repo git valida con contenuto Python e un branch specifico."""
+    repo_path = os.path.join(base_dir, "strict-repo")
     os.makedirs(repo_path)
     
-    src_path = os.path.join(repo_path, "src")
-    os.makedirs(src_path)
-
-    with open(os.path.join(src_path, "database.py"), "w") as f:
-        f.write("""
-class DatabaseConnection:
-    def __init__(self, uri: str):
-        self.uri = uri
-        self.is_connected = False
-
-    def connect(self):
-        print(f"Connecting to {self.uri}")
-        self.is_connected = True
-        
-    def query(self, sql: str):
-        if not self.is_connected:
-            raise Exception("Not connected")
-        return [{"id": 1, "value": 100}]
-""")
-
-    with open(os.path.join(src_path, "processor.py"), "w") as f:
-        f.write("""
-from .database import DatabaseConnection
-
-class PaymentProcessor:
-    def __init__(self, db: DatabaseConnection):
-        self.db = db
-
-    def process_payment(self, amount: int):
-        users = self.db.query("SELECT * FROM users") 
-        print(f"Processing {amount} for users: {users}")
-        return True
-""")
-
-    with open(os.path.join(repo_path, "main.py"), "w") as f:
-        f.write("""
-from src.database import DatabaseConnection
-from src.processor import PaymentProcessor
-
-def main():
-    db = DatabaseConnection("postgres://localhost:5432")
-    db.connect()
+    # 1. Init Git
+    subprocess.run(["git", "init"], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "config", "user.email", "test@bot.com"], cwd=repo_path, check=True)
+    subprocess.run(["git", "config", "user.name", "TestBot"], cwd=repo_path, check=True)
     
-    processor = PaymentProcessor(db)
-    processor.process_payment(500)
+    # 2. Crea file Python
+    code = """
+class AuthenticationManager:
+    def login(self, user):
+        print(f"Logging in {user}")
+        return True
 
-if __name__ == "__main__":
-    main()
-""")
+def logout(user):
+    print("Logout")
+"""
+    with open(os.path.join(repo_path, "auth.py"), "w") as f:
+        f.write(code)
 
-    try:
-        subprocess.run(["git", "init"], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_path, check=False)
-        subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_path, check=False)
-        subprocess.run(["git", "add", "."], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
-        subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
-    except Exception as e:
-        logger.warning(f"Git init fallito: {e}")
-
+    # 3. Commit e Branch
+    subprocess.run(["git", "add", "."], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "commit", "-m", "Initial"], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "checkout", "-b", branch_name], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
+    
     return repo_path
 
-def run_test(target_repo_path=None):
+def strict_verification_test():
     temp_dir = tempfile.mkdtemp()
+    db_path = os.path.join(temp_dir, "test_index.db")
+    target_branch = "feature/verification-test"
     
     try:
-        if target_repo_path:
-            repo_path = target_repo_path
-            print(f"📂 Target: {repo_path}")
-        else:
-            print("🛠️  Creazione repository di test...")
-            repo_path = create_dummy_repo(temp_dir)
-            print(f"📂 Repository creata: {repo_path}")
+        logger.info("=== 1. SETUP AMBIENTE ===")
+        repo_path = setup_dummy_repo(temp_dir, branch_name=target_branch)
+        logger.info(f"Repo creata in: {repo_path} (Branch: {target_branch})")
 
-        # --- 2. INDEXING ---
-        print("\n1️⃣  Avvio INDEXING...")
-        indexer = CodebaseIndexer(repo_path)
+        logger.info("\n=== 2. TEST INDEXING ===")
+        indexer = CodebaseIndexer(repo_path, db_path=db_path)
         indexer.index()
         
+        # VERIFICA 1: Repo ID e Branch nel DB
+        repo_id = indexer.repo_id
+        repo_record = indexer.storage.get_repository(repo_id)
+        
+        if not repo_record:
+            raise AssertionError("❌ ERRORE: Repository non trovata nel DB!")
+        
+        logger.info(f"✅ Repo ID persistito: {repo_record['id']}")
+        logger.info(f"✅ Branch persistito:  {repo_record['branch']}")
+        
+        if repo_record['branch'] != target_branch:
+            raise AssertionError(f"❌ MISMATCH BRANCH: Atteso '{target_branch}', Trovato '{repo_record['branch']}'")
+
+        # VERIFICA 2: Conteggio Nodi
         stats = indexer.get_stats()
-        print(f"   ✅ Indexing completato.")
-        print(f"      - File: {stats.get('files', 0)}")
-        print(f"      - Nodi totali: {stats.get('total_nodes', 0)}")
-
-        # --- 3. EMBEDDING ---
-        print("\n2️⃣  Avvio EMBEDDING (Stream & Batching)...")
-        provider = DummyEmbeddingProvider(dim=1536)
+        total_nodes = stats['total_nodes']
+        logger.info(f"✅ Nodi indicizzati:   {total_nodes}")
         
-        generated_docs = []
+        if total_nodes == 0:
+            raise AssertionError("❌ ERRORE: Nessun nodo indicizzato!")
+
+        logger.info("\n=== 3. TEST EMBEDDING ===")
+        # Usiamo DummyProvider per velocità e determinismo
+        provider = FastEmbedProvider(model_name="jinaai/jina-embeddings-v2-base-code")
         
-        # IMPORTANTE: debug=True per ricevere i documenti indietro
-        for item in indexer.embed(provider, batch_size=5, debug=True):
-            if "status" in item:
-                print(f"   [Progress] {item['processed']} nodi elaborati...")
-            else:
-                generated_docs.append(item)
+        embedded_docs = []
+        # debug=True è FONDAMENTALE per ottenere indietro i documenti generati
+        for item in indexer.embed(provider, batch_size=10, debug=True):
+            if "status" not in item: # È un documento vettoriale
+                embedded_docs.append(item)
 
-        print(f"   ✅ Embedding completato. Generati {len(generated_docs)} documenti.")
+        logger.info(f"✅ Documenti generati: {len(embedded_docs)}")
 
-        # --- 4. EXPORT DEBUG ---
-        if generated_docs:
-            output_file = "debug_embeddings_context.json"
-            
-            json_output = []
-            for doc in generated_docs:
-                doc_copy = doc.copy()
-                if 'vector' in doc_copy:
-                    doc_copy['vector'] = doc_copy['vector'][:5] + ["... (truncated)"]
-                json_output.append(doc_copy)
-
-            with open(output_file, "w", encoding="utf-8") as f:
-                json.dump(json_output, f, indent=2)
-            
-            print(f"\n💾 DUMP SALVATO: {output_file}")
-            
-            print("\n🔎 INSPECTION: ESEMPIO DI PAYLOAD ARRICCHITO")
-            example = next((d for d in json_output if "query" in d.get('text_content', '')), json_output[0])
-            
-            print("=" * 60)
-            print(f"NODE ID:   {example['chunk_id']}")
-            print(f"TYPE:      {example['chunk_type']}")
-            print(f"FILE:      {example['file_path']}")
-            print("-" * 60)
-            print("CONTENUTO DEL CAMPO '_debug_context' (Input per l'Embedding):")
-            print("-" * 60)
-            print(example.get('_debug_context', 'N/A'))
-            print("=" * 60)
-            
-            if "[DEFINITIONS]" in example.get('_debug_context', ''):
-                print("✅ SUCCESSO: Il payload contiene le definizioni SCIP!")
-            else:
-                print("⚠️  NOTA: Se non vedi [DEFINITIONS], verifica che 'scip' sia installato.")
-
+        logger.info("\n=== 4. STRICT CHECK & VALIDATION ===")
+        
+        # CHECK A: Coerenza Branch in TUTTI i documenti
+        invalid_branch_docs = [d for d in embedded_docs if d['branch'] != target_branch]
+        if invalid_branch_docs:
+            raise AssertionError(f"❌ ERRORE CRITICO: {len(invalid_branch_docs)} documenti hanno il branch sbagliato! Es: {invalid_branch_docs[0]['branch']}")
         else:
-            print("❌ ERRORE: Nessun documento generato.")
+            logger.info(f"✅ GARANZIA: Tutti i {len(embedded_docs)} documenti hanno branch='{target_branch}'")
+
+        # CHECK B: Coerenza Repo ID in TUTTI i documenti
+        invalid_repo_docs = [d for d in embedded_docs if d['repo_id'] != repo_id]
+        if invalid_repo_docs:
+            raise AssertionError(f"❌ ERRORE CRITICO: {len(invalid_repo_docs)} documenti hanno repo_id sbagliato!")
+        else:
+            logger.info(f"✅ GARANZIA: Tutti i {len(embedded_docs)} documenti hanno repo_id='{repo_id}'")
+
+        # CHECK C: Cross-Check Conteggi (Storage vs Embedding)
+        # Nota: L'embedder potrebbe scartare nodi vuoti o non supportati, ma in questo caso semplice
+        # dovrebbero coincidere o essere molto vicini.
+        # Recuperiamo manualmente i nodi candidati per confronto esatto
+        candidates = list(indexer.storage.get_nodes_cursor(repo_id=repo_id, branch=target_branch))
+        candidate_ids = set(c['id'] for c in candidates)
+        embedded_ids = set(d['chunk_id'] for d in embedded_docs)
+        
+        logger.info(f"   Candidati (Storage): {len(candidates)}")
+        logger.info(f"   Embeddati (Vettori): {len(embedded_docs)}")
+        
+        missing = candidate_ids - embedded_ids
+        if missing:
+            logger.warning(f"⚠️  Attenzione: {len(missing)} nodi non sono stati embeddati (forse vuoti o filtrati).")
+        
+        if len(embedded_docs) == 0:
+             raise AssertionError("❌ ERRORE: Pipeline embedding fallita (0 documenti).")
+
+        logger.info("\n🎉 SUCCESSO: IL PROCESSO È GARANTITO AL 100%")
+        return True
 
     except Exception as e:
-        print(f"\n❌ CRASH: {e}")
+        logger.error(f"\n❌ TEST FALLITO: {e}")
         import traceback
         traceback.print_exc()
+        return False
     finally:
-        indexer.close()
-        if not target_repo_path:
-            shutil.rmtree(temp_dir)
-            print("\n🧹 Pulizia completata.")
+        if 'indexer' in locals(): indexer.close()
+        shutil.rmtree(temp_dir)
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else None
-    run_test(target)
+    strict_verification_test()

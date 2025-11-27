@@ -22,6 +22,11 @@ class CodebaseIndexer:
             raise ValueError(f"Path not found: {self.repo_path}")
         
         self.parser = TreeSitterRepoParser(self.repo_path)
+        
+        # Recuperiamo e salviamo subito il REPO ID
+        repo_info = self.parser.metadata_provider.get_repo_info()
+        self.repo_id = repo_info['repo_id']
+        
         self.scip_indexer = SCIPIndexer(self.repo_path)
         self.scip_runner = SCIPRunner(self.repo_path)
         
@@ -35,19 +40,18 @@ class CodebaseIndexer:
         :param force: Se True, forza la re-indicizzazione anche se la repo è già aggiornata.
         """
         logger.info(f"🚀 Indexing: {self.repo_path}")
-        
+        logger.info(f"📋 Repo ID: {self.repo_id}")
+
         # 1. Recupera Info Repo (ID canonico)
-        # Nota: TreeSitterRepoParser internamente ha già istanziato un MetadataProvider,
-        # ma per pulizia ne usiamo uno qui o accediamo a quello del parser.
-        # Accediamo a quello del parser per coerenza.
+        # Nota: Usiamo self.repo_id calcolato in init, ma recuperiamo 
+        # info fresche (come il commit) dal parser.
         repo_info = self.parser.metadata_provider.get_repo_info()
-        repo_id = repo_info['repo_id']
         current_commit = repo_info['commit_hash']
         
-        logger.info(f"📋 Repo ID: {repo_id} | Commit: {current_commit}")
+        logger.info(f"📋 Commit: {current_commit}")
 
         # 2. Check Stato Esistente (Persistenza)
-        existing_repo = self.storage.get_repository(repo_id)
+        existing_repo = self.storage.get_repository(self.repo_id)
         
         if existing_repo and not force:
             last_commit = existing_repo.get('last_commit')
@@ -62,7 +66,7 @@ class CodebaseIndexer:
         
         # 3. Registra Inizio Lavoro
         self.storage.register_repository(
-            repo_id, repo_info['name'], repo_info['url'], repo_info['branch'], current_commit
+            self.repo_id, repo_info['name'], repo_info['url'], repo_info['branch'], current_commit
         )
 
         try:
@@ -99,20 +103,35 @@ class CodebaseIndexer:
             self.storage.commit()
             
             # 4. Aggiorna Stato Finale
-            self.storage.update_repository_status(repo_id, 'completed', current_commit)
+            self.storage.update_repository_status(self.repo_id, 'completed', current_commit)
             
             stats = self.storage.get_stats()
             logger.info(f"✅ Indexing completato. Stats: {stats}")
 
         except Exception as e:
             logger.error(f"❌ Indexing fallito: {e}")
-            self.storage.update_repository_status(repo_id, 'failed', current_commit)
+            self.storage.update_repository_status(self.repo_id, 'failed', current_commit)
             raise e
 
     def embed(self, provider: EmbeddingProvider, batch_size: int = 32, debug: bool = False):
         logger.info(f"🤖 Avvio Embedding con {provider.model_name}")
+        
+        # Recupera info complete (Repo ID e Branch corrente)
+        repo_info = self.parser.metadata_provider.get_repo_info()
+        repo_id = repo_info['repo_id']
+        branch = repo_info['branch']
+        
+        logger.info(f"   Target: Repo {repo_id} @ Branch {branch}")
+
         embedder = CodeEmbedder(self.storage, provider)
-        yield from embedder.run_indexing(batch_size=batch_size, yield_debug_docs=debug)
+        
+        # Passiamo SIA repo_id SIA branch per filtrare ed etichettare correttamente
+        yield from embedder.run_indexing(
+            repo_id=repo_id, 
+            branch=branch, 
+            batch_size=batch_size, 
+            yield_debug_docs=debug
+        )
 
     # --- API ---
     def get_nodes(self): return self.storage.get_all_nodes()
