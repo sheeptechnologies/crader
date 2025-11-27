@@ -19,6 +19,9 @@ if (typeof vis === 'undefined') {
     alert('CRITICAL: vis-network library not loaded.');
 }
 
+// Version indicator
+statusSpan.textContent = "Ready (v2.0)";
+
 window.selectChunk = function (chunkId, event) {
     if (event) event.stopPropagation();
     openGraph(chunkId);
@@ -58,6 +61,16 @@ async function loadFiles() {
     }
 }
 
+const filesListView = document.getElementById('filesListView');
+const fileDetailsView = document.getElementById('fileDetailsView');
+const fileDetailsContent = document.getElementById('fileDetailsContent');
+const backToFilesBtn = document.getElementById('backToFilesBtn');
+
+backToFilesBtn.addEventListener('click', () => {
+    fileDetailsView.classList.add('hidden');
+    filesListView.classList.remove('hidden');
+});
+
 function renderFileList(files) {
     filesContainer.innerHTML = '';
     files.forEach(file => {
@@ -68,10 +81,57 @@ function renderFileList(files) {
         fileDiv.addEventListener('click', () => {
             document.querySelectorAll('.file-item').forEach(el => el.classList.remove('active'));
             fileDiv.classList.add('active');
+
+            // Load code in center
             loadFileView(file.path);
+
+            // Show details in left panel
+            showFileDetails(file);
         });
         filesContainer.appendChild(fileDiv);
     });
+}
+
+function formatBytes(bytes, decimals = 2) {
+    if (!+bytes) return '0 Bytes';
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+}
+
+function showFileDetails(file) {
+    filesListView.classList.add('hidden');
+    fileDetailsView.classList.remove('hidden');
+
+    const rows = [
+        { label: "Path", value: file.path },
+        { label: "Language", value: file.language },
+        { label: "Size", value: formatBytes(file.size_bytes) },
+        { label: "Category", value: file.category },
+        { label: "Indexed At", value: new Date(file.indexed_at).toLocaleString() },
+        { label: "File Hash", value: file.file_hash, mono: true },
+        { label: "Commit", value: file.commit_hash, mono: true },
+        { label: "ID", value: file.id, mono: true },
+    ];
+
+    let html = `<div style="display:flex; flex-direction:column; gap:12px;">`;
+
+    rows.forEach(row => {
+        if (!row.value) return;
+        html += `
+            <div style="background:#2d2d30; padding:8px; border-radius:4px; border-left:3px solid #007acc;">
+                <div style="color:#858585; font-size:10px; text-transform:uppercase; margin-bottom:4px;">${row.label}</div>
+                <div style="color:#cccccc; font-size:12px; word-break:break-all; ${row.mono ? 'font-family:Consolas, monospace;' : ''}">
+                    ${escapeHtml(String(row.value))}
+                </div>
+            </div>
+        `;
+    });
+
+    html += `</div>`;
+    fileDetailsContent.innerHTML = html;
 }
 
 async function loadFileView(path) {

@@ -24,8 +24,19 @@
         <div class="main-container">
             <!-- Left: Files -->
             <div id="fileList" class="panel">
-                <h2>Files</h2>
-                <div id="filesContainer"></div>
+                <div id="filesListView" style="display:flex; flex-direction:column; height:100%;">
+                    <h2>Files</h2>
+                    <div id="filesContainer" style="flex-grow:1; overflow-y:auto;"></div>
+                </div>
+                <div id="fileDetailsView" class="hidden" style="display:flex; flex-direction:column; height:100%;">
+                    <div
+                        style="display:flex; align-items:center; border-bottom:1px solid #3e3e42; background:#252526; min-height: 33px;">
+                        <button id="backToFilesBtn"
+                            style="background:none; border:none; color:#cccccc; cursor:pointer; padding:8px 10px; font-size:14px; line-height:1;">⬅</button>
+                        <h2 style="border:none; padding-left:0; background:none;">File Details</h2>
+                    </div>
+                    <div id="fileDetailsContent" style="padding:10px; overflow-y:auto; flex-grow:1;"></div>
+                </div>
             </div>
 
             <!-- Center: Content (Code or Graph) -->

@@ -29,10 +29,18 @@ class TreeSitterRepoParser:
         ".html": "html", ".css": "css", ".php": "php"
     }
     
+    # Directory da ignorare sempre
     IGNORE_DIRS = {
         ".git", "node_modules", "target", "build", "dist", 
         ".venv", "venv", "env", ".env", "__pycache__", ".idea", ".vscode",
-        "site-packages", "bin", "obj", "lib", "include", "eggs", ".eggs"
+        "site-packages", "bin", "obj", "lib", "include", "eggs", ".eggs",
+        "vendor", "bower_components", "jspm_packages"
+    }
+
+    # Pattern file da ignorare (suffissi)
+    IGNORE_FILE_SUFFIXES = {
+        ".min.js", ".min.css", ".bundle.js", ".bundle.css",
+        ".map", ".test.js", ".spec.js", "-lock.json", ".lock"
     }
 
     # Limite dimensione chunk (~20-30 righe)
@@ -107,9 +115,43 @@ class TreeSitterRepoParser:
 
         self.parser = Parser()
 
+    def _safe_get_lang(self, lang):
+        try: get_language(lang); return True
+        except: return False
+
     def _set_parser_language(self, lang_object):
         if hasattr(self.parser, 'set_language'): self.parser.set_language(lang_object)
         else: self.parser.language = lang_object
+
+    def _is_minified_or_generated(self, content: bytes, file_path: str) -> bool:
+        """
+        Rileva se un file è minificato o generato automaticamente.
+        1. Check nome file (es. .min.js)
+        2. Check euristico sul contenuto (linee lunghissime)
+        """
+        # 1. Check estensione/suffisso
+        path_lower = file_path.lower()
+        if any(path_lower.endswith(suffix) for suffix in self.IGNORE_FILE_SUFFIXES):
+            return True
+            
+        # 2. Check euristico su contenuto (solo per file testuali)
+        # Se troviamo righe > 2000 caratteri, è molto probabile sia minificato
+        try:
+            # Leggiamo solo i primi 4KB per performance
+            sample = content[:4096]
+            if b'\n' not in sample and len(sample) > 1000:
+                # Singola riga lunga > 1000 char -> minificato
+                return True
+            
+            # O se c'è una riga specifica molto lunga
+            lines = sample.split(b'\n')
+            for line in lines:
+                if len(line) > 2500: # Soglia conservativa
+                    return True
+        except:
+            pass
+            
+        return False
 
     def stream_semantic_chunks(self, file_list: Optional[List[str]] = None) -> Generator[Tuple[FileRecord, List[ChunkNode], List[ChunkContent], List[CodeRelation]], None, None]:
         files_to_process = set(file_list) if file_list else None
@@ -132,6 +174,11 @@ class TreeSitterRepoParser:
                 try:
                     with open(full_path, 'rb') as f: content = f.read()
                     
+                    # FILTER: Skip minified files
+                    if self._is_minified_or_generated(content, rel_path):
+                        print(f"[SKIP] Ignored minified/generated file: {rel_path}")
+                        continue
+
                     file_rec = FileRecord(
                         id=str(uuid.uuid4()), repo_id=self.repo_id, commit_hash=self.repo_info.get('commit_hash', 'HEAD'),
                         file_hash=self.metadata_provider.get_file_hash(rel_path, content), path=rel_path,

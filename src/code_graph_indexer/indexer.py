@@ -1,11 +1,13 @@
 import os
 import logging
 import concurrent.futures
-from typing import Generator, Dict, Any, List
+from typing import Generator, Dict, Any, List, Optional
 from .parsing.parser import TreeSitterRepoParser
 from .graph.indexers.scip import SCIPIndexer, SCIPRunner
 from .graph.builder import KnowledgeGraphBuilder
 from .storage.sqlite import SqliteGraphStorage
+from .embedding.embedder import CodeEmbedder
+from .providers.embedding import EmbeddingProvider
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,15 @@ class CodebaseIndexer:
         self.storage.commit()
         stats = self.storage.get_stats()
         logger.info(f"✅ Indexing completato. Staging Area pronta: {stats}")
+
+    def embed(self, provider: EmbeddingProvider, batch_size: int = 32, debug: bool = False):
+        """
+        Avvia il processo di generazione vettori.
+        Richiede un provider (es. DummyEmbeddingProvider o OpenAIEmbeddingProvider).
+        """
+        logger.info(f"🤖 Avvio Embedding con {provider.model_name}")
+        embedder = CodeEmbedder(self.storage, provider)
+        yield from embedder.run_indexing(batch_size=batch_size, yield_debug_docs=debug)
 
     # --- API ---
     def get_nodes(self): return self.storage.get_all_nodes()

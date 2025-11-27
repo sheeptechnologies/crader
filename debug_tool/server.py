@@ -169,14 +169,17 @@ def get_file_view(path: str):
     if not indexer:
         raise HTTPException(status_code=400, detail="No repository indexed.")
     
-    if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="File not found")
+    # Resolve path against the indexed repository root
+    full_path = os.path.join(indexer.repo_path, path)
+    
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {full_path}")
         
     try:
         raw_nodes = list(indexer.get_nodes())
         nodes = DbAdapter.adapt_nodes(raw_nodes)
         
-        html_content = HtmlGenerator.generate_code_html(path, indexer.repo_path, nodes)
+        html_content = HtmlGenerator.generate_code_html(full_path, indexer.repo_path, nodes)
         
         return {"html": html_content}
     except Exception as e:
@@ -263,4 +266,4 @@ app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "st
 if __name__ == "__main__":
     import uvicorn
     # Changed port to 8001 as requested by user previously
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8017)
