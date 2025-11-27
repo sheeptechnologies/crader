@@ -4,9 +4,25 @@ from typing import List, Dict, Any, Optional, Generator
 class GraphStorage(ABC):
     """
     Interfaccia astratta per lo storage (Staging Area).
-    Supporta: Files, Nodes, Edges, Contents + Embeddings & Search.
+    Supporta: Files, Nodes, Edges, Contents + Embeddings + Repositories.
     """
     
+    # --- REPOSITORY MANAGEMENT (FASE 1) ---
+    @abstractmethod
+    def get_repository(self, repo_id: str) -> Optional[Dict[str, Any]]:
+        """Recupera lo stato di una repository dato il suo ID univoco."""
+        pass
+
+    @abstractmethod
+    def register_repository(self, repo_id: str, name: str, url: str, branch: str, commit_hash: str):
+        """Registra o aggiorna l'inizio di un'indicizzazione."""
+        pass
+
+    @abstractmethod
+    def update_repository_status(self, repo_id: str, status: str, commit_hash: str = None):
+        """Aggiorna lo stato (es. 'completed', 'failed') e il commit finale."""
+        pass
+
     # --- WRITE (Graph) ---
     @abstractmethod
     def add_files(self, files: List[Any]): pass
@@ -29,50 +45,35 @@ class GraphStorage(ABC):
     
     # --- WRITE (Embeddings) ---
     @abstractmethod
-    def save_embeddings(self, vector_documents: List[Dict[str, Any]]):
-        """Salva i documenti vettoriali denormalizzati."""
-        pass
+    def save_embeddings(self, vector_documents: List[Dict[str, Any]]): pass
 
-    # --- READ (Batch & Optimization for Embedder) ---
+    # --- READ (Batch & Optimization) ---
     @abstractmethod
-    def get_nodes_cursor(self) -> Generator[Dict[str, Any], None, None]:
-        """Stream leggero dei nodi candidati per l'embedding."""
-        pass
+    def get_nodes_cursor(self, repo_id: str = None) -> Generator[Dict[str, Any], None, None]: pass
 
     @abstractmethod
-    def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]:
-        """Recupero massivo dei contenuti."""
-        pass
+    def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]: pass
 
     @abstractmethod
-    def get_files_bulk(self, file_paths: List[str]) -> Dict[str, Dict[str, Any]]:
-        """Recupero massivo metadati file."""
-        pass
+    def get_files_bulk(self, file_paths: List[str]) -> Dict[str, Dict[str, Any]]: pass
 
     @abstractmethod
-    def get_incoming_definitions_bulk(self, node_ids: List[str]) -> Dict[str, List[str]]:
-        """Recupera simboli definiti (via archi 'calls' entranti) per il batch di nodi."""
-        pass
+    def get_incoming_definitions_bulk(self, node_ids: List[str]) -> Dict[str, List[str]]: pass
 
-    # --- READ / CONSUME (Graph) ---
+    # --- READ / CONSUME ---
     @abstractmethod
     def get_all_files(self) -> Generator[Dict[str, Any], None, None]: pass
-
     @abstractmethod
     def get_all_nodes(self) -> Generator[Dict[str, Any], None, None]: pass
-
     @abstractmethod
     def get_all_contents(self) -> Generator[Dict[str, Any], None, None]: pass
-
     @abstractmethod
     def get_all_edges(self) -> Generator[Dict[str, Any], None, None]: pass
-
     @abstractmethod
     def get_stats(self) -> Dict[str, int]: pass
 
     # --- LIFECYCLE ---
     @abstractmethod
     def commit(self): pass
-    
     @abstractmethod
     def close(self): pass

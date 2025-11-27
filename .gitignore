@@ -13,3 +13,4 @@ build/
 *.json
 *.db
 *.graphml
+*.db*

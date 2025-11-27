@@ -1,35 +1,55 @@
 import sqlite3
-import tempfile
 import os
 import json
 import logging
 import struct
-from typing import List, Dict, Any, Optional, Generator, Tuple
+import datetime
+from typing import List, Dict, Any, Optional, Generator
 from .base import GraphStorage
 
 logger = logging.getLogger(__name__)
 
 class SqliteGraphStorage(GraphStorage):
-    def __init__(self):
-        self._db_file = tempfile.NamedTemporaryFile(delete=False, suffix=".db").name
-        self._conn = sqlite3.connect(self._db_file)
+    def __init__(self, db_path: str = "sheep_index.db"):
+        """
+        Inizializza lo storage.
+        :param db_path: Percorso del file DB. Se None, usa un file predefinito locale.
+        """
+        self._db_file = os.path.abspath(db_path)
+        logger.info(f"💾 Storage Database: {self._db_file}")
+        
+        self._conn = sqlite3.connect(self._db_file, check_same_thread=False)
         self._cursor = self._conn.cursor()
         
         self._cursor.execute("PRAGMA synchronous = OFF")
         self._cursor.execute("PRAGMA journal_mode = WAL")
         self._cursor.execute("PRAGMA cache_size = 5000")
 
+        # --- TABELLA REPOSITORIES (Fase 1) ---
+        self._cursor.execute("""
+            CREATE TABLE IF NOT EXISTS repositories (
+                id TEXT PRIMARY KEY,        -- Hash univoco dell'URL remoto
+                url TEXT,
+                name TEXT,
+                branch TEXT,
+                last_commit TEXT,
+                status TEXT,                -- 'indexing', 'completed', 'failed'
+                updated_at TEXT
+            )
+        """)
+
         # --- TABELLE BASE ---
         self._cursor.execute("""
-            CREATE TABLE files (
+            CREATE TABLE IF NOT EXISTS files (
                 id TEXT PRIMARY KEY, repo_id TEXT, commit_hash TEXT, file_hash TEXT,
                 path TEXT, language TEXT, size_bytes INTEGER, category TEXT, indexed_at TEXT
             )
         """)
-        self._cursor.execute("CREATE INDEX idx_files_path ON files (path)")
+        self._cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files (path)")
+        self._cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_repo ON files (repo_id)")
 
         self._cursor.execute("""
-            CREATE TABLE nodes (
+            CREATE TABLE IF NOT EXISTS nodes (
                 id TEXT PRIMARY KEY, 
                 type TEXT, 
                 file_path TEXT,
@@ -39,27 +59,26 @@ class SqliteGraphStorage(GraphStorage):
                 metadata_json TEXT 
             )
         """)
-        self._cursor.execute("CREATE INDEX idx_nodes_spatial ON nodes (file_path, byte_start)")
+        self._cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_spatial ON nodes (file_path, byte_start)")
 
-        self._cursor.execute("CREATE TABLE contents (chunk_hash TEXT PRIMARY KEY, content TEXT)")
+        self._cursor.execute("CREATE TABLE IF NOT EXISTS contents (chunk_hash TEXT PRIMARY KEY, content TEXT)")
         
         self._cursor.execute("""
-            CREATE TABLE edges (
+            CREATE TABLE IF NOT EXISTS edges (
                 source_id TEXT, target_id TEXT, relation_type TEXT, metadata_json TEXT
             )
         """)
-        self._cursor.execute("CREATE INDEX idx_edges_source ON edges (source_id)") 
-        self._cursor.execute("CREATE INDEX idx_edges_target ON edges (target_id)")
+        self._cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_source ON edges (source_id)") 
+        self._cursor.execute("CREATE INDEX IF NOT EXISTS idx_edges_target ON edges (target_id)")
 
-        # --- TABELLE RICERCA (FASE 1) ---
-        
+        # --- TABELLE RICERCA ---
         try:
-            self._cursor.execute("CREATE VIRTUAL TABLE contents_fts USING fts5(chunk_hash, content, tokenize='trigram')")
+            self._cursor.execute("CREATE VIRTUAL TABLE IF NOT EXISTS contents_fts USING fts5(chunk_hash, content, tokenize='trigram')")
         except Exception:
-            self._cursor.execute("CREATE VIRTUAL TABLE contents_fts USING fts5(chunk_hash, content)")
+            self._cursor.execute("CREATE VIRTUAL TABLE IF NOT EXISTS contents_fts USING fts5(chunk_hash, content)")
 
         self._cursor.execute("""
-            CREATE TABLE node_embeddings (
+            CREATE TABLE IF NOT EXISTS node_embeddings (
                 id TEXT PRIMARY KEY,          
                 chunk_id TEXT,                
                 repo_id TEXT,                 
@@ -78,8 +97,36 @@ class SqliteGraphStorage(GraphStorage):
                 embedding BLOB                
             )
         """)
-        self._cursor.execute("CREATE INDEX idx_emb_hash ON node_embeddings (vector_hash)")
+        self._cursor.execute("CREATE INDEX IF NOT EXISTS idx_emb_hash ON node_embeddings (vector_hash)")
+        self._cursor.execute("CREATE INDEX IF NOT EXISTS idx_emb_repo ON node_embeddings (repo_id)")
         
+        self._conn.commit()
+
+    # --- REPOSITORY MANAGEMENT ---
+
+    def get_repository(self, repo_id: str) -> Optional[Dict[str, Any]]:
+        self._cursor.execute("SELECT * FROM repositories WHERE id = ?", (repo_id,))
+        row = self._cursor.fetchone()
+        if not row: return None
+        cols = [d[0] for d in self._cursor.description]
+        return dict(zip(cols, row))
+
+    def register_repository(self, repo_id: str, name: str, url: str, branch: str, commit_hash: str):
+        now = datetime.datetime.utcnow().isoformat()
+        self._cursor.execute("""
+            INSERT OR REPLACE INTO repositories (id, name, url, branch, last_commit, status, updated_at)
+            VALUES (?, ?, ?, ?, ?, 'indexing', ?)
+        """, (repo_id, name, url, branch, commit_hash, now))
+        self._conn.commit()
+
+    def update_repository_status(self, repo_id: str, status: str, commit_hash: str = None):
+        now = datetime.datetime.utcnow().isoformat()
+        if commit_hash:
+            self._cursor.execute("UPDATE repositories SET status = ?, last_commit = ?, updated_at = ? WHERE id = ?", 
+                               (status, commit_hash, now, repo_id))
+        else:
+            self._cursor.execute("UPDATE repositories SET status = ?, updated_at = ? WHERE id = ?", 
+                               (status, now, repo_id))
         self._conn.commit()
 
     # --- WRITE METHODS ---
@@ -135,31 +182,32 @@ class SqliteGraphStorage(GraphStorage):
             (source_id, target_id, relation_type, json.dumps(metadata))
         )
 
-    # --- EMBEDDING OPTIMIZATION METHODS ---
+    # --- BATCH OPTIMIZATION ---
 
-    def get_nodes_cursor(self) -> Generator[Dict[str, Any], None, None]:
-        """Query 1: Stream leggero di candidati."""
-        # [FIX] Usiamo un cursore NUOVO e DEDICATO per l'iterazione
-        # Altrimenti, le query annidate (get_contents_bulk) resetterebbero questo cursore
+    def get_nodes_cursor(self, repo_id: str = None) -> Generator[Dict[str, Any], None, None]:
+        """Stream leggero di candidati. Supporta filtro opzionale per repo_id."""
         iter_cursor = self._conn.cursor()
         
-        query = """
+        base_query = """
             SELECT n.id, n.type, n.file_path, n.chunk_hash, n.start_line, n.end_line, 
                    f.repo_id, f.language, f.category
             FROM nodes n
             LEFT JOIN files f ON n.file_path = f.path 
             WHERE n.type NOT IN ('external_library', 'program', 'module')
         """
-        iter_cursor.execute(query)
+        params = []
+        if repo_id:
+            base_query += " AND f.repo_id = ?"
+            params.append(repo_id)
+            
+        iter_cursor.execute(base_query, params)
         if iter_cursor.description:
             cols = [d[0] for d in iter_cursor.description]
             for row in iter_cursor:
                 yield dict(zip(cols, row))
-        
         iter_cursor.close()
 
     def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]:
-        """Query 2: Fetch massivo dei contenuti."""
         if not chunk_hashes: return {}
         BATCH_SIZE = 900
         result = {}
@@ -175,21 +223,15 @@ class SqliteGraphStorage(GraphStorage):
         return result
 
     def get_files_bulk(self, file_paths: List[str]) -> Dict[str, Dict[str, Any]]:
-        """Recupera i metadati dei file in batch."""
         if not file_paths: return {}
         unique_paths = list(set(file_paths))
-        
         BATCH_SIZE = 900
         result = {}
         
         for i in range(0, len(unique_paths), BATCH_SIZE):
             batch = unique_paths[i:i+BATCH_SIZE]
             placeholders = ",".join(["?"] * len(batch))
-            query = f"""
-                SELECT path, repo_id, language, category 
-                FROM files 
-                WHERE path IN ({placeholders})
-            """
+            query = f"SELECT path, repo_id, language, category FROM files WHERE path IN ({placeholders})"
             self._cursor.execute(query, batch)
             if self._cursor.description:
                 cols = [d[0] for d in self._cursor.description]
@@ -198,7 +240,6 @@ class SqliteGraphStorage(GraphStorage):
         return result
 
     def get_incoming_definitions_bulk(self, node_ids: List[str]) -> Dict[str, List[str]]:
-        """Trova i simboli definiti dai nodi guardando chi li chiama."""
         if not node_ids: return {}
         unique_ids = list(set(node_ids))
         BATCH_SIZE = 900
@@ -225,7 +266,6 @@ class SqliteGraphStorage(GraphStorage):
                         if target_id not in result: result[target_id] = set()
                         result[target_id].add(symbol)
                 except: pass
-                
         return {k: list(v) for k, v in result.items()}
 
     def save_embeddings(self, vector_documents: List[Dict[str, Any]]):
@@ -241,13 +281,12 @@ class SqliteGraphStorage(GraphStorage):
                 doc.get('end_line'), doc.get('text_content'), doc.get('vector_hash'),
                 doc.get('model_name'), doc.get('created_at'), vector_blob
             ))
-            
         if sql_batch:
             p = ",".join(["?"] * 16)
             self._cursor.executemany(f"INSERT OR REPLACE INTO node_embeddings VALUES ({p})", sql_batch)
             self._conn.commit()
 
-    # --- READ / CONSUME (Graph) ---
+    # --- READ HELPERS ---
     def find_chunk_id(self, file_path: str, byte_range: List[int]) -> Optional[str]:
         if not byte_range: return None
         self._cursor.execute(
@@ -265,35 +304,31 @@ class SqliteGraphStorage(GraphStorage):
         self._conn.commit()
         files = self._cursor.execute("SELECT COUNT(*) FROM files").fetchone()[0]
         nodes = self._cursor.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
-        return {"files": files, "total_nodes": nodes}
+        embeddings = self._cursor.execute("SELECT COUNT(*) FROM node_embeddings").fetchone()[0]
+        repos = self._cursor.execute("SELECT COUNT(*) FROM repositories").fetchone()[0]
+        return {"files": files, "total_nodes": nodes, "embeddings": embeddings, "repositories": repos}
     
     def commit(self): self._conn.commit()
     
     def close(self): 
         try: self._conn.close()
         except: pass
-        if os.path.exists(self._db_file): 
-             try: os.remove(self._db_file)
-             except: pass
 
     def get_all_files(self): 
         self._cursor.execute("SELECT * FROM files")
         if self._cursor.description:
             cols = [d[0] for d in self._cursor.description]
             for row in self._cursor: yield dict(zip(cols, row))
-
     def get_all_nodes(self): 
         self._cursor.execute("SELECT * FROM nodes")
         if self._cursor.description:
             cols = [d[0] for d in self._cursor.description]
             for row in self._cursor: yield dict(zip(cols, row))
-            
     def get_all_contents(self): 
         self._cursor.execute("SELECT * FROM contents")
         if self._cursor.description:
             cols = [d[0] for d in self._cursor.description]
             for row in self._cursor: yield dict(zip(cols, row))
-
     def get_all_edges(self): 
         self._cursor.execute("SELECT * FROM edges")
         if self._cursor.description:
