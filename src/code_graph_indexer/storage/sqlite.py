@@ -5,6 +5,13 @@ import logging
 import struct
 import datetime
 from typing import List, Dict, Any, Optional, Generator
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+
 from .base import GraphStorage
 
 logger = logging.getLogger(__name__)
@@ -185,16 +192,14 @@ class SqliteGraphStorage(GraphStorage):
     # --- BATCH OPTIMIZATION ---
 
     def get_nodes_cursor(self, repo_id: str = None, branch: str = None) -> Generator[Dict[str, Any], None, None]:
-        """Stream di candidati filtrato per repo e branch."""
         iter_cursor = self._conn.cursor()
         
-        # Aggiungiamo JOIN con repositories per controllare lo stato del branch
         base_query = """
             SELECT n.id, n.type, n.file_path, n.chunk_hash, n.start_line, n.end_line, 
                    f.repo_id, f.language, f.category
             FROM nodes n
             LEFT JOIN files f ON n.file_path = f.path 
-            LEFT JOIN repositories r ON f.repo_id = r.id  -- <--- JOIN NUOVA
+            LEFT JOIN repositories r ON f.repo_id = r.id 
             WHERE n.type NOT IN ('external_library', 'program', 'module')
         """
         
@@ -204,7 +209,6 @@ class SqliteGraphStorage(GraphStorage):
             params.append(repo_id)
             
         if branch:
-            # Filtro sul branch attivo nella tabella repositories
             base_query += " AND r.branch = ?"
             params.append(branch)
             
@@ -214,7 +218,7 @@ class SqliteGraphStorage(GraphStorage):
             for row in iter_cursor:
                 yield dict(zip(cols, row))
         iter_cursor.close()
-        
+
     def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]:
         if not chunk_hashes: return {}
         BATCH_SIZE = 900
@@ -327,18 +331,195 @@ class SqliteGraphStorage(GraphStorage):
         if self._cursor.description:
             cols = [d[0] for d in self._cursor.description]
             for row in self._cursor: yield dict(zip(cols, row))
+   
     def get_all_nodes(self): 
         self._cursor.execute("SELECT * FROM nodes")
         if self._cursor.description:
             cols = [d[0] for d in self._cursor.description]
             for row in self._cursor: yield dict(zip(cols, row))
+   
     def get_all_contents(self): 
         self._cursor.execute("SELECT * FROM contents")
         if self._cursor.description:
             cols = [d[0] for d in self._cursor.description]
             for row in self._cursor: yield dict(zip(cols, row))
+   
     def get_all_edges(self): 
         self._cursor.execute("SELECT * FROM edges")
         if self._cursor.description:
             cols = [d[0] for d in self._cursor.description]
             for row in self._cursor: yield dict(zip(cols, row))
+
+    # --- IMPLEMENTAZIONE RETRIEVAL (FASE 2) ---
+
+    def search_fts(self, query: str, limit: int = 20, repo_id: str = None, branch: str = None) -> List[Dict[str, Any]]:
+        # 1. Raddoppiamo le virgolette esistenti nel testo (standard SQL/FTS escaping)
+        escaped_query_text = query.replace('"', '""')
+        
+        # 2. Racchiudiamo TUTTO tra virgolette doppie.
+        # Questo dice a FTS5: "Tratta tutto questo come una singola stringa letterale, 
+        # non interpretare caratteri speciali come $, #, -, ecc."
+        safe_query = f'"{escaped_query_text}"'
+        
+        # Se l'utente voleva usare la wildcard *, la ri-abilitiamo post-escaping se ha senso,
+        # ma per la ricerca esatta di identificatori (Keyword Search) è meglio cercare il token preciso.
+        # Se vuoi permettere ricerche parziali (es. "Legacy*"), la logica sarebbe più complessa.
+        # Per ora, la priorità è non crashare su simboli strani.
+
+        sql = """
+            SELECT 
+                n.id, n.file_path, n.start_line, n.end_line, n.type,
+                contents_fts.rank,
+                c.content,
+                ne.repo_id,
+                ne.branch
+            FROM contents_fts
+            JOIN nodes n ON n.chunk_hash = contents_fts.chunk_hash
+            JOIN contents c ON c.chunk_hash = n.chunk_hash
+            JOIN node_embeddings ne ON ne.chunk_id = n.id
+            WHERE contents_fts MATCH ? 
+        """
+        params = [safe_query]
+        
+        if repo_id:
+            sql += " AND ne.repo_id = ?"
+            params.append(repo_id)
+            
+        if branch:
+            sql += " AND ne.branch = ?"
+            params.append(branch)
+            
+        sql += " ORDER BY contents_fts.rank ASC LIMIT ?"
+        params.append(limit)
+        
+        try:
+            self._cursor.execute(sql, params)
+            results = []
+            for row in self._cursor:
+                results.append({
+                    "id": row[0],
+                    "file_path": row[1],
+                    "start_line": row[2],
+                    "end_line": row[3],
+                    "type": row[4],
+                    "score": row[5],
+                    "content": row[6],
+                    "repo_id": row[7],
+                    "branch": row[8]
+                })
+            return results
+        except sqlite3.OperationalError as e:
+            # Ora questo dovrebbe accadere molto raramente
+            logger.warning(f"FTS Search failed on query '{query}': {e}")
+            return []
+
+    def search_vectors(self, query_vector: List[float], limit: int = 20, repo_id: str = None, branch: str = None) -> List[Dict[str, Any]]:
+        if not HAS_NUMPY: return []
+
+        sql = """
+            SELECT ne.id, ne.embedding, ne.chunk_id, ne.file_path, 
+                   ne.chunk_type, ne.text_content, ne.start_line, ne.end_line, 
+                   ne.repo_id, ne.branch
+            FROM node_embeddings ne
+            WHERE 1=1
+        """
+        params = []
+        
+        if repo_id:
+            sql += " AND ne.repo_id = ?"
+            params.append(repo_id)
+        
+        if branch:
+            sql += " AND ne.branch = ?"
+            params.append(branch)
+            
+        self._cursor.execute(sql, params)
+        rows = self._cursor.fetchall()
+        
+        if not rows: return []
+
+        ids = []
+        vectors = []
+        metadata_map = {}
+        
+        dim = len(query_vector)
+        fmt = f"{dim}f"
+        
+        for r in rows:
+            emb_id = r[0]
+            blob = r[1]
+            if not blob or len(blob) != dim * 4: continue 
+            
+            try:
+                vec = struct.unpack(fmt, blob)
+                vectors.append(vec)
+                ids.append(emb_id)
+                
+                metadata_map[emb_id] = {
+                    "id": r[2],
+                    "file_path": r[3],
+                    "type": r[4],
+                    "content": r[5],
+                    "start_line": r[6],
+                    "end_line": r[7],
+                    "repo_id": r[8],
+                    "branch": r[9]
+                }
+            except Exception: continue
+
+        if not vectors: return []
+
+        np_vecs = np.array(vectors, dtype=np.float32)
+        np_query = np.array(query_vector, dtype=np.float32)
+        
+        norm_vecs = np.linalg.norm(np_vecs, axis=1, keepdims=True)
+        norm_query = np.linalg.norm(np_query)
+        
+        if norm_query == 0: return []
+        norm_vecs[norm_vecs == 0] = 1e-10
+        
+        similarities = np.dot(np_vecs, np_query) / (norm_vecs.squeeze() * norm_query)
+        
+        k_indices = np.argsort(similarities)[-limit:][::-1]
+        
+        results = []
+        for idx in k_indices:
+            emb_id = ids[idx]
+            score = float(similarities[idx])
+            meta = metadata_map[emb_id]
+            results.append({**meta, "score": score})
+            
+        return results
+
+    def get_context_neighbors(self, node_id: str) -> Dict[str, List[Dict[str, Any]]]:
+        result = {"parents": [], "calls": []}
+        
+        sql_parent = """
+            SELECT t.id, t.type, t.file_path, t.start_line, e.metadata_json
+            FROM edges e
+            JOIN nodes t ON e.target_id = t.id
+            WHERE e.source_id = ? AND e.relation_type = 'child_of'
+        """
+        self._cursor.execute(sql_parent, (node_id,))
+        for row in self._cursor:
+            result["parents"].append({
+                "id": row[0], "type": row[1], "file_path": row[2], 
+                "start_line": row[3], "meta": json.loads(row[4] or "{}")
+            })
+
+        sql_calls = """
+            SELECT t.id, t.type, t.file_path, e.metadata_json
+            FROM edges e
+            JOIN nodes t ON e.target_id = t.id
+            WHERE e.source_id = ? AND (e.relation_type = 'calls' OR e.relation_type = 'references')
+            LIMIT 15
+        """
+        self._cursor.execute(sql_calls, (node_id,))
+        for row in self._cursor:
+            meta = json.loads(row[3] or "{}")
+            symbol = meta.get("symbol", "unknown")
+            result["calls"].append({
+                "id": row[0], "type": row[1], "symbol": symbol
+            })
+            
+        return result

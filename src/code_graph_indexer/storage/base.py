@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional, Generator
+from typing import List, Dict, Any, Optional, Generator, Tuple
 
 class GraphStorage(ABC):
     """
@@ -50,7 +50,7 @@ class GraphStorage(ABC):
     # --- READ (Batch & Optimization) ---
     @abstractmethod
     def get_nodes_cursor(self, repo_id: str = None, branch: str = None) -> Generator[Dict[str, Any], None, None]: pass
-    
+
     @abstractmethod
     def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]: pass
 
@@ -77,3 +77,31 @@ class GraphStorage(ABC):
     def commit(self): pass
     @abstractmethod
     def close(self): pass
+
+    # --- RETRIEVAL ---
+
+    @abstractmethod
+    def search_fts(self, query: str, limit: int = 20, repo_id: str = None, branch: str = None) -> List[Dict[str, Any]]:
+        """
+        Esegue una ricerca Full-Text (BM25/Trigram) sui contenuti dei chunk.
+        Restituisce una lista di nodi con score.
+        """
+        pass
+
+    @abstractmethod
+    def search_vectors(self, query_vector: List[float], limit: int = 20, repo_id: str = None, branch: str = None) -> List[Dict[str, Any]]:
+        """
+        Esegue una ricerca semantica per similarità vettoriale (Cosine Similarity).
+        - In SQLite: Simulata in-memory con Numpy.
+        - In Postgres: Eseguita nativamente via pgvector.
+        """
+        pass
+
+    @abstractmethod
+    def get_context_neighbors(self, node_id: str) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Trova i vicini utili per il contesto dell'Agente.
+        Restituisce: { "parents": [...], "calls": [...] }
+        """
+        pass
+
