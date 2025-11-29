@@ -36,6 +36,15 @@ class GraphStorage(ABC):
     @abstractmethod
     def add_edge(self, source_id: str, target_id: str, relation_type: str, metadata: Dict[str, Any]): pass
 
+    # --- DELETE (Graph) ---
+    @abstractmethod
+    def delete_previous_data(self, repo_id: str, branch: str):
+        """
+        Cancella i dati precedenti (es. embeddings) per un dato repo e branch
+        prima di una nuova indicizzazione, per evitare duplicati.
+        """
+        pass
+
     # --- LOOKUP (Graph) ---
     @abstractmethod
     def find_chunk_id(self, file_path: str, byte_range: List[int]) -> Optional[str]: pass
@@ -104,4 +113,5 @@ class GraphStorage(ABC):
         Restituisce: { "parents": [...], "calls": [...] }
         """
         pass
+
 

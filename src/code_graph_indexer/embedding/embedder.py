@@ -25,7 +25,7 @@ class CodeEmbedder:
             yield_debug_docs: Se True, yielda anche i documenti generati (PER DEBUG/TEST).
                               Se False (Prod), yielda solo lo stato di avanzamento.
         """
-        # 1. Cursore filtrato per repo e branch (Query ottimizzata)
+        # 1. Cursore filtrato (Solo nodi di questo repo/branch)
         nodes_cursor = self.storage.get_nodes_cursor(repo_id=repo_id, branch=branch)
         
         current_batch = []
@@ -35,16 +35,11 @@ class CodeEmbedder:
             current_batch.append(node)
             
             if len(current_batch) >= batch_size:
-                # Processa e salva (Passiamo repo_id, branch e flag debug)
                 saved_docs = self._process_and_save(current_batch, repo_id, branch, debug=yield_debug_docs)
-                
-                # Aggiorna contatori
                 processed_count += len(current_batch)
                 
-                # Yield Status (Sempre)
                 yield {"status": "processing", "processed": processed_count}
                 
-                # Yield Docs (Solo se richiesto per debug)
                 if yield_debug_docs:
                     for doc in saved_docs: yield doc
                 
@@ -64,7 +59,6 @@ class CodeEmbedder:
         """
         Orchestra Arricchimento -> Embedding -> Salvataggio.
         """
-        # 1. Raccogli chiavi per Fetch Batch
         needed_hashes = set()
         needed_files = set()
         node_ids = []
@@ -74,7 +68,6 @@ class CodeEmbedder:
             if node.get('chunk_hash'): needed_hashes.add(node['chunk_hash'])
             if node.get('file_path'): needed_files.add(node['file_path'])
         
-        # 2. Fetch Batch
         contents_map = self.storage.get_contents_bulk(list(needed_hashes))
         files_map = self.storage.get_files_bulk(list(needed_files))
         definitions_map = self.storage.get_incoming_definitions_bulk(node_ids)
@@ -87,7 +80,7 @@ class CodeEmbedder:
             file_info = files_map.get(node.get('file_path'), {})
             defined_symbols = definitions_map.get(node['id'], [])
             
-            # --- COSTRUZIONE PAYLOAD SEMANTICO ---
+            # Context construction
             context_parts = [
                 "[CONTEXT]",
                 f"File: {node.get('file_path')}",
@@ -109,12 +102,12 @@ class CodeEmbedder:
             doc = {
                 "id": str(uuid.uuid4()),
                 "chunk_id": node['id'],
-                "repo_id": repo_id,         # Usiamo il parametro passato
+                "repo_id": repo_id,       # [FIX] Usiamo il repo_id passato
+                "branch": branch,         # [FIX] Usiamo il branch passato
                 "file_path": node.get('file_path'),
                 "directory": os.path.dirname(node.get('file_path', '')),
                 "language": file_info.get('language'),
                 "category": file_info.get('category'),
-                "branch": branch,           # Usiamo il parametro passato (Dynamic Branch)
                 "chunk_type": node.get('type'),
                 "start_line": node.get('start_line'),
                 "end_line": node.get('end_line'),
@@ -124,13 +117,11 @@ class CodeEmbedder:
                 "created_at": datetime.datetime.utcnow().isoformat()
             }
             
-            # Aggiungi contesto solo se in debug
             if debug:
                 doc["_debug_context"] = full_text
                 
             vector_docs.append(doc)
 
-        # 3. Chiamata API e Salvataggio
         if texts_to_embed:
             vectors = self.provider.embed(texts_to_embed)
             for doc, vec in zip(vector_docs, vectors):

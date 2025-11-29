@@ -22,6 +22,7 @@ if src_dir not in sys.path:
 try:
     from code_graph_indexer import CodebaseIndexer, CodeRetriever
     from code_graph_indexer.providers.embedding import FastEmbedProvider
+    from code_graph_indexer.storage.sqlite import SqliteGraphStorage
 except ImportError as e:
     print(f"❌ Errore importazione: {e}")
     sys.exit(1)
@@ -70,7 +71,7 @@ def force_update_branch_in_db(db_path: str, file_pattern: str, new_branch: str):
 def run_advanced_tests():
     temp_dir = tempfile.mkdtemp()
     repo_path = os.path.join(temp_dir, "advanced_repo")
-    db_path = os.path.join(temp_dir, "index.db")
+    db_path = "index.db"
     os.makedirs(repo_path)
 
     try:
@@ -84,20 +85,21 @@ def run_advanced_tests():
         checkout_branch(repo_path, "main", create=True)
         
         bubble_sort_code = """
-def sort_algorithm(arr):
-    # Standard Bubble Sort implementation
-    # Time Complexity: O(n^2) - Slow for large datasets
-    n = len(arr)
-    for i in range(n):
-        for j in range(0, n-i-1):
-            if arr[j] > arr[j+1]:
-                arr[j], arr[j+1] = arr[j+1], arr[j]
-    return arr
-"""
+            def sort_algorithm(arr):
+                # Standard Bubble Sort implementation
+                # Time Complexity: O(n^2) - Slow for large datasets
+                n = len(arr)
+                for i in range(n):
+                    for j in range(0, n-i-1):
+                        if arr[j] > arr[j+1]:
+                            arr[j], arr[j+1] = arr[j+1], arr[j]
+                return arr
+        """
         commit_file(repo_path, "src/algo.py", bubble_sort_code, "Add bubble sort")
         
         # Indexing Main
-        indexer = CodebaseIndexer(repo_path, db_path=db_path)
+        storage = SqliteGraphStorage(db_path=db_path)
+        indexer = CodebaseIndexer(repo_path,storage=storage)
         indexer.index()
         provider = FastEmbedProvider(model_name="jinaai/jina-embeddings-v2-base-code")
         list(indexer.embed(provider, batch_size=10)) # Consuma generatore
@@ -107,16 +109,16 @@ def sort_algorithm(arr):
         checkout_branch(repo_path, "feature/fast", create=True)
         
         quick_sort_code = """
-def sort_algorithm(arr):
-    # Optimized Quick Sort implementation
-    # Time Complexity: O(n log n) - Efficient
-    if len(arr) <= 1: return arr
-    pivot = arr[len(arr) // 2]
-    left = [x for x in arr if x < pivot]
-    middle = [x for x in arr if x == pivot]
-    right = [x for x in arr if x > pivot]
-    return sort_algorithm(left) + middle + sort_algorithm(right)
-"""
+        def sort_algorithm(arr):
+            # Optimized Quick Sort implementation
+            # Time Complexity: O(n log n) - Efficient
+            if len(arr) <= 1: return arr
+            pivot = arr[len(arr) // 2]
+            left = [x for x in arr if x < pivot]
+            middle = [x for x in arr if x == pivot]
+            right = [x for x in arr if x > pivot]
+            return sort_algorithm(left) + middle + sort_algorithm(right)
+        """
         commit_file(repo_path, "src/algo.py", quick_sort_code, "Upgrade to quick sort")
         
         # Indexing Feature Branch
@@ -193,7 +195,7 @@ class _Legacy$Handler_v99:
         import traceback
         traceback.print_exc()
     finally:
-        if 'indexer' in locals(): indexer.close()
+        if 'indexer' in locals(): storage.close()
         shutil.rmtree(temp_dir)
         logger.info("\n🧹 Pulizia completata.")
 

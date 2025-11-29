@@ -136,6 +136,30 @@ class SqliteGraphStorage(GraphStorage):
                                (status, now, repo_id))
         self._conn.commit()
 
+
+    # --- DELETE PREVIOUS DATA ---
+    def delete_previous_data(self, repo_id: str, branch: str):
+        """
+        Rimuove gli embedding obsoleti per questo branch per evitare duplicati nei risultati di ricerca.
+        """
+        try:
+            # 1. Pulizia Embeddings (Hanno il campo branch esplicito)
+            self._cursor.execute(
+                "DELETE FROM node_embeddings WHERE repo_id = ? AND branch = ?", 
+                (repo_id, branch)
+            )
+            count = self._cursor.rowcount
+            if count > 0:
+                logger.info(f"🧹 Puliti {count} embedding vecchi per {repo_id}/{branch}")
+            
+            # Nota: Non cancelliamo da 'nodes' o 'files' qui perché in questo schema SQLite
+            # sono condivisi o mancano del campo branch. 
+            # L'upsert di 'files' e 'nodes' gestirà gli aggiornamenti ID-based.
+            
+            self._conn.commit()
+        except Exception as e:
+            logger.error(f"Errore durante delete_previous_data: {e}")
+
     # --- WRITE METHODS ---
 
     def add_files(self, files: List[Any]):
