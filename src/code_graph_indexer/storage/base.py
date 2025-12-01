@@ -48,8 +48,8 @@ class GraphStorage(ABC):
 
     # --- LOOKUP (Graph) ---
     @abstractmethod
-    def find_chunk_id(self, file_path: str, byte_range: List[int]) -> Optional[str]: pass
-
+    def find_chunk_id(self, file_path: str, byte_range: List[int], repo_id: str = None) -> Optional[str]: pass
+    
     @abstractmethod
     def ensure_external_node(self, node_id: str): pass
     
@@ -65,7 +65,7 @@ class GraphStorage(ABC):
     def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]: pass
 
     @abstractmethod
-    def get_files_bulk(self, file_paths: List[str]) -> Dict[str, Dict[str, Any]]: pass
+    def get_files_bulk(self, file_paths: List[str], repo_id: str = None) -> Dict[str, Dict[str, Any]]: pass
 
     @abstractmethod
     def get_incoming_definitions_bulk(self, node_ids: List[str]) -> Dict[str, List[str]]: pass

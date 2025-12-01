@@ -58,32 +58,53 @@ async function loadRepositories() {
     }
 }
 
-function renderRepoList(repos) {
+function renderRepoList(groupedRepos) {
     repoList.innerHTML = '';
-    if (repos.length === 0) {
+    if (groupedRepos.length === 0) {
         repoList.innerHTML = '<div style="color:#888; grid-column: 1/-1; text-align:center;">No repositories indexed yet. Use the controls above to index one.</div>';
         return;
     }
 
-    repos.forEach(repo => {
+    groupedRepos.forEach(group => {
         const card = document.createElement('div');
         card.className = 'repo-card';
 
-        const statusClass = (repo.status || 'unknown').toLowerCase();
+        // Create branch options
+        let branchOptions = '';
+        group.branches.forEach(b => {
+            branchOptions += `<option value="${b.id}" data-name="${group.name}" data-branch="${b.branch}">
+                ${escapeHtml(b.branch)} (${b.status}) - ${new Date(b.updated_at).toLocaleDateString()}
+            </option>`;
+        });
+
+        const safeUrl = group.url || 'no-url';
+        const safeId = safeUrl.replace(/[^a-zA-Z0-9]/g, '');
 
         card.innerHTML = `
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <h3>${escapeHtml(repo.name || 'Unnamed Repo')}</h3>
-                <span class="status ${statusClass}">${repo.status}</span>
-            </div>
-            <div style="color:#ccc; font-size:13px; font-family:'Consolas', monospace;">${escapeHtml(repo.branch)}</div>
-            <div class="meta">
-                <span>${escapeHtml(repo.url)}</span>
-                <span>${new Date(repo.updated_at).toLocaleDateString()}</span>
+            <h3>${escapeHtml(group.name || 'Unnamed Repo')}</h3>
+            <div class="url">${escapeHtml(group.url || 'No URL')}</div>
+
+            <div class="repo-controls">
+                <select class="branch-select" id="select-${safeId}">
+                    ${branchOptions}
+                </select>
+                <button class="select-repo-btn">Select</button>
             </div>
         `;
 
-        card.addEventListener('click', () => selectRepository(repo));
+        const btn = card.querySelector('.select-repo-btn');
+        const select = card.querySelector('select');
+
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const selectedOption = select.options[select.selectedIndex];
+            const repoId = select.value;
+            const repoName = selectedOption.dataset.name;
+            const repoBranch = selectedOption.dataset.branch;
+
+            selectRepository({ id: repoId, name: repoName, branch: repoBranch });
+        });
+
         repoList.appendChild(card);
     });
 }
@@ -341,23 +362,94 @@ function renderSearchResults(results) {
         div.innerHTML = `
             <div class="header">
                 <span class="file-path">${escapeHtml(res.file_path)}:${res.start_line}</span>
-                <span class="score">Score: ${score}</span>
+                <div class="meta-badges">
+                    <span class="badge score">${score}</span>
+                    <span class="badge type">${res.chunk_type || 'CODE'}</span>
+                </div>
             </div>
             <div class="snippet">${escapeHtml(res.content)}</div>
             <div style="font-size:11px; color:#666; margin-top:5px;">
-                Type: ${res.chunk_type} | Method: ${res.retrieval_method}
+                Method: ${res.retrieval_method}
             </div>
         `;
 
         div.addEventListener('click', () => {
-            // Load file and scroll to line?
-            // For now just load file view
-            loadFileView(res.file_path);
-            // Ideally we should scroll to res.start_line, but file view loads async.
-            // We can implement scrolling later.
+            showSearchDetails(res);
         });
 
         searchResults.appendChild(div);
+    });
+}
+
+function showSearchDetails(res) {
+    // Create modal if not exists
+    let modal = document.getElementById('searchDetailModal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'searchDetailModal';
+        modal.className = 'modal-overlay';
+        document.body.appendChild(modal);
+    }
+
+    const close = () => modal.remove();
+
+    modal.innerHTML = `
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 style="margin:0; color:#fff;">Search Result Details</h3>
+                <button style="background:none; border:none; color:#ccc; font-size:20px; cursor:pointer;" id="closeModalBtn">×</button>
+            </div>
+            <div class="modal-body">
+                <div class="detail-section">
+                    <h4>Metadata</h4>
+                    <div class="detail-row"><span class="detail-label">Node ID:</span><span class="detail-value">${res.node_id}</span></div>
+                    <div class="detail-row"><span class="detail-label">Repo ID:</span><span class="detail-value">${res.repo_id}</span></div>
+                    <div class="detail-row"><span class="detail-label">Branch:</span><span class="detail-value">${res.branch}</span></div>
+                    <div class="detail-row"><span class="detail-label">File:</span><span class="detail-value">${res.file_path}</span></div>
+                    <div class="detail-row"><span class="detail-label">Lines:</span><span class="detail-value">${res.start_line} - ${res.end_line}</span></div>
+                    <div class="detail-row"><span class="detail-label">Type:</span><span class="detail-value">${res.chunk_type}</span></div>
+                    <div class="detail-row"><span class="detail-label">Score:</span><span class="detail-value">${res.score}</span></div>
+                    <div class="detail-row"><span class="detail-label">Method:</span><span class="detail-value">${res.retrieval_method}</span></div>
+                </div>
+
+                <div class="detail-section">
+                    <h4>Content</h4>
+                    <pre style="background:#1e1e1e; padding:10px; border-radius:4px; color:#d4d4d4; font-family:'Consolas', monospace; overflow-x:auto;">${escapeHtml(res.content)}</pre>
+                </div>
+
+                <div class="detail-section">
+                    <h4>Context Analysis</h4>
+                    <div class="detail-row"><span class="detail-label">Parent:</span><span class="detail-value">${res.parent_context || 'None'}</span></div>
+                    <div class="detail-row" style="align-items:flex-start;">
+                        <span class="detail-label">Outgoing Refs:</span>
+                        <div class="detail-value">
+                            ${(res.outgoing_definitions && res.outgoing_definitions.length) ?
+            res.outgoing_definitions.map(d => `<span style="display:inline-block; background:#333; padding:2px 5px; margin:2px; border-radius:3px;">${escapeHtml(d)}</span>`).join('')
+            : 'None'}
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="detail-section">
+                    <h4>Raw Data</h4>
+                    <pre style="background:#111; padding:10px; border-radius:4px; color:#888; font-size:10px; overflow-x:auto;">${escapeHtml(JSON.stringify(res, null, 2))}</pre>
+                </div>
+                
+                <div style="margin-top:20px; text-align:right;">
+                    <button id="jumpToCodeBtn" style="background:#0e639c; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer;">Jump to Code</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+    modal.querySelector('#closeModalBtn').addEventListener('click', close);
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) close();
+    });
+
+    modal.querySelector('#jumpToCodeBtn').addEventListener('click', () => {
+        close();
+        loadFileView(res.file_path);
     });
 }
 

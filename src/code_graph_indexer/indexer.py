@@ -94,7 +94,7 @@ class CodebaseIndexer:
                     self.builder.add_chunks(nodes)
                     self.builder.add_contents(contents_list)
                     if rels_list:
-                        self.builder.add_relations(rels_list)
+                        self.builder.add_relations(rels_list, repo_id=internal_repo_id)
                     files_count += 1
                 
                 logger.info(f"Parsing completato: {files_count} file processati.")
@@ -107,9 +107,10 @@ class CodebaseIndexer:
                 for rel in rel_gen:
                     batch.append(rel)
                     if len(batch) >= 5000:
-                        self.builder.add_relations(batch)
+                        self.builder.add_relations(batch, repo_id=internal_repo_id)
                         batch = []
-                if batch: self.builder.add_relations(batch)
+                if batch: 
+                    self.builder.add_relations(batch, repo_id=internal_repo_id)
                 try: os.remove(scip_json)
                 except: pass
             else:

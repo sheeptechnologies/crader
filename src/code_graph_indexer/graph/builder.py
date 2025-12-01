@@ -19,7 +19,15 @@ class KnowledgeGraphBuilder:
     def add_contents(self, contents: List):
         self.storage.add_contents(contents)
 
-    def add_relations(self, relations: List[CodeRelation]):
+    def add_relations(self, relations: List[CodeRelation], repo_id: str = None):
+        """
+        Aggiunge le relazioni al grafo.
+        
+        Args:
+            relations: Lista di oggetti CodeRelation.
+            repo_id: (Opzionale) L'ID della repository corrente. 
+                     Fondamentale per disambiguare i path in caso di multi-repo.
+        """
         logger.info(f"Elaborazione di {len(relations)} relazioni...")
         lookup_cache = {}
         
@@ -37,7 +45,8 @@ class KnowledgeGraphBuilder:
                 source_id = lookup_cache.get(src_key)
                 
                 if not source_id:
-                    source_id = self.storage.find_chunk_id(rel.source_file, rel.source_byte_range)
+                    # [FIX] Passiamo repo_id per il lookup sicuro
+                    source_id = self.storage.find_chunk_id(rel.source_file, rel.source_byte_range, repo_id=repo_id)
                     if source_id: lookup_cache[src_key] = source_id
             
             if not source_id: continue # Sorgente non trovata
@@ -56,7 +65,8 @@ class KnowledgeGraphBuilder:
                     tgt_key = (rel.target_file, tuple(rel.target_byte_range))
                     target_id = lookup_cache.get(tgt_key)
                     if not target_id:
-                        target_id = self.storage.find_chunk_id(rel.target_file, rel.target_byte_range)
+                        # [FIX] Passiamo repo_id per il lookup sicuro anche qui
+                        target_id = self.storage.find_chunk_id(rel.target_file, rel.target_byte_range, repo_id=repo_id)
                         if target_id: lookup_cache[tgt_key] = target_id
 
             # --- 3. CREAZIONE ARCO ---
@@ -66,7 +76,6 @@ class KnowledgeGraphBuilder:
             if len(lookup_cache) > 20000: lookup_cache.clear()
         
         if hasattr(self.storage, 'commit'): self.storage.commit()
-
     def get_stats(self): return self.storage.get_stats()
     def export_json(self, p): 
         if hasattr(self.storage, 'export_json'): self.storage.export_json(p)

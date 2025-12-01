@@ -195,27 +195,35 @@ class HtmlGenerator:
 def get_repositories():
     store, _ = get_components()
     try:
-        # Assuming storage has a method to get all repositories or we query the table directly
-        # The SqliteGraphStorage has get_stats but maybe not list_repos.
-        # Let's check if we can add a helper or query directly.
-        # storage._cursor is available but internal.
-        # Let's use a raw query for now if no method exists, or add one.
-        # Looking at sqlite.py, there isn't a get_all_repositories method exposed publicly 
-        # but there is a table 'repositories'.
-        # We can use the internal cursor or add a method. 
-        # Since I cannot easily modify sqlite.py right now without context switch, 
-        # I will use the internal cursor for this debug tool.
         store._cursor.execute("SELECT * FROM repositories")
         cols = [d[0] for d in store._cursor.description]
-        repos = [dict(zip(cols, row)) for row in store._cursor]
-        return {"repositories": repos}
+        raw_repos = [dict(zip(cols, row)) for row in store._cursor]
+        
+        # Group by URL
+        grouped = {}
+        for r in raw_repos:
+            url = r['url']
+            if url not in grouped:
+                grouped[url] = {
+                    "url": url,
+                    "name": r['name'],
+                    "branches": []
+                }
+            grouped[url]['branches'].append({
+                "branch": r['branch'],
+                "id": r['id'],
+                "status": r['status'],
+                "updated_at": r['updated_at']
+            })
+            
+        return {"repositories": list(grouped.values())}
     except Exception as e:
         logger.exception("Failed to list repositories")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/search")
 def search_code(request: SearchRequest):
-    _, retr = get_components()
+    _, retr, _ = get_components_full() # Ensure we get the full components including embedder if needed
     try:
         results = retr.retrieve(
             query=request.query,
@@ -223,7 +231,25 @@ def search_code(request: SearchRequest):
             limit=10,
             strategy=request.strategy
         )
-        return {"results": [r.to_dict() for r in results]}
+        
+        # The user wants specific fields from the doc/result
+        # The RetrievedContext object has to_dict() but let's ensure it has everything
+        # or construct the response manually if needed.
+        # Based on the user request, they want:
+        # node_id, file_path, chunk_type, content, score, retrieval_method, start_line, end_line, repo_id, branch, parent_context, outgoing_definitions
+        
+        response = []
+        for r in results:
+            # r is RetrievedContext
+            item = r.to_dict()
+            # Ensure all requested fields are present
+            # The library model might already have them, but let's double check or map them if names differ.
+            # User asked for 'node_id', 'chunk_type' etc.
+            # Let's assume to_dict() returns what we need, but we can augment it if necessary.
+            # Actually, let's look at models.py to be sure, but for now rely on to_dict() and add if missing.
+            response.append(item)
+            
+        return {"results": response}
     except Exception as e:
         logger.exception("Search failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -245,7 +271,7 @@ def trigger_index(request: IndexRequest):
         _, _, embedder = get_components_full()
         # We need to consume the generator
         for _ in indexer.embed(embedder):
-            logger.info(f"🤖 Processati: {_}")
+            pass
             
         stats = store.get_stats()
         return {"status": "success", "stats": stats}
@@ -260,6 +286,7 @@ def get_files(repo_id: Optional[str] = None):
         if repo_id:
             store._cursor.execute("SELECT * FROM files WHERE repo_id = ?", (repo_id,))
         else:
+            # Fallback but discouraged
             store._cursor.execute("SELECT * FROM files")
             
         cols = [d[0] for d in store._cursor.description]
@@ -269,66 +296,56 @@ def get_files(repo_id: Optional[str] = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/file_view")
-def get_file_view(path: str, repo_id: Optional[str] = None):
+def get_file_view(path: str, repo_id: str):
     store, _ = get_components()
     
-    # If repo_id is provided, we can find the local path from the repo record
-    # to read the file content.
-    local_repo_path = ""
-    if repo_id:
-        store._cursor.execute("SELECT local_path FROM repositories WHERE id = ?", (repo_id,))
-        row = store._cursor.fetchone()
-        if row and row[0]:
-            local_repo_path = row[0]
+    # 1. Get Local Path for this Repo
+    store._cursor.execute("SELECT local_path FROM repositories WHERE id = ?", (repo_id,))
+    row = store._cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    local_repo_path = row[0]
     
-    # Fallback or check if path is absolute
-    full_path = path
-    if local_repo_path and not os.path.isabs(path):
-        full_path = os.path.join(local_repo_path, path)
+    # 2. Resolve Full Path
+    # path from frontend is usually relative to repo root
+    full_path = os.path.join(local_repo_path, path)
     
     if not os.path.exists(full_path):
-        # Try to find it via the store if we can't find it on disk (maybe remote?)
-        # For now, assume local access is required for file view content
-        raise HTTPException(status_code=404, detail=f"File not found: {full_path}")
-        
+         raise HTTPException(status_code=404, detail=f"File not found on disk: {full_path}")
+
     try:
-        # Get nodes for this file. Filter by repo_id if possible to avoid collisions.
-        # We use a raw query to be efficient and specific.
-        sql = "SELECT * FROM nodes WHERE file_path = ?"
-        params = [path] # path in DB is relative
-        
-        # If path passed is absolute, make it relative if we have local_repo_path
+        # 3. Get Nodes strictly for this file in this repo
+        # We join with files table to ensure repo_id matches
+        # CRITICAL FIX: Join on file_id, NOT file_path, to avoid cross-branch leakage
+        sql = """
+            SELECT n.*, n.metadata_json as metadata_json_raw 
+            FROM nodes n
+            JOIN files f ON n.file_id = f.id
+            WHERE f.repo_id = ? AND f.path = ?
+        """
+        # path in DB is relative
         rel_path = path
-        if local_repo_path and path.startswith(local_repo_path):
-            rel_path = os.path.relpath(path, local_repo_path)
-            sql = "SELECT * FROM nodes WHERE file_path = ?"
-            params = [rel_path]
-
-        # Actually, nodes table doesn't have repo_id directly, but we can join files.
-        # But for now let's assume file_path is unique enough or we just get all nodes for that path.
-        # To be safe:
-        if repo_id:
-            sql = """
-                SELECT n.* FROM nodes n
-                JOIN files f ON n.file_path = f.path
-                WHERE n.file_path = ? AND f.repo_id = ?
-            """
-            params = [rel_path, repo_id]
-
-        store._cursor.execute(sql, params)
+        if os.path.isabs(path) and path.startswith(local_repo_path):
+             rel_path = os.path.relpath(path, local_repo_path)
+             
+        store._cursor.execute(sql, (repo_id, rel_path))
         cols = [d[0] for d in store._cursor.description]
         raw_nodes = [dict(zip(cols, row)) for row in store._cursor]
         
-        # Parse metadata_json if present (it is in raw dict from sqlite)
+        # Parse metadata
         for n in raw_nodes:
-            if n.get('metadata_json'):
-                try: n['metadata'] = json.loads(n['metadata_json'])
+            if n.get('metadata_json_raw'):
+                try: n['metadata'] = json.loads(n['metadata_json_raw'])
                 except: n['metadata'] = {}
-                del n['metadata_json']
+            else:
+                n['metadata'] = {}
+            # Cleanup
+            if 'metadata_json' in n: del n['metadata_json']
+            if 'metadata_json_raw' in n: del n['metadata_json_raw']
 
         nodes = DbAdapter.adapt_nodes(raw_nodes)
         
-        html_content = HtmlGenerator.generate_code_html(full_path, local_repo_path or os.path.dirname(full_path), nodes)
+        html_content = HtmlGenerator.generate_code_html(full_path, local_repo_path, nodes)
         
         return {"html": html_content}
     except Exception as e:

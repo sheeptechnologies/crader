@@ -335,9 +335,7 @@ class SqliteGraphStorage(GraphStorage):
                 result[row[0]] = row[1]
         return result
 
-    def get_files_bulk(self, file_paths: List[str]) -> Dict[str, Dict[str, Any]]:
-        # Nota: Questa funzione è ambigua in multi-branch se si passa solo il path.
-        # Meglio usarla solo nel contesto di un singolo batch di nodi già filtrati.
+    def get_files_bulk(self, file_paths: List[str], repo_id: str = None) -> Dict[str, Dict[str, Any]]:
         if not file_paths: return {}
         unique_paths = list(set(file_paths))
         BATCH_SIZE = 900
@@ -346,9 +344,16 @@ class SqliteGraphStorage(GraphStorage):
         for i in range(0, len(unique_paths), BATCH_SIZE):
             batch = unique_paths[i:i+BATCH_SIZE]
             placeholders = ",".join(["?"] * len(batch))
-            # Rischio collisione path qui, ma per l'uso corrente (enrichment) è accettabile
+            
+            # Query base
             query = f"SELECT path, repo_id, language, category FROM files WHERE path IN ({placeholders})"
-            self._cursor.execute(query, batch)
+            params = list(batch)
+            
+            if repo_id:
+                query += " AND repo_id = ?"
+                params.append(repo_id)
+            
+            self._cursor.execute(query, params)
             if self._cursor.description:
                 cols = [d[0] for d in self._cursor.description]
                 for row in self._cursor:
@@ -403,15 +408,26 @@ class SqliteGraphStorage(GraphStorage):
             self._conn.commit()
 
     # --- READ HELPERS ---
-    def find_chunk_id(self, file_path: str, byte_range: List[int]) -> Optional[str]:
-        # Nota: Questa query è ancora ambigua su multi-repo se file_path è comune.
-        # Idealmente dovrebbe prendere anche repo_id in input.
-        # Tuttavia, viene usata dal builder nel contesto di una singola sessione.
+    def find_chunk_id(self, file_path: str, byte_range: List[int], repo_id: str = None) -> Optional[str]:
         if not byte_range: return None
-        self._cursor.execute(
-            "SELECT id FROM nodes WHERE file_path = ? AND byte_start <= ? + 1 AND byte_end >= ? - 1 ORDER BY size ASC LIMIT 1",
-            (file_path, byte_range[0], byte_range[1])
-        )
+        
+        # JOIN con la tabella files per verificare il repo_id
+        sql = """
+            SELECT n.id 
+            FROM nodes n
+            JOIN files f ON n.file_id = f.id
+            WHERE f.path = ? 
+              AND n.byte_start <= ? + 1 AND n.byte_end >= ? - 1
+        """
+        params = [file_path, byte_range[0], byte_range[1]]
+        
+        if repo_id:
+            sql += " AND f.repo_id = ?"
+            params.append(repo_id)
+            
+        sql += " ORDER BY n.size ASC LIMIT 1"
+        
+        self._cursor.execute(sql, params)
         row = self._cursor.fetchone()
         return row[0] if row else None
 

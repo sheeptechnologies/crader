@@ -74,7 +74,10 @@ class CodeEmbedder:
             if node.get('file_path'): needed_files.add(node['file_path'])
         
         contents_map = self.storage.get_contents_bulk(list(needed_hashes))
-        files_map = self.storage.get_files_bulk(list(needed_files))
+        
+        # [FIX] Passiamo repo_id per recuperare i file corretti (disambiguazione path)
+        files_map = self.storage.get_files_bulk(list(needed_files), repo_id=repo_id)
+        
         definitions_map = self.storage.get_incoming_definitions_bulk(node_ids)
         
         texts_to_embed = []
