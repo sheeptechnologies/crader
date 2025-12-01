@@ -4,6 +4,7 @@ import json
 import logging
 import struct
 import datetime
+import uuid
 from typing import List, Dict, Any, Optional, Generator
 
 try:
@@ -32,24 +33,36 @@ class SqliteGraphStorage(GraphStorage):
         self._cursor.execute("PRAGMA journal_mode = WAL")
         self._cursor.execute("PRAGMA cache_size = 5000")
 
-        # --- TABELLA REPOSITORIES (Fase 1) ---
+        # --- TABELLA REPOSITORIES (Modificata) ---
+        # id diventa una chiave surrogata (UUID) specifica per (url + branch)
         self._cursor.execute("""
             CREATE TABLE IF NOT EXISTS repositories (
-                id TEXT PRIMARY KEY,        -- Hash univoco dell'URL remoto
-                url TEXT,
+                id TEXT PRIMARY KEY,        -- UUID Univoco per questa istanza (Repo + Branch)
+                url TEXT NOT NULL,
+                branch TEXT NOT NULL,
                 name TEXT,
-                branch TEXT,
                 last_commit TEXT,
                 status TEXT,                -- 'indexing', 'completed', 'failed'
-                updated_at TEXT
+                updated_at TEXT,
+                local_path TEXT,            -- Path fisico del worktree
+                UNIQUE(url, branch)         -- Vincolo fondamentale per il multi-branch
             )
         """)
 
         # --- TABELLE BASE ---
+        # file_hash serve per deduplicare il contenuto, ma il path è univoco per repo_id (che ora include il branch)
         self._cursor.execute("""
             CREATE TABLE IF NOT EXISTS files (
-                id TEXT PRIMARY KEY, repo_id TEXT, commit_hash TEXT, file_hash TEXT,
-                path TEXT, language TEXT, size_bytes INTEGER, category TEXT, indexed_at TEXT
+                id TEXT PRIMARY KEY, 
+                repo_id TEXT,               -- FK su repositories.id
+                commit_hash TEXT, 
+                file_hash TEXT,
+                path TEXT, 
+                language TEXT, 
+                size_bytes INTEGER, 
+                category TEXT, 
+                indexed_at TEXT,
+                UNIQUE(repo_id, path)       -- Ogni file è univoco nel contesto del suo branch (repo_id)
             )
         """)
         self._cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files (path)")
@@ -112,19 +125,53 @@ class SqliteGraphStorage(GraphStorage):
     # --- REPOSITORY MANAGEMENT ---
 
     def get_repository(self, repo_id: str) -> Optional[Dict[str, Any]]:
+        """Recupera per ID interno."""
         self._cursor.execute("SELECT * FROM repositories WHERE id = ?", (repo_id,))
         row = self._cursor.fetchone()
         if not row: return None
         cols = [d[0] for d in self._cursor.description]
         return dict(zip(cols, row))
 
-    def register_repository(self, repo_id: str, name: str, url: str, branch: str, commit_hash: str):
+    def get_repository_by_context(self, url: str, branch: str) -> Optional[Dict[str, Any]]:
+        """Recupera per chiave logica (URL + Branch)."""
+        self._cursor.execute("SELECT * FROM repositories WHERE url = ? AND branch = ?", (url, branch))
+        row = self._cursor.fetchone()
+        if not row: return None
+        cols = [d[0] for d in self._cursor.description]
+        return dict(zip(cols, row))
+
+    def register_repository(self, id: str, name: str, url: str, branch: str, commit_hash: str, local_path: str = None) -> str:
+        """
+        Registra o recupera una repository.
+        Se esiste già (url+branch), restituisce il suo ID esistente e aggiorna i metadati.
+        Se non esiste, ne crea uno nuovo.
+        
+        Returns:
+            L'ID interno (UUID) della repository da usare per l'indicizzazione.
+        """
         now = datetime.datetime.utcnow().isoformat()
-        self._cursor.execute("""
-            INSERT OR REPLACE INTO repositories (id, name, url, branch, last_commit, status, updated_at)
-            VALUES (?, ?, ?, ?, ?, 'indexing', ?)
-        """, (repo_id, name, url, branch, commit_hash, now))
+        
+        # 1. Cerchiamo se esiste già
+        existing = self.get_repository_by_context(url, branch)
+        
+        if existing:
+            repo_id = existing['id']
+            # Aggiorniamo stato e commit
+            self._cursor.execute("""
+                UPDATE repositories 
+                SET name=?, last_commit=?, status='indexing', updated_at=?, local_path=?
+                WHERE id=?
+            """, (name, commit_hash, now, local_path, repo_id))
+        else:
+            # Creiamo nuovo record
+            repo_id = str(uuid.uuid4())
+            self._cursor.execute("""
+                INSERT INTO repositories (id, name, url, branch, last_commit, status, updated_at, local_path)
+                VALUES (?, ?, ?, ?, ?, 'indexing', ?, ?)
+            """, (repo_id, name, url, branch, commit_hash, now, local_path))
+            
         self._conn.commit()
+        return repo_id
 
     def update_repository_status(self, repo_id: str, status: str, commit_hash: str = None):
         now = datetime.datetime.utcnow().isoformat()
@@ -140,21 +187,38 @@ class SqliteGraphStorage(GraphStorage):
     # --- DELETE PREVIOUS DATA ---
     def delete_previous_data(self, repo_id: str, branch: str):
         """
-        Rimuove gli embedding obsoleti per questo branch per evitare duplicati nei risultati di ricerca.
+        Pulisce i dati di una specifica istanza di repository (identificata da repo_id).
+        Non tocca i contenuti (blob) che potrebbero essere condivisi.
         """
         try:
-            # 1. Pulizia Embeddings (Hanno il campo branch esplicito)
-            self._cursor.execute(
-                "DELETE FROM node_embeddings WHERE repo_id = ? AND branch = ?", 
-                (repo_id, branch)
-            )
-            count = self._cursor.rowcount
-            if count > 0:
-                logger.info(f"🧹 Puliti {count} embedding vecchi per {repo_id}/{branch}")
+            logger.info(f"🧹 Pulizia dati per Repo ID: {repo_id} (Branch: {branch})")
+
+            # 1. Pulizia Embeddings
+            self._cursor.execute("DELETE FROM node_embeddings WHERE repo_id = ?", (repo_id,))
             
-            # Nota: Non cancelliamo da 'nodes' o 'files' qui perché in questo schema SQLite
-            # sono condivisi o mancano del campo branch. 
-            # L'upsert di 'files' e 'nodes' gestirà gli aggiornamenti ID-based.
+            # 2. Pulizia Archi (Edges)
+            # Dobbiamo trovare i nodi che stiamo per cancellare per cancellare i loro archi
+            # (Subquery ottimizzata)
+            self._cursor.execute("""
+                DELETE FROM edges 
+                WHERE source_id IN (
+                    SELECT n.id 
+                    FROM nodes n
+                    JOIN files f ON n.file_path = f.path 
+                    WHERE f.repo_id = ?
+                )
+            """, (repo_id,))
+
+            # 3. Pulizia Nodi
+            self._cursor.execute("""
+                DELETE FROM nodes 
+                WHERE file_path IN (
+                    SELECT path FROM files WHERE repo_id = ?
+                )
+            """, (repo_id,))
+
+            # 4. Pulizia Files
+            self._cursor.execute("DELETE FROM files WHERE repo_id = ?", (repo_id,))
             
             self._conn.commit()
         except Exception as e:
@@ -172,7 +236,8 @@ class SqliteGraphStorage(GraphStorage):
                 d['category'], d['indexed_at']
             ))
         if sql_batch:
-            self._cursor.executemany("INSERT OR IGNORE INTO files VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", sql_batch)
+            # REPLACE in caso di re-run parziale sullo stesso ID
+            self._cursor.executemany("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", sql_batch)
             self._conn.commit()
 
     def add_nodes(self, nodes: List[Any]):
@@ -229,9 +294,11 @@ class SqliteGraphStorage(GraphStorage):
         
         params = []
         if repo_id:
+            # Qui repo_id è l'ID univoco interno, quindi basta filtrare su f.repo_id
             base_query += " AND f.repo_id = ?"
             params.append(repo_id)
             
+        # branch è ridondante se repo_id è univoco per branch, ma lo lasciamo per sicurezza se passato
         if branch:
             base_query += " AND r.branch = ?"
             params.append(branch)
@@ -374,22 +441,12 @@ class SqliteGraphStorage(GraphStorage):
             cols = [d[0] for d in self._cursor.description]
             for row in self._cursor: yield dict(zip(cols, row))
 
-    # --- IMPLEMENTAZIONE RETRIEVAL (FASE 2) ---
+    # --- IMPLEMENTAZIONE RETRIEVAL ---
 
     def search_fts(self, query: str, limit: int = 20, repo_id: str = None, branch: str = None) -> List[Dict[str, Any]]:
-        # 1. Raddoppiamo le virgolette esistenti nel testo (standard SQL/FTS escaping)
         escaped_query_text = query.replace('"', '""')
-        
-        # 2. Racchiudiamo TUTTO tra virgolette doppie.
-        # Questo dice a FTS5: "Tratta tutto questo come una singola stringa letterale, 
-        # non interpretare caratteri speciali come $, #, -, ecc."
         safe_query = f'"{escaped_query_text}"'
         
-        # Se l'utente voleva usare la wildcard *, la ri-abilitiamo post-escaping se ha senso,
-        # ma per la ricerca esatta di identificatori (Keyword Search) è meglio cercare il token preciso.
-        # Se vuoi permettere ricerche parziali (es. "Legacy*"), la logica sarebbe più complessa.
-        # Per ora, la priorità è non crashare su simboli strani.
-
         sql = """
             SELECT 
                 n.id, n.file_path, n.start_line, n.end_line, n.type,
@@ -409,6 +466,7 @@ class SqliteGraphStorage(GraphStorage):
             sql += " AND ne.repo_id = ?"
             params.append(repo_id)
             
+        # branch è ridondante con il nuovo repo_id, ma per compatibilità lo teniamo
         if branch:
             sql += " AND ne.branch = ?"
             params.append(branch)
@@ -433,7 +491,6 @@ class SqliteGraphStorage(GraphStorage):
                 })
             return results
         except sqlite3.OperationalError as e:
-            # Ora questo dovrebbe accadere molto raramente
             logger.warning(f"FTS Search failed on query '{query}': {e}")
             return []
 

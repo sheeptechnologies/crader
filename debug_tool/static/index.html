@@ -21,14 +21,27 @@
             </div>
         </header>
 
-        <div class="main-container">
+        <div id="homeView" class="panel" style="padding: 40px; overflow-y: auto; height: 100%;">
+            <h1 style="font-size: 24px; margin-bottom: 20px; color: #fff;">Repositories</h1>
+            <div id="repoList"
+                style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px;">
+                <!-- Repo Cards injected here -->
+            </div>
+        </div>
+
+        <div id="mainContainer" class="main-container hidden">
             <!-- Left: Files -->
             <div id="fileList" class="panel">
-                <div id="filesListView" style="display:flex; flex-direction:column; height:100%;">
-                    <h2>Files</h2>
+                <div style="padding: 10px; border-bottom: 1px solid #3e3e42; display: flex; gap: 10px;">
+                    <button id="homeBtn" style="background: #3e3e42;">🏠 Home</button>
+                    <button id="searchTabBtn" style="background: #3e3e42; flex-grow: 1;">🔍 Search</button>
+                </div>
+                <div id="filesListView" style="display:flex; flex-direction:column; height:calc(100% - 45px);">
+                    <h2 style="margin-top:0;">Files</h2>
                     <div id="filesContainer" style="flex-grow:1; overflow-y:auto;"></div>
                 </div>
-                <div id="fileDetailsView" class="hidden" style="display:flex; flex-direction:column; height:100%;">
+                <div id="fileDetailsView" class="hidden"
+                    style="display:flex; flex-direction:column; height:calc(100% - 45px);">
                     <div
                         style="display:flex; align-items:center; border-bottom:1px solid #3e3e42; background:#252526; min-height: 33px;">
                         <button id="backToFilesBtn"
@@ -39,7 +52,7 @@
                 </div>
             </div>
 
-            <!-- Center: Content (Code or Graph) -->
+            <!-- Center: Content (Code or Graph or Search) -->
             <div id="centerPanel" class="panel">
                 <div id="codeView">
                     <div class="panel-header">
@@ -55,6 +68,30 @@
                         <button id="closeGraphBtn">Back to Code</button>
                     </div>
                     <div id="network"></div>
+                </div>
+
+                <div id="searchView" class="hidden" style="display: flex; flex-direction: column; height: 100%;">
+                    <div class="panel-header">
+                        <h2>Semantic Search (Debug)</h2>
+                        <button id="closeSearchBtn">Close</button>
+                    </div>
+                    <div style="padding: 20px; border-bottom: 1px solid #3e3e42;">
+                        <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                            <input type="text" id="searchInput" placeholder="Ask a question about the code..."
+                                style="flex-grow: 1; padding: 8px;">
+                            <select id="searchStrategy"
+                                style="background: #3c3c3c; color: #ccc; border: 1px solid #3e3e42; padding: 8px;">
+                                <option value="hybrid">Hybrid</option>
+                                <option value="vector">Vector Only</option>
+                                <option value="keyword">Keyword Only</option>
+                            </select>
+                            <button id="searchBtn">Search</button>
+                        </div>
+                    </div>
+                    <div id="searchResults" style="flex-grow: 1; overflow-y: auto; padding: 20px; background: #1e1e1e;">
+                        <div style="color: #858585; text-align: center; margin-top: 50px;">Enter a query to search the
+                            codebase.</div>
+                    </div>
                 </div>
             </div>
 

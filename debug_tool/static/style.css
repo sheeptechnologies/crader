@@ -308,3 +308,103 @@ button:hover {
 ::-webkit-scrollbar-corner {
     background: var(--bg-color);
 }
+
+/* Repo Card Styles */
+.repo-card {
+    background: #252526;
+    border: 1px solid #3e3e42;
+    border-radius: 6px;
+    padding: 20px;
+    cursor: pointer;
+    transition: transform 0.1s, border-color 0.1s;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.repo-card:hover {
+    border-color: #007acc;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.repo-card h3 {
+    margin: 0;
+    color: #fff;
+    font-size: 16px;
+}
+
+.repo-card .meta {
+    color: #858585;
+    font-size: 12px;
+    display: flex;
+    gap: 15px;
+}
+
+.repo-card .status {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    text-transform: uppercase;
+    font-weight: bold;
+}
+
+.status.completed {
+    background: #0e639c;
+    color: #fff;
+}
+
+.status.indexing {
+    background: #a66e00;
+    color: #fff;
+}
+
+.status.failed {
+    background: #811f1f;
+    color: #fff;
+}
+
+/* Search Result Styles */
+.search-result {
+    background: #252526;
+    border: 1px solid #3e3e42;
+    border-radius: 6px;
+    padding: 15px;
+    margin-bottom: 15px;
+    cursor: pointer;
+    transition: border-color 0.1s;
+}
+
+.search-result:hover {
+    border-color: #007acc;
+}
+
+.search-result .header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
+.search-result .file-path {
+    color: #9cdcfe;
+    font-family: 'Consolas', monospace;
+    font-size: 13px;
+}
+
+.search-result .score {
+    color: #007acc;
+    font-weight: bold;
+    font-size: 12px;
+}
+
+.search-result .snippet {
+    background: #1e1e1e;
+    padding: 10px;
+    border-radius: 4px;
+    font-family: 'Consolas', monospace;
+    font-size: 12px;
+    color: #d4d4d4;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    border-left: 3px solid #6a9955;
+}

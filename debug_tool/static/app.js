@@ -12,23 +12,122 @@ const closeGraphBtn = document.getElementById('closeGraphBtn');
 const networkContainer = document.getElementById('network');
 const nodeDetails = document.getElementById('nodeDetails');
 
+// New Views
+const homeView = document.getElementById('homeView');
+const mainContainer = document.getElementById('mainContainer');
+const repoList = document.getElementById('repoList');
+const searchView = document.getElementById('searchView');
+const searchInput = document.getElementById('searchInput');
+const searchBtn = document.getElementById('searchBtn');
+const searchResults = document.getElementById('searchResults');
+const searchStrategy = document.getElementById('searchStrategy');
+const homeBtn = document.getElementById('homeBtn');
+const searchTabBtn = document.getElementById('searchTabBtn');
+const closeSearchBtn = document.getElementById('closeSearchBtn');
+
 let network = null;
 let currentGraphData = null;
+let currentRepoId = null; // Track current repo context
 
 if (typeof vis === 'undefined') {
     alert('CRITICAL: vis-network library not loaded.');
 }
 
 // Version indicator
-statusSpan.textContent = "Ready (v2.0)";
+statusSpan.textContent = "Ready (v2.1)";
+
+// --- INITIALIZATION ---
+loadRepositories();
 
 window.selectChunk = function (chunkId, event) {
     if (event) event.stopPropagation();
     openGraph(chunkId);
 };
 
+// --- REPOSITORY MANAGEMENT ---
+
+async function loadRepositories() {
+    try {
+        const res = await fetch(`${API_BASE}/repositories`);
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        renderRepoList(data.repositories);
+    } catch (e) {
+        console.error("Failed to load repositories", e);
+        repoList.innerHTML = `<div style="color:red">Failed to load repositories: ${e.message}</div>`;
+    }
+}
+
+function renderRepoList(repos) {
+    repoList.innerHTML = '';
+    if (repos.length === 0) {
+        repoList.innerHTML = '<div style="color:#888; grid-column: 1/-1; text-align:center;">No repositories indexed yet. Use the controls above to index one.</div>';
+        return;
+    }
+
+    repos.forEach(repo => {
+        const card = document.createElement('div');
+        card.className = 'repo-card';
+
+        const statusClass = (repo.status || 'unknown').toLowerCase();
+
+        card.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h3>${escapeHtml(repo.name || 'Unnamed Repo')}</h3>
+                <span class="status ${statusClass}">${repo.status}</span>
+            </div>
+            <div style="color:#ccc; font-size:13px; font-family:'Consolas', monospace;">${escapeHtml(repo.branch)}</div>
+            <div class="meta">
+                <span>${escapeHtml(repo.url)}</span>
+                <span>${new Date(repo.updated_at).toLocaleDateString()}</span>
+            </div>
+        `;
+
+        card.addEventListener('click', () => selectRepository(repo));
+        repoList.appendChild(card);
+    });
+}
+
+function selectRepository(repo) {
+    currentRepoId = repo.id;
+    homeView.classList.add('hidden');
+    mainContainer.classList.remove('hidden');
+
+    // Reset views
+    codeView.classList.remove('hidden');
+    graphView.classList.add('hidden');
+    searchView.classList.add('hidden');
+
+    statusSpan.textContent = `Context: ${repo.name} (${repo.branch})`;
+
+    loadFiles(repo.id);
+}
+
+// --- NAVIGATION ---
+
+homeBtn.addEventListener('click', () => {
+    mainContainer.classList.add('hidden');
+    homeView.classList.remove('hidden');
+    currentRepoId = null;
+    statusSpan.textContent = "Ready (v2.1)";
+    loadRepositories(); // Refresh list
+});
+
+searchTabBtn.addEventListener('click', () => {
+    codeView.classList.add('hidden');
+    graphView.classList.add('hidden');
+    searchView.classList.remove('hidden');
+});
+
+closeSearchBtn.addEventListener('click', () => {
+    searchView.classList.add('hidden');
+    codeView.classList.remove('hidden');
+});
+
+// --- INDEXING ---
+
 indexBtn.addEventListener('click', async () => {
-    const path = repoPathInput.value;
+    const path = repoPathInput.value.trim();
     if (!path) return;
     statusSpan.textContent = 'Indexing...';
     indexBtn.disabled = true;
@@ -41,7 +140,9 @@ indexBtn.addEventListener('click', async () => {
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
         statusSpan.textContent = `Indexed! Files: ${data.stats.files}, Nodes: ${data.stats.total_nodes}`;
-        loadFiles();
+
+        // Reload repos to show the new one
+        loadRepositories();
     } catch (e) {
         statusSpan.textContent = `Error: ${e.message}`;
         console.error(e);
@@ -50,9 +151,14 @@ indexBtn.addEventListener('click', async () => {
     }
 });
 
-async function loadFiles() {
+// --- FILE LOADING ---
+
+async function loadFiles(repoId) {
     try {
-        const res = await fetch(`${API_BASE}/files`);
+        let url = `${API_BASE}/files`;
+        if (repoId) url += `?repo_id=${repoId}`;
+
+        const res = await fetch(url);
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
         renderFileList(data.files);
@@ -139,9 +245,13 @@ async function loadFileView(path) {
     codeContainer.innerHTML = 'Loading...';
     codeView.classList.remove('hidden');
     graphView.classList.add('hidden');
+    searchView.classList.add('hidden');
 
     try {
-        const res = await fetch(`${API_BASE}/file_view?path=${encodeURIComponent(path)}`);
+        let url = `${API_BASE}/file_view?path=${encodeURIComponent(path)}`;
+        if (currentRepoId) url += `&repo_id=${currentRepoId}`;
+
+        const res = await fetch(url);
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
         codeContainer.innerHTML = data.html;
@@ -153,11 +263,15 @@ async function loadFileView(path) {
 async function openGraph(chunkId) {
     codeView.classList.add('hidden');
     graphView.classList.remove('hidden');
+    searchView.classList.add('hidden');
 
     nodeDetails.innerHTML = '<div style="padding:15px; color:#858585;">Loading graph data...</div>';
 
     try {
-        const res = await fetch(`${API_BASE}/chunk/${chunkId}/graph`);
+        let url = `${API_BASE}/chunk/${chunkId}/graph`;
+        if (currentRepoId) url += `?repo_id=${currentRepoId}`;
+
+        const res = await fetch(url);
         if (!res.ok) throw new Error(await res.text());
         const data = await res.json();
         currentGraphData = data;
@@ -172,6 +286,79 @@ async function openGraph(chunkId) {
         console.error('Graph error:', e);
         nodeDetails.textContent = `Error loading graph: ${e.message}`;
     }
+}
+
+// --- SEARCH ---
+
+searchBtn.addEventListener('click', performSearch);
+searchInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') performSearch();
+});
+
+async function performSearch() {
+    const query = searchInput.value.trim();
+    if (!query) return;
+
+    if (!currentRepoId) {
+        alert("Please select a repository first.");
+        return;
+    }
+
+    searchResults.innerHTML = '<div style="color:#888; text-align:center; margin-top:20px;">Searching...</div>';
+
+    try {
+        const res = await fetch(`${API_BASE}/search`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                query: query,
+                repo_id: currentRepoId,
+                strategy: searchStrategy.value
+            })
+        });
+
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        renderSearchResults(data.results);
+    } catch (e) {
+        searchResults.innerHTML = `<div style="color:red; padding:20px;">Search failed: ${e.message}</div>`;
+    }
+}
+
+function renderSearchResults(results) {
+    searchResults.innerHTML = '';
+    if (results.length === 0) {
+        searchResults.innerHTML = '<div style="color:#888; text-align:center; margin-top:20px;">No results found.</div>';
+        return;
+    }
+
+    results.forEach(res => {
+        const div = document.createElement('div');
+        div.className = 'search-result';
+
+        const score = (res.score * 100).toFixed(1) + '%';
+
+        div.innerHTML = `
+            <div class="header">
+                <span class="file-path">${escapeHtml(res.file_path)}:${res.start_line}</span>
+                <span class="score">Score: ${score}</span>
+            </div>
+            <div class="snippet">${escapeHtml(res.content)}</div>
+            <div style="font-size:11px; color:#666; margin-top:5px;">
+                Type: ${res.chunk_type} | Method: ${res.retrieval_method}
+            </div>
+        `;
+
+        div.addEventListener('click', () => {
+            // Load file and scroll to line?
+            // For now just load file view
+            loadFileView(res.file_path);
+            // Ideally we should scroll to res.start_line, but file view loads async.
+            // We can implement scrolling later.
+        });
+
+        searchResults.appendChild(div);
+    });
 }
 
 function createNodeSvg(node, isSelected) {
@@ -253,7 +440,7 @@ function createNodeSvg(node, isSelected) {
         
         <!-- Header Text -->
         <text x="16" y="26" fill="${headerText}" font-family="Segoe UI, sans-serif" font-size="14" font-weight="bold">
-            📄 ${escapeXml(node.file_path.split('/').pop())}
+            📄 ${escapeXml(node.file_path ? node.file_path.split('/').pop() : 'Unknown File')}
         </text>
         <text x="${width - 16}" y="26" fill="${headerText}" font-family="${fontFamily}" font-size="12" text-anchor="end" opacity="0.8">
             L${node.start_line}-${node.end_line}
@@ -397,7 +584,8 @@ function updateDetailsPanel(node, allEdges, allNodes) {
     connections.forEach(c => {
         const color = c.dir === 'OUT' ? '#007acc' : '#d7ba7d';
         const arrow = c.dir === 'OUT' ? '➔' : '⬅';
-        const otherName = c.other ? (c.other.file_path.split('/').pop() + ':' + c.other.start_line) : 'Unknown';
+        const otherPath = (c.other && c.other.file_path) ? c.other.file_path.split('/').pop() : 'Unknown';
+        const otherName = c.other ? (otherPath + ':' + c.other.start_line) : 'Unknown';
         const otherType = c.other ? c.other.type : 'External';
 
         html += `<div style="background:#2d2d30; padding:8px; border-radius:3px; border-left:3px solid ${color};">`;

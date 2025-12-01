@@ -223,7 +223,7 @@ class SCIPIndexer(BaseGraphIndexer):
     def extract_relations(self, chunk_map: Dict) -> List[CodeRelation]:
         return list(self.stream_relations())
 
-    def stream_relations(self, exclude_definitions=True, exclude_externals=False):
+    def stream_relations(self, exclude_definitions=True, exclude_externals=True):
         runner = SCIPRunner(self.repo_path)
         json_path = runner.run_to_disk()
         if json_path:
@@ -231,7 +231,7 @@ class SCIPIndexer(BaseGraphIndexer):
             try: os.remove(json_path)
             except OSError: pass
 
-    def stream_relations_from_file(self, json_path: str, exclude_definitions: bool = True, exclude_externals: bool = False) -> Generator[CodeRelation, None, None]:
+    def stream_relations_from_file(self, json_path: str, exclude_definitions: bool = True, exclude_externals: bool = True) -> Generator[CodeRelation, None, None]:
         symbol_table = DiskSymbolTable()
         try:
             # FASE 1: Popolamento definizioni (Invariata)

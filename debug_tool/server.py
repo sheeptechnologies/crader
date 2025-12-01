@@ -1,4 +1,5 @@
 import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import sys
 import logging
 import html
@@ -13,6 +14,9 @@ from pydantic import BaseModel
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from code_graph_indexer.indexer import CodebaseIndexer
+from code_graph_indexer.storage.sqlite import SqliteGraphStorage
+from code_graph_indexer.retriever import CodeRetriever
+from code_graph_indexer.providers.embedding import FastEmbedProvider, DummyEmbeddingProvider
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,11 +24,66 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Global indexer instance
-indexer: Optional[CodebaseIndexer] = None
+# Global instances
+storage: Optional[SqliteGraphStorage] = None
+retriever: Optional[CodeRetriever] = None
+
+def get_components():
+    global storage, retriever
+    if storage is None:
+        # Initialize persistent storage
+        db_path = os.path.join(os.path.dirname(__file__), "..", "sheep_index.db")
+        storage = SqliteGraphStorage(db_path)
+        
+        # Initialize Embedder (Fallback logic)
+        try:
+            embedder = FastEmbedProvider()
+        except ImportError:
+            embedder = DummyEmbeddingProvider()
+            logger.warning("FastEmbed not installed. Using DummyEmbeddingProvider.")
+        except Exception as e:
+            logger.warning(f"Failed to load FastEmbed: {e}. Using DummyEmbeddingProvider.")
+            embedder = DummyEmbeddingProvider()
+            
+        retriever = CodeRetriever(storage, embedder)
+    return storage, retriever, embedder
+
+def get_components():
+    s, r, _ = get_components_full()
+    return s, r
+
+def get_components_full():
+    global storage, retriever
+    if storage is None:
+        # Initialize persistent storage
+        db_path = os.path.join(os.path.dirname(__file__), "..", "sheep_index.db")
+        storage = SqliteGraphStorage(db_path)
+        
+        # Initialize Embedder (Fallback logic)
+        try:
+            embedder = FastEmbedProvider()
+        except ImportError:
+            logger.warning("FastEmbed not installed. Using DummyEmbeddingProvider.")
+            embedder = DummyEmbeddingProvider()
+        except Exception as e:
+            logger.warning(f"Failed to load FastEmbed: {e}. Using DummyEmbeddingProvider.")
+            embedder = DummyEmbeddingProvider()
+            
+        retriever = CodeRetriever(storage, embedder)
+        return storage, retriever, embedder
+    # We need to retrieve the embedder from the retriever if already initialized
+    # But retriever.embedder is protected/private? No, it's public in python usually.
+    # Let's check retriever.py if needed, but assuming it's accessible or we store it.
+    # Actually, let's just store it in a global variable too to be safe.
+    return storage, retriever, retriever.embedder
 
 class IndexRequest(BaseModel):
     repo_path: str
+
+class SearchRequest(BaseModel):
+    query: str
+    repo_id: str
+    strategy: str = "hybrid"
 
 # --- ADAPTERS & GENERATORS (Adapted from User Snippet) ---
 
@@ -132,54 +191,144 @@ class HtmlGenerator:
 
 # --- API ENDPOINTS ---
 
+@app.get("/api/repositories")
+def get_repositories():
+    store, _ = get_components()
+    try:
+        # Assuming storage has a method to get all repositories or we query the table directly
+        # The SqliteGraphStorage has get_stats but maybe not list_repos.
+        # Let's check if we can add a helper or query directly.
+        # storage._cursor is available but internal.
+        # Let's use a raw query for now if no method exists, or add one.
+        # Looking at sqlite.py, there isn't a get_all_repositories method exposed publicly 
+        # but there is a table 'repositories'.
+        # We can use the internal cursor or add a method. 
+        # Since I cannot easily modify sqlite.py right now without context switch, 
+        # I will use the internal cursor for this debug tool.
+        store._cursor.execute("SELECT * FROM repositories")
+        cols = [d[0] for d in store._cursor.description]
+        repos = [dict(zip(cols, row)) for row in store._cursor]
+        return {"repositories": repos}
+    except Exception as e:
+        logger.exception("Failed to list repositories")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/search")
+def search_code(request: SearchRequest):
+    _, retr = get_components()
+    try:
+        results = retr.retrieve(
+            query=request.query,
+            repo_id=request.repo_id,
+            limit=10,
+            strategy=request.strategy
+        )
+        return {"results": [r.to_dict() for r in results]}
+    except Exception as e:
+        logger.exception("Search failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/index")
 def trigger_index(request: IndexRequest):
-    global indexer
-    repo_path = request.repo_path
+    store, _ = get_components()
+    repo_path = request.repo_path.strip()
     
     if not os.path.exists(repo_path):
         raise HTTPException(status_code=400, detail=f"Path not found: {repo_path}")
     
     try:
-        if indexer: indexer.close()
-        indexer = CodebaseIndexer(repo_path)
+        # Use the persistent storage
+        indexer = CodebaseIndexer(repo_path, store)
         indexer.index()
-        stats = indexer.get_stats()
+        
+        # Run embeddings
+        _, _, embedder = get_components_full()
+        # We need to consume the generator
+        for _ in indexer.embed(embedder):
+            pass
+            
+        stats = store.get_stats()
         return {"status": "success", "stats": stats}
     except Exception as e:
         logger.exception("Indexing failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/files")
-def get_files():
-    global indexer
-    if not indexer:
-        raise HTTPException(status_code=400, detail="No repository indexed.")
+def get_files(repo_id: Optional[str] = None):
+    store, _ = get_components()
     try:
-        files = list(indexer.get_files())
-        # Just return list of files, we don't need to attach chunks here anymore
-        # as we load them per file
+        if repo_id:
+            store._cursor.execute("SELECT * FROM files WHERE repo_id = ?", (repo_id,))
+        else:
+            store._cursor.execute("SELECT * FROM files")
+            
+        cols = [d[0] for d in store._cursor.description]
+        files = [dict(zip(cols, row)) for row in store._cursor]
         return {"files": files}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/file_view")
-def get_file_view(path: str):
-    global indexer
-    if not indexer:
-        raise HTTPException(status_code=400, detail="No repository indexed.")
+def get_file_view(path: str, repo_id: Optional[str] = None):
+    store, _ = get_components()
     
-    # Resolve path against the indexed repository root
-    full_path = os.path.join(indexer.repo_path, path)
+    # If repo_id is provided, we can find the local path from the repo record
+    # to read the file content.
+    local_repo_path = ""
+    if repo_id:
+        store._cursor.execute("SELECT local_path FROM repositories WHERE id = ?", (repo_id,))
+        row = store._cursor.fetchone()
+        if row and row[0]:
+            local_repo_path = row[0]
+    
+    # Fallback or check if path is absolute
+    full_path = path
+    if local_repo_path and not os.path.isabs(path):
+        full_path = os.path.join(local_repo_path, path)
     
     if not os.path.exists(full_path):
+        # Try to find it via the store if we can't find it on disk (maybe remote?)
+        # For now, assume local access is required for file view content
         raise HTTPException(status_code=404, detail=f"File not found: {full_path}")
         
     try:
-        raw_nodes = list(indexer.get_nodes())
+        # Get nodes for this file. Filter by repo_id if possible to avoid collisions.
+        # We use a raw query to be efficient and specific.
+        sql = "SELECT * FROM nodes WHERE file_path = ?"
+        params = [path] # path in DB is relative
+        
+        # If path passed is absolute, make it relative if we have local_repo_path
+        rel_path = path
+        if local_repo_path and path.startswith(local_repo_path):
+            rel_path = os.path.relpath(path, local_repo_path)
+            sql = "SELECT * FROM nodes WHERE file_path = ?"
+            params = [rel_path]
+
+        # Actually, nodes table doesn't have repo_id directly, but we can join files.
+        # But for now let's assume file_path is unique enough or we just get all nodes for that path.
+        # To be safe:
+        if repo_id:
+            sql = """
+                SELECT n.* FROM nodes n
+                JOIN files f ON n.file_path = f.path
+                WHERE n.file_path = ? AND f.repo_id = ?
+            """
+            params = [rel_path, repo_id]
+
+        store._cursor.execute(sql, params)
+        cols = [d[0] for d in store._cursor.description]
+        raw_nodes = [dict(zip(cols, row)) for row in store._cursor]
+        
+        # Parse metadata_json if present (it is in raw dict from sqlite)
+        for n in raw_nodes:
+            if n.get('metadata_json'):
+                try: n['metadata'] = json.loads(n['metadata_json'])
+                except: n['metadata'] = {}
+                del n['metadata_json']
+
         nodes = DbAdapter.adapt_nodes(raw_nodes)
         
-        html_content = HtmlGenerator.generate_code_html(full_path, indexer.repo_path, nodes)
+        html_content = HtmlGenerator.generate_code_html(full_path, local_repo_path or os.path.dirname(full_path), nodes)
         
         return {"html": html_content}
     except Exception as e:
@@ -187,70 +336,84 @@ def get_file_view(path: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/chunk/{chunk_id}/graph")
-def get_chunk_graph(chunk_id: str):
-    global indexer
-    if not indexer:
-        raise HTTPException(status_code=400, detail="No repository indexed.")
+def get_chunk_graph(chunk_id: str, repo_id: Optional[str] = None):
+    store, _ = get_components()
         
     try:
-        # Reuse previous graph logic
-        all_nodes_map = {n['id']: n for n in indexer.get_nodes()}
-        nodes = {}
+        # 1. Get the center node
+        store._cursor.execute("SELECT * FROM nodes WHERE id = ?", (chunk_id,))
+        row = store._cursor.fetchone()
+        if not row:
+             raise HTTPException(status_code=404, detail="Chunk not found")
+        
+        cols = [d[0] for d in store._cursor.description]
+        center_node = dict(zip(cols, row))
+        if center_node.get('metadata_json'):
+            center_node['metadata'] = json.loads(center_node['metadata_json'])
+            del center_node['metadata_json']
+            
+        # 2. Get edges (1st and 2nd degree)
+        # We can use a recursive CTE or just simple queries.
+        # Let's use the logic from before but adapted for SQL to avoid loading ALL nodes.
+        
+        nodes = {chunk_id: center_node}
         edges = []
         
-        # Load all contents for lookup
-        content_map = {c['chunk_hash']: c['content'] for c in indexer.get_contents()}
+        # Helper to fetch nodes
+        def fetch_nodes(nids):
+            if not nids: return
+            placeholders = ",".join(["?"] * len(nids))
+            store._cursor.execute(f"SELECT * FROM nodes WHERE id IN ({placeholders})", list(nids))
+            c = [d[0] for d in store._cursor.description]
+            for r in store._cursor:
+                n = dict(zip(c, r))
+                if n.get('metadata_json'):
+                    n['metadata'] = json.loads(n['metadata_json'])
+                    del n['metadata_json']
+                nodes[n['id']] = n
 
-        def add_node(nid):
-            if nid not in nodes and nid in all_nodes_map:
-                n_data = all_nodes_map[nid].copy()
-                # Inject content
-                if 'chunk_hash' in n_data and n_data['chunk_hash'] in content_map:
-                    n_data['content'] = content_map[n_data['chunk_hash']]
-                else:
-                    n_data['content'] = None
-                nodes[nid] = n_data
-                return True
-            return False
-
-        if not add_node(chunk_id):
-             raise HTTPException(status_code=404, detail="Chunk not found")
-
-        all_edges = list(indexer.get_edges())
+        # 1st degree edges
+        store._cursor.execute("SELECT * FROM edges WHERE source_id = ? OR target_id = ?", (chunk_id, chunk_id))
+        c_edge = [d[0] for d in store._cursor.description]
+        first_edges = [dict(zip(c_edge, r)) for r in store._cursor]
         
-        # 1. First degree
-        first_degree_ids = set()
-        for edge in all_edges:
-            if edge['source_id'] == chunk_id:
-                target_id = edge['target_id']
-                if target_id in all_nodes_map:
-                    if all_nodes_map[target_id].get('type') != 'external_library':
-                        add_node(target_id)
-                        edges.append(edge)
-                        first_degree_ids.add(target_id)
-            elif edge['target_id'] == chunk_id:
-                 source_id = edge['source_id']
-                 if source_id in all_nodes_map:
-                    if all_nodes_map[source_id].get('type') != 'external_library':
-                        add_node(source_id)
-                        edges.append(edge)
-                        first_degree_ids.add(source_id)
+        neighbor_ids = set()
+        for e in first_edges:
+            if e['metadata_json']: e['metadata'] = json.loads(e['metadata_json'])
+            del e['metadata_json']
+            edges.append(e)
+            neighbor_ids.add(e['source_id'])
+            neighbor_ids.add(e['target_id'])
+            
+        neighbor_ids.discard(chunk_id)
+        fetch_nodes(neighbor_ids)
+        
+        # 2nd degree edges (between neighbors)
+        if neighbor_ids:
+            placeholders = ",".join(["?"] * len(neighbor_ids))
+            store._cursor.execute(f"""
+                SELECT * FROM edges 
+                WHERE source_id IN ({placeholders}) AND target_id IN ({placeholders})
+            """, list(neighbor_ids) * 2)
+            
+            second_edges = [dict(zip(c_edge, r)) for r in store._cursor]
+            for e in second_edges:
+                if e['metadata_json']: e['metadata'] = json.loads(e['metadata_json'])
+                del e['metadata_json']
+                edges.append(e)
 
-        # 2. Second degree
-        for start_id in first_degree_ids:
-            for edge in all_edges:
-                if edge['source_id'] == start_id:
-                    target_id = edge['target_id']
-                    if target_id != chunk_id and target_id in all_nodes_map:
-                         if all_nodes_map[target_id].get('type') != 'external_library':
-                            add_node(target_id)
-                            edges.append(edge)
-                elif edge['target_id'] == start_id:
-                    source_id = edge['source_id']
-                    if source_id != chunk_id and source_id in all_nodes_map:
-                        if all_nodes_map[source_id].get('type') != 'external_library':
-                            add_node(source_id)
-                            edges.append(edge)
+        # 3. Fetch content for all nodes
+        chunk_hashes = [n['chunk_hash'] for n in nodes.values() if n.get('chunk_hash')]
+        if chunk_hashes:
+            placeholders = ",".join(["?"] * len(chunk_hashes))
+            store._cursor.execute(f"SELECT chunk_hash, content FROM contents WHERE chunk_hash IN ({placeholders})", chunk_hashes)
+            content_map = {row[0]: row[1] for row in store._cursor}
+            
+            for n in nodes.values():
+                if n.get('chunk_hash') in content_map:
+                    n['content'] = content_map[n['chunk_hash']]
+                else:
+                    n['content'] = None
 
         return {
             "nodes": list(nodes.values()),

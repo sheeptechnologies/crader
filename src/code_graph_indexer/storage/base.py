@@ -23,6 +23,7 @@ class GraphStorage(ABC):
         """Aggiorna lo stato (es. 'completed', 'failed') e il commit finale."""
         pass
 
+
     # --- WRITE (Graph) ---
     @abstractmethod
     def add_files(self, files: List[Any]): pass
@@ -114,4 +115,5 @@ class GraphStorage(ABC):
         """
         pass
 
+    
 

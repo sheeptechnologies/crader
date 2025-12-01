@@ -14,6 +14,7 @@ class Repository:
     last_commit: str
     status: str       # 'indexing', 'completed', 'failed'
     updated_at: str
+    local_path: Optional[str] = None # Path fisico al worktree
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
