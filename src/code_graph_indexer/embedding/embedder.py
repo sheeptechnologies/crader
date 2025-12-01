@@ -20,13 +20,17 @@ class CodeEmbedder:
         
         Args:
             repo_id: ID della repository target.
-            branch: Branch corrente per filtrare e taggare i vettori.
+            branch: Branch corrente per filtrare e taggare i vettori. (obsoleto, repo_id è sufficiente)
             batch_size: Dimensione del batch per l'API.
             yield_debug_docs: Se True, yielda anche i documenti generati (PER DEBUG/TEST).
                               Se False (Prod), yielda solo lo stato di avanzamento.
         """
-        # 1. Cursore filtrato (Solo nodi di questo repo/branch)
-        nodes_cursor = self.storage.get_nodes_cursor(repo_id=repo_id, branch=branch)
+
+        # [OTTIMIZZAZIONE] Chiediamo al DB solo quello che serve
+        nodes_cursor = self.storage.get_nodes_to_embed(
+            repo_id=repo_id, 
+            model_name=self.provider.model_name
+        )
         
         current_batch = []
         processed_count = 0
@@ -37,7 +41,6 @@ class CodeEmbedder:
             if len(current_batch) >= batch_size:
                 saved_docs = self._process_and_save(current_batch, repo_id, branch, debug=yield_debug_docs)
                 processed_count += len(current_batch)
-                
                 yield {"status": "processing", "processed": processed_count}
                 
                 if yield_debug_docs:
@@ -49,11 +52,13 @@ class CodeEmbedder:
         if current_batch:
             saved_docs = self._process_and_save(current_batch, repo_id, branch, debug=yield_debug_docs)
             processed_count += len(current_batch)
-            
             yield {"status": "completed", "processed": processed_count}
-            
             if yield_debug_docs:
                 for doc in saved_docs: yield doc
+        
+        # Se non c'era nulla da fare
+        if processed_count == 0:
+            yield {"status": "skipped", "message": "All nodes already embedded"}
 
     def _process_and_save(self, nodes: List[Dict], repo_id: str, branch: str, debug: bool = False) -> List[Dict]:
         """

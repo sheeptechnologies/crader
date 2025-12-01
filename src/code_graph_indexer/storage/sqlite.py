@@ -33,8 +33,7 @@ class SqliteGraphStorage(GraphStorage):
         self._cursor.execute("PRAGMA journal_mode = WAL")
         self._cursor.execute("PRAGMA cache_size = 5000")
 
-        # --- TABELLA REPOSITORIES (Modificata) ---
-        # id diventa una chiave surrogata (UUID) specifica per (url + branch)
+        # --- TABELLA REPOSITORIES ---
         self._cursor.execute("""
             CREATE TABLE IF NOT EXISTS repositories (
                 id TEXT PRIMARY KEY,        -- UUID Univoco per questa istanza (Repo + Branch)
@@ -50,7 +49,6 @@ class SqliteGraphStorage(GraphStorage):
         """)
 
         # --- TABELLE BASE ---
-        # file_hash serve per deduplicare il contenuto, ma il path è univoco per repo_id (che ora include il branch)
         self._cursor.execute("""
             CREATE TABLE IF NOT EXISTS files (
                 id TEXT PRIMARY KEY, 
@@ -68,17 +66,20 @@ class SqliteGraphStorage(GraphStorage):
         self._cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files (path)")
         self._cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_repo ON files (repo_id)")
 
+        # [FIX] Aggiunto file_id per linking robusto
         self._cursor.execute("""
             CREATE TABLE IF NOT EXISTS nodes (
                 id TEXT PRIMARY KEY, 
+                file_id TEXT,               -- FK su files.id (IL COLLEGAMENTO FORTE)
                 type TEXT, 
-                file_path TEXT,
+                file_path TEXT,             -- Ridondante ma utile per query veloci senza join
                 start_line INTEGER, end_line INTEGER, byte_start INTEGER, byte_end INTEGER,
                 chunk_hash TEXT, 
                 size INTEGER,
                 metadata_json TEXT 
             )
         """)
+        self._cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_file_id ON nodes (file_id)")
         self._cursor.execute("CREATE INDEX IF NOT EXISTS idx_nodes_spatial ON nodes (file_path, byte_start)")
 
         self._cursor.execute("CREATE TABLE IF NOT EXISTS contents (chunk_hash TEXT PRIMARY KEY, content TEXT)")
@@ -125,7 +126,6 @@ class SqliteGraphStorage(GraphStorage):
     # --- REPOSITORY MANAGEMENT ---
 
     def get_repository(self, repo_id: str) -> Optional[Dict[str, Any]]:
-        """Recupera per ID interno."""
         self._cursor.execute("SELECT * FROM repositories WHERE id = ?", (repo_id,))
         row = self._cursor.fetchone()
         if not row: return None
@@ -133,7 +133,6 @@ class SqliteGraphStorage(GraphStorage):
         return dict(zip(cols, row))
 
     def get_repository_by_context(self, url: str, branch: str) -> Optional[Dict[str, Any]]:
-        """Recupera per chiave logica (URL + Branch)."""
         self._cursor.execute("SELECT * FROM repositories WHERE url = ? AND branch = ?", (url, branch))
         row = self._cursor.fetchone()
         if not row: return None
@@ -141,29 +140,18 @@ class SqliteGraphStorage(GraphStorage):
         return dict(zip(cols, row))
 
     def register_repository(self, id: str, name: str, url: str, branch: str, commit_hash: str, local_path: str = None) -> str:
-        """
-        Registra o recupera una repository.
-        Se esiste già (url+branch), restituisce il suo ID esistente e aggiorna i metadati.
-        Se non esiste, ne crea uno nuovo.
-        
-        Returns:
-            L'ID interno (UUID) della repository da usare per l'indicizzazione.
-        """
         now = datetime.datetime.utcnow().isoformat()
         
-        # 1. Cerchiamo se esiste già
         existing = self.get_repository_by_context(url, branch)
         
         if existing:
             repo_id = existing['id']
-            # Aggiorniamo stato e commit
             self._cursor.execute("""
                 UPDATE repositories 
                 SET name=?, last_commit=?, status='indexing', updated_at=?, local_path=?
                 WHERE id=?
             """, (name, commit_hash, now, local_path, repo_id))
         else:
-            # Creiamo nuovo record
             repo_id = str(uuid.uuid4())
             self._cursor.execute("""
                 INSERT INTO repositories (id, name, url, branch, last_commit, status, updated_at, local_path)
@@ -186,34 +174,26 @@ class SqliteGraphStorage(GraphStorage):
 
     # --- DELETE PREVIOUS DATA ---
     def delete_previous_data(self, repo_id: str, branch: str):
-        """
-        Pulisce i dati di una specifica istanza di repository (identificata da repo_id).
-        Non tocca i contenuti (blob) che potrebbero essere condivisi.
-        """
         try:
-            logger.info(f"🧹 Pulizia dati per Repo ID: {repo_id} (Branch: {branch})")
-
             # 1. Pulizia Embeddings
             self._cursor.execute("DELETE FROM node_embeddings WHERE repo_id = ?", (repo_id,))
             
-            # 2. Pulizia Archi (Edges)
-            # Dobbiamo trovare i nodi che stiamo per cancellare per cancellare i loro archi
-            # (Subquery ottimizzata)
+            # 2. Pulizia Archi (Edges) - Cascata tramite file
             self._cursor.execute("""
                 DELETE FROM edges 
                 WHERE source_id IN (
                     SELECT n.id 
                     FROM nodes n
-                    JOIN files f ON n.file_path = f.path 
+                    JOIN files f ON n.file_id = f.id 
                     WHERE f.repo_id = ?
                 )
             """, (repo_id,))
 
-            # 3. Pulizia Nodi
+            # 3. Pulizia Nodi - Cascata tramite file
             self._cursor.execute("""
                 DELETE FROM nodes 
-                WHERE file_path IN (
-                    SELECT path FROM files WHERE repo_id = ?
+                WHERE file_id IN (
+                    SELECT id FROM files WHERE repo_id = ?
                 )
             """, (repo_id,))
 
@@ -236,7 +216,6 @@ class SqliteGraphStorage(GraphStorage):
                 d['category'], d['indexed_at']
             ))
         if sql_batch:
-            # REPLACE in caso di re-run parziale sullo stesso ID
             self._cursor.executemany("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", sql_batch)
             self._conn.commit()
 
@@ -247,15 +226,20 @@ class SqliteGraphStorage(GraphStorage):
             b_start = d['byte_range'][0]
             b_end = d['byte_range'][1]
             meta = json.dumps(d.get('metadata', {}))
+            
+            # [FIX] Inseriamo anche file_id
             sql_batch.append((
-                d['id'], d['type'], d['file_path'], 
+                d['id'], 
+                d.get('file_id'),  # <--- NEW: Link forte al file
+                d['type'], d['file_path'], 
                 d['start_line'], d['end_line'],
                 b_start, b_end, d.get('chunk_hash', ''),
                 b_end - b_start,
                 meta
             ))
         if sql_batch:
-            self._cursor.executemany("INSERT OR IGNORE INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", sql_batch)
+            # Aggiornata query con 11 parametri invece di 10
+            self._cursor.executemany("INSERT OR IGNORE INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", sql_batch)
             self._conn.commit()
 
     def add_contents(self, contents: List[Any]):
@@ -283,25 +267,20 @@ class SqliteGraphStorage(GraphStorage):
     def get_nodes_cursor(self, repo_id: str = None, branch: str = None) -> Generator[Dict[str, Any], None, None]:
         iter_cursor = self._conn.cursor()
         
+        # [FIX] JOIN robusta su file_id
         base_query = """
             SELECT n.id, n.type, n.file_path, n.chunk_hash, n.start_line, n.end_line, 
                    f.repo_id, f.language, f.category
             FROM nodes n
-            LEFT JOIN files f ON n.file_path = f.path 
-            LEFT JOIN repositories r ON f.repo_id = r.id 
+            JOIN files f ON n.file_id = f.id 
+            JOIN repositories r ON f.repo_id = r.id 
             WHERE n.type NOT IN ('external_library', 'program', 'module')
         """
         
         params = []
         if repo_id:
-            # Qui repo_id è l'ID univoco interno, quindi basta filtrare su f.repo_id
             base_query += " AND f.repo_id = ?"
             params.append(repo_id)
-            
-        # branch è ridondante se repo_id è univoco per branch, ma lo lasciamo per sicurezza se passato
-        if branch:
-            base_query += " AND r.branch = ?"
-            params.append(branch)
             
         iter_cursor.execute(base_query, params)
         if iter_cursor.description:
@@ -309,6 +288,37 @@ class SqliteGraphStorage(GraphStorage):
             for row in iter_cursor:
                 yield dict(zip(cols, row))
         iter_cursor.close()
+
+    def get_nodes_to_embed(self, repo_id: str, model_name: str) -> Generator[Dict[str, Any], None, None]:
+        """
+        Restituisce SOLO i nodi di una repository che non hanno ancora un embedding
+        per il modello specificato. Ottimizzazione incrementale.
+        """
+        # [FIX] JOIN robusta su file_id per evitare cross-repo leak
+        sql = """
+            SELECT 
+                n.id, n.type, n.file_path, n.chunk_hash, n.start_line, n.end_line, 
+                f.repo_id, r.branch, f.language, f.category 
+            FROM files f
+            JOIN repositories r ON f.repo_id = r.id
+            JOIN nodes n ON f.id = n.file_id
+            LEFT JOIN node_embeddings ne ON (
+                n.id = ne.chunk_id 
+                AND ne.model_name = ?
+            )
+            WHERE f.repo_id = ? 
+              AND ne.id IS NULL
+              AND n.type NOT IN ('external_library', 'program', 'module')
+        """
+        
+        c = self._conn.cursor()
+        c.execute(sql, (model_name, repo_id))
+        
+        if c.description:
+            cols = [d[0] for d in c.description]
+            for row in c:
+                yield dict(zip(cols, row))
+        c.close()
 
     def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]:
         if not chunk_hashes: return {}
@@ -326,6 +336,8 @@ class SqliteGraphStorage(GraphStorage):
         return result
 
     def get_files_bulk(self, file_paths: List[str]) -> Dict[str, Dict[str, Any]]:
+        # Nota: Questa funzione è ambigua in multi-branch se si passa solo il path.
+        # Meglio usarla solo nel contesto di un singolo batch di nodi già filtrati.
         if not file_paths: return {}
         unique_paths = list(set(file_paths))
         BATCH_SIZE = 900
@@ -334,6 +346,7 @@ class SqliteGraphStorage(GraphStorage):
         for i in range(0, len(unique_paths), BATCH_SIZE):
             batch = unique_paths[i:i+BATCH_SIZE]
             placeholders = ",".join(["?"] * len(batch))
+            # Rischio collisione path qui, ma per l'uso corrente (enrichment) è accettabile
             query = f"SELECT path, repo_id, language, category FROM files WHERE path IN ({placeholders})"
             self._cursor.execute(query, batch)
             if self._cursor.description:
@@ -391,6 +404,9 @@ class SqliteGraphStorage(GraphStorage):
 
     # --- READ HELPERS ---
     def find_chunk_id(self, file_path: str, byte_range: List[int]) -> Optional[str]:
+        # Nota: Questa query è ancora ambigua su multi-repo se file_path è comune.
+        # Idealmente dovrebbe prendere anche repo_id in input.
+        # Tuttavia, viene usata dal builder nel contesto di una singola sessione.
         if not byte_range: return None
         self._cursor.execute(
             "SELECT id FROM nodes WHERE file_path = ? AND byte_start <= ? + 1 AND byte_end >= ? - 1 ORDER BY size ASC LIMIT 1",
@@ -466,11 +482,6 @@ class SqliteGraphStorage(GraphStorage):
             sql += " AND ne.repo_id = ?"
             params.append(repo_id)
             
-        # branch è ridondante con il nuovo repo_id, ma per compatibilità lo teniamo
-        if branch:
-            sql += " AND ne.branch = ?"
-            params.append(branch)
-            
         sql += " ORDER BY contents_fts.rank ASC LIMIT ?"
         params.append(limit)
         
@@ -509,10 +520,6 @@ class SqliteGraphStorage(GraphStorage):
         if repo_id:
             sql += " AND ne.repo_id = ?"
             params.append(repo_id)
-        
-        if branch:
-            sql += " AND ne.branch = ?"
-            params.append(branch)
             
         self._cursor.execute(sql, params)
         rows = self._cursor.fetchall()

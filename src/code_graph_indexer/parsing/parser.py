@@ -91,8 +91,14 @@ class TreeSitterRepoParser:
     def __init__(self, repo_path: str, metadata_provider: Optional[MetadataProvider] = None):
         self.repo_path = os.path.abspath(repo_path)
         if not os.path.isdir(self.repo_path): raise FileNotFoundError(f"Invalid path: {repo_path}")
+
+        # [FIX] Usa os.path.exists invece di isdir per supportare Git Worktrees (dove .git è un file)
+        is_git_repo = os.path.exists(os.path.join(self.repo_path, ".git"))
         
-        self.metadata_provider = metadata_provider or (GitMetadataProvider(self.repo_path) if os.path.isdir(os.path.join(self.repo_path, ".git")) else LocalMetadataProvider(self.repo_path))
+        self.metadata_provider = metadata_provider or (
+            GitMetadataProvider(self.repo_path) if is_git_repo else LocalMetadataProvider(self.repo_path)
+        )
+        
         self.repo_info = self.metadata_provider.get_repo_info()
         self.repo_id = self.repo_info.get('repo_id', str(uuid.uuid4()))
         

@@ -245,7 +245,7 @@ def trigger_index(request: IndexRequest):
         _, _, embedder = get_components_full()
         # We need to consume the generator
         for _ in indexer.embed(embedder):
-            pass
+            logger.info(f"🤖 Processati: {_}")
             
         stats = store.get_stats()
         return {"status": "success", "stats": stats}

@@ -70,6 +70,14 @@ class GraphStorage(ABC):
     @abstractmethod
     def get_incoming_definitions_bulk(self, node_ids: List[str]) -> Dict[str, List[str]]: pass
 
+    @abstractmethod
+    def get_nodes_to_embed(self, repo_id: str, model_name: str) -> Generator[Dict[str, Any], None, None]:
+        """
+        Restituisce SOLO i nodi che non hanno ancora un embedding per il modello specificato.
+        Ottimizzato via SQL per evitare trasferimenti dati inutili.
+        """
+        pass
+
     # --- READ / CONSUME ---
     @abstractmethod
     def get_all_files(self) -> Generator[Dict[str, Any], None, None]: pass
