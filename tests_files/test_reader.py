@@ -71,41 +71,32 @@ def run_reader_test(target_path=None):
     logger.info("\n2️⃣  Test CodeReader: Listing...")
     reader = CodeReader(storage)
     
-    # List della root
-    listing_output = reader.list_directory(repo_id, "docs")
-    print(f"\n{listing_output}\n")
-
-    # Parsing dell'output per trovare il primo file
-    # L'output è del tipo:
-    # 📁 folder
-    # 📄 file.txt
-    first_file = None
-    for line in listing_output.splitlines():
-        if "📄" in line:
-            first_file = line.replace("📄 ", "").strip()
-            break
+    # List della root (ritorna List[Dict])
+    try:
+        items = reader.list_directory(repo_id, "")
+        for item in items:
+            icon = "📁" if item['type'] == 'dir' else "📄"
+            print(f"{icon} {item['name']} ({item['path']})")
             
-    if first_file:
-        logger.info(f"3️⃣  Test CodeReader: Lettura file '{first_file}'...")
-        content = reader.read_file(repo_id, first_file)
+        # Trova un file
+        first_file_obj = next((i for i in items if i['type'] == 'file'), None)
         
-        print("-" * 40)
-        print(content)
-        print("-" * 40)
-        
-        if "Error" not in content:
-            logger.info("✅ Lettura riuscita!")
-        else:
-            logger.error("❌ Errore nella lettura.")
+        if first_file_obj:
+            fname = first_file_obj['path'] # Usa il path relativo
+            logger.info(f"3️⃣  Test CodeReader: Lettura file '{fname}'...")
             
-        # Test lettura range (se il file ha abbastanza righe, es. main.py)
-        if first_file.endswith(".py"):
-             logger.info(f"4️⃣  Test CodeReader: Lettura Range (L1-1)...")
-             partial = reader.read_file(repo_id, first_file, start_line=1, end_line=1)
-             print(f"Snippet:\n{partial}")
-
-    else:
-        logger.warning("⚠️  Nessun file trovato nella root.")
+            file_data = reader.read_file(repo_id, fname)
+            print(f"--- DATA ---")
+            print(f"Path: {file_data['file_path']}")
+            print(f"Size: {file_data['size_bytes']} bytes")
+            print(f"Content:\n{file_data['content'][:50]}...") # Preview
+            
+            if fname.endswith(".py"):
+                 logger.info(f"4️⃣  Test CodeReader: Lettura Range...")
+                 partial = reader.read_file(repo_id, fname, start_line=1, end_line=1)
+                 print(f"Snippet L1-1: {partial['content'].strip()}")
+    except Exception as e:
+        logger.error(f"Errore Reader: {e}")
 
     # Cleanup
     storage.close()

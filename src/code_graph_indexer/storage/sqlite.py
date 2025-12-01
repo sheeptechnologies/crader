@@ -627,3 +627,138 @@ class SqliteGraphStorage(GraphStorage):
             })
             
         return result
+    
+    def get_context_neighbors(self, node_id: str) -> Dict[str, List[Dict[str, Any]]]:
+        result = {"parents": [], "calls": []}
+        
+        # 1. Parents (Vertical)
+        sql_parent = """
+            SELECT t.id, t.type, t.file_path, t.start_line, e.metadata_json
+            FROM edges e
+            JOIN nodes t ON e.target_id = t.id
+            WHERE e.source_id = ? AND e.relation_type = 'child_of'
+        """
+        self._cursor.execute(sql_parent, (node_id,))
+        for row in self._cursor:
+            result["parents"].append({
+                "id": row[0], "type": row[1], "file_path": row[2], 
+                "start_line": row[3], "meta": json.loads(row[4] or "{}")
+            })
+
+        # 2. Calls (Horizontal - Sampling)
+        sql_calls = """
+            SELECT t.id, t.type, t.file_path, e.metadata_json
+            FROM edges e
+            JOIN nodes t ON e.target_id = t.id
+            WHERE e.source_id = ? AND (e.relation_type = 'calls' OR e.relation_type = 'references')
+            LIMIT 15
+        """
+        self._cursor.execute(sql_calls, (node_id,))
+        for row in self._cursor:
+            meta = json.loads(row[3] or "{}")
+            symbol = meta.get("symbol", "unknown")
+            result["calls"].append({
+                "id": row[0], "type": row[1], "symbol": symbol
+            })
+            
+        return result
+
+    def get_neighbor_chunk(self, node_id: str, direction: str = "next") -> Optional[Dict[str, Any]]:
+        # Recupera file_id e posizione del nodo corrente
+        self._cursor.execute("SELECT file_id, start_line, end_line FROM nodes WHERE id = ?", (node_id,))
+        curr = self._cursor.fetchone()
+        if not curr: return None
+        
+        file_id, start, end = curr
+        
+        if direction == "next":
+            # Cerca il primo nodo nello stesso file che inizia dopo o alla fine di questo
+            sql = """
+                SELECT n.id, n.type, n.start_line, n.end_line, n.chunk_hash, c.content
+                FROM nodes n
+                LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+                WHERE n.file_id = ? AND n.start_line >= ? AND n.id != ?
+                ORDER BY n.start_line ASC, n.byte_start ASC
+                LIMIT 1
+            """
+            params = (file_id, end, node_id) # Cerca dopo la fine del corrente (o sovrapposti dopo)
+        else:
+            # Prev
+            sql = """
+                SELECT n.id, n.type, n.start_line, n.end_line, n.chunk_hash, c.content
+                FROM nodes n
+                LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+                WHERE n.file_id = ? AND n.end_line <= ? AND n.id != ?
+                ORDER BY n.end_line DESC, n.byte_start DESC
+                LIMIT 1
+            """
+            params = (file_id, start, node_id) # Cerca prima dell'inizio
+
+        self._cursor.execute(sql, params)
+        row = self._cursor.fetchone()
+        
+        if row:
+            return {
+                "id": row[0], "type": row[1], "start_line": row[2], 
+                "end_line": row[3], "chunk_hash": row[4], "content": row[5]
+            }
+        return None
+
+    def get_incoming_references(self, target_node_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Chi usa questo nodo? (Reverse dependencies)
+        """
+        sql = """
+            SELECT 
+                s.id, s.type, s.file_path, s.start_line, 
+                e.relation_type, e.metadata_json
+            FROM edges e
+            JOIN nodes s ON e.source_id = s.id
+            WHERE e.target_id = ? 
+            AND e.relation_type IN ('calls', 'references', 'imports', 'instantiates')
+            ORDER BY s.file_path, s.start_line
+            LIMIT ?
+        """
+        self._cursor.execute(sql, (target_node_id, limit))
+        results = []
+        for row in self._cursor:
+            meta = json.loads(row[5] or "{}")
+            # Costruiamo uno snippet di contesto
+            results.append({
+                "source_id": row[0],
+                "source_type": row[1],
+                "file": row[2],
+                "line": row[3],
+                "relation": row[4],
+                "context_snippet": meta.get("description", "")
+            })
+        return results
+
+    def get_outgoing_calls(self, source_node_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Cosa chiama questo nodo? (Forward dependencies)
+        """
+        sql = """
+            SELECT 
+                t.id, t.type, t.file_path, t.start_line,
+                e.relation_type, e.metadata_json
+            FROM edges e
+            JOIN nodes t ON e.target_id = t.id
+            WHERE e.source_id = ?
+            AND e.relation_type IN ('calls', 'instantiates', 'imports')
+            ORDER BY t.file_path, t.start_line
+            LIMIT ?
+        """
+        self._cursor.execute(sql, (source_node_id, limit))
+        results = []
+        for row in self._cursor:
+            meta = json.loads(row[5] or "{}")
+            results.append({
+                "target_id": row[0],
+                "target_type": row[1],
+                "file": row[2],
+                "line": row[3],
+                "relation": row[4],
+                "symbol": meta.get("symbol", "")
+            })
+        return results

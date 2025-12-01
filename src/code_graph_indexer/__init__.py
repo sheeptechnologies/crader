@@ -4,6 +4,7 @@ from .models import FileRecord, ChunkContent, ChunkNode, ParsingResult, CodeRela
 from .storage.base import GraphStorage
 from .storage.sqlite import SqliteGraphStorage
 from .reader import CodeReader
+from .navigator import CodeNavigator
 
 __all__ = [
     "CodebaseIndexer", 

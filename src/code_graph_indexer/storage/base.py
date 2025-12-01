@@ -124,4 +124,18 @@ class GraphStorage(ABC):
         pass
 
     
+    # Metodi per il CodeNavigator
+    @abstractmethod
+    def get_neighbor_chunk(self, node_id: str, direction: str = "next") -> Optional[Dict[str, Any]]:
+        """Recupera il chunk precedente o successivo nello stesso file."""
+        pass
 
+    @abstractmethod
+    def get_incoming_references(self, target_node_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Trova chi usa/chiama il nodo target (Impact Analysis)."""
+        pass
+
+    @abstractmethod
+    def get_outgoing_calls(self, source_node_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Trova cosa chiama il nodo source (Pipeline Exploration)."""
+        pass
