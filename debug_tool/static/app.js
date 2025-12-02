@@ -8,8 +8,7 @@ const codeContainer = document.getElementById('codeContainer');
 const currentFileHeader = document.getElementById('currentFile');
 const codeView = document.getElementById('codeView');
 const graphView = document.getElementById('graphView');
-const closeGraphBtn = document.getElementById('closeGraphBtn');
-const networkContainer = document.getElementById('network');
+const navigatorView = document.getElementById('navigatorView');
 const nodeDetails = document.getElementById('nodeDetails');
 
 // New Views
@@ -22,6 +21,12 @@ const searchBtn = document.getElementById('searchBtn');
 const searchResults = document.getElementById('searchResults');
 const searchStrategy = document.getElementById('searchStrategy');
 const homeBtn = document.getElementById('homeBtn');
+
+// Tabs
+const contextTabs = document.getElementById('contextTabs');
+const codeTabBtn = document.getElementById('codeTabBtn');
+const graphTabBtn = document.getElementById('graphTabBtn');
+const navigatorTabBtn = document.getElementById('navigatorTabBtn');
 const searchTabBtn = document.getElementById('searchTabBtn');
 const closeSearchBtn = document.getElementById('closeSearchBtn');
 
@@ -118,13 +123,63 @@ function selectRepository(repo) {
     codeView.classList.remove('hidden');
     graphView.classList.add('hidden');
     searchView.classList.add('hidden');
+    switchTab('code');
 
     statusSpan.textContent = `Context: ${repo.name} (${repo.branch})`;
 
     loadFiles(repo.id);
 }
 
-// --- NAVIGATION ---
+// --- TABS & NAVIGATION ---
+
+
+
+
+function switchTab(tabName) {
+    // Reset active state for Context Tabs
+    [codeTabBtn, graphTabBtn, navigatorTabBtn].forEach(b => b.classList.remove('active'));
+    [codeView, graphView, navigatorView].forEach(v => v.classList.add('hidden'));
+
+    // Handle Search separately
+    if (tabName === 'search') {
+        searchTabBtn.classList.add('active');
+        searchView.classList.remove('hidden');
+        // Hide context views when searching? Or overlay?
+        // Let's hide context views to be clean
+        return;
+    } else {
+        searchTabBtn.classList.remove('active');
+        searchView.classList.add('hidden');
+    }
+
+    // Activate selected context tab
+    if (tabName === 'code') {
+        codeTabBtn.classList.add('active');
+        codeView.classList.remove('hidden');
+    } else if (tabName === 'graph') {
+        graphTabBtn.classList.add('active');
+        graphView.classList.remove('hidden');
+    } else if (tabName === 'navigator') {
+        navigatorTabBtn.classList.add('active');
+        navigatorView.classList.remove('hidden');
+        if (selectedNodeId) loadNavigatorData(selectedNodeId);
+    }
+}
+
+codeTabBtn.addEventListener('click', () => switchTab('code'));
+graphTabBtn.addEventListener('click', () => switchTab('graph'));
+navigatorTabBtn.addEventListener('click', () => switchTab('navigator'));
+searchTabBtn.addEventListener('click', () => {
+    if (searchTabBtn.classList.contains('active')) {
+        // Toggle off
+        switchTab('code'); // Default back to code
+    } else {
+        switchTab('search');
+    }
+});
+
+// Global state for selected node
+let selectedNodeId = null;
 
 homeBtn.addEventListener('click', () => {
     mainContainer.classList.add('hidden');
@@ -134,15 +189,8 @@ homeBtn.addEventListener('click', () => {
     loadRepositories(); // Refresh list
 });
 
-searchTabBtn.addEventListener('click', () => {
-    codeView.classList.add('hidden');
-    graphView.classList.add('hidden');
-    searchView.classList.remove('hidden');
-});
-
 closeSearchBtn.addEventListener('click', () => {
-    searchView.classList.add('hidden');
-    codeView.classList.remove('hidden');
+    switchTab('code'); // Go back to code view
 });
 
 // --- INDEXING ---
@@ -264,9 +312,11 @@ function showFileDetails(file) {
 async function loadFileView(path) {
     currentFileHeader.textContent = path.split('/').pop();
     codeContainer.innerHTML = 'Loading...';
-    codeView.classList.remove('hidden');
-    graphView.classList.add('hidden');
-    searchView.classList.add('hidden');
+
+    // Reset UI state
+    selectedNodeId = null;
+    contextTabs.classList.add('hidden'); // Hide tabs until chunk selected
+    switchTab('code');
 
     try {
         let url = `${API_BASE}/file_view?path=${encodeURIComponent(path)}`;
@@ -282,9 +332,23 @@ async function loadFileView(path) {
 }
 
 async function openGraph(chunkId) {
-    codeView.classList.add('hidden');
-    graphView.classList.remove('hidden');
-    searchView.classList.add('hidden');
+    selectedNodeId = chunkId; // Track selection
+
+    // Show tabs now that we have a context
+    contextTabs.classList.remove('hidden');
+
+    // Optional: Auto-switch to graph? Or stay on code?
+    // User said: "given a selected chunk I can decide whether to view..."
+    // So maybe stay on code but show the options?
+    // But usually clicking a chunk implies wanting to see details/graph.
+    // Let's Default to Graph for now as it provides immediate visual feedback, 
+    // OR stay on Code and let user click.
+    // User complaint: "opens a section that goes down".
+    // Let's try: Stay on Code, but show tabs.
+    // actually, `openGraph` name implies opening graph.
+    // Let's rename function logic or just switch tab.
+    // Let's switch to 'graph' to show the "Apple style" transition.
+    switchTab('graph');
 
     nodeDetails.innerHTML = '<div style="padding:15px; color:#858585;">Loading graph data...</div>';
 
@@ -307,6 +371,188 @@ async function openGraph(chunkId) {
         console.error('Graph error:', e);
         nodeDetails.textContent = `Error loading graph: ${e.message}`;
     }
+}
+
+// --- NAVIGATOR LOGIC ---
+
+async function loadNavigatorData(nodeId) {
+    const sections = {
+        neighbors: document.querySelector('#navNeighbors .nav-content'),
+        parent: document.querySelector('#navParent .nav-content'),
+        impact: document.querySelector('#navImpact .nav-content'),
+        pipeline: document.getElementById('pipelineGraph')
+    };
+
+    // Clear previous
+    Object.values(sections).forEach(el => el.innerHTML = 'Loading...');
+
+    try {
+        // 1. Neighbors
+        const [prev, next] = await Promise.all([
+            fetch(`${API_BASE}/navigator/${nodeId}/neighbor_prev`).then(r => r.json()),
+            fetch(`${API_BASE}/navigator/${nodeId}/neighbor_next`).then(r => r.json())
+        ]);
+
+        sections.neighbors.innerHTML = `
+            <div class="nav-item">
+                <div class="label">Previous Chunk</div>
+                <div class="val">${prev.id ? renderChunkCard(prev) : 'None'}</div>
+            </div>
+            <div class="nav-item">
+                <div class="label">Next Chunk</div>
+                <div class="val">${next.id ? renderChunkCard(next) : 'None'}</div>
+            </div>
+        `;
+
+        // 2. Parent
+        const parent = await fetch(`${API_BASE}/navigator/${nodeId}/parent`).then(r => r.json());
+        sections.parent.innerHTML = parent.id ? `
+            <div class="nav-item">
+                <div class="label">Type</div>
+                <div class="val">${parent.type}</div>
+            </div>
+            <div class="nav-item">
+                <div class="label">File</div>
+                <div class="val">${parent.file_path}</div>
+            </div>
+        ` : 'No parent context found.';
+
+        // 3. Impact
+        const impact = await fetch(`${API_BASE}/navigator/${nodeId}/impact`).then(r => r.json());
+        if (impact.refs && impact.refs.length > 0) {
+            sections.impact.innerHTML = impact.refs.map(ref => `
+                <div class="nav-item">
+                    <div class="label">${ref.type}</div>
+                    <div class="val">${ref.file_path}:${ref.start_line}</div>
+                </div>
+            `).join('');
+        } else {
+            sections.impact.innerHTML = 'No incoming references found.';
+        }
+
+        // 4. Pipeline (Call Graph)
+        const pipeline = await fetch(`${API_BASE}/navigator/${nodeId}/pipeline`).then(r => r.json());
+        renderPipelineGraph(pipeline, sections.pipeline);
+
+    } catch (e) {
+        console.error("Navigator load failed", e);
+        Object.values(sections).forEach(el => el.innerHTML = `Error: ${e.message}`);
+    }
+}
+
+function renderChunkCard(node) {
+    // Mini card with code snippet
+    const content = node.content ? node.content.split('\n').slice(0, 5).join('\n') : '(No content)';
+    return `
+        <div style="margin-top:5px;">
+            <div style="font-weight:bold; color:#ccc; font-size:11px;">${node.type} (L${node.start_line})</div>
+            <pre style="background:#111; padding:5px; border-radius:3px; color:#858585; font-size:10px; overflow:hidden; margin:5px 0 0 0;">${escapeHtml(content)}</pre>
+        </div>
+    `;
+}
+
+function renderPipelineGraph(data, container) {
+    container.innerHTML = ''; // Clear loading text
+
+    // Convert tree to nodes/edges for vis-network
+    const nodes = [];
+    const edges = [];
+    const visited = new Set();
+
+    function traverse(nodeId, children, parentId = null, nodeData = null) {
+        if (!nodeId || visited.has(nodeId)) return;
+        visited.add(nodeId);
+
+        // Construct node object compatible with createNodeSvg
+        // If nodeData is provided (from children dict), use it.
+        // For root node, we might not have full data here unless we fetch it or pass it.
+        // But wait, data.root_node is just an ID.
+        // We need content for root node too?
+        // Actually, for the root node of the pipeline, it's the CURRENT node.
+        // We can assume we have it or can fetch it?
+        // Or we can just render it simply if missing.
+
+        const displayNode = {
+            id: nodeId,
+            file_path: nodeData ? nodeData.file : 'Current',
+            start_line: nodeData ? nodeData.start_line : '?',
+            end_line: '?',
+            content: nodeData ? nodeData.content : '(Current Node)'
+        };
+
+        nodes.push({
+            id: nodeId,
+            image: createNodeSvg(displayNode, nodeId === data.root_node),
+            shape: 'image',
+            shapeProperties: { useImageSize: true }
+        });
+
+        if (parentId) {
+            edges.push({
+                from: parentId,
+                to: nodeId,
+                arrows: 'to',
+                color: { color: '#585858', opacity: 0.8 },
+                width: 1.5,
+                smooth: { type: 'cubicBezier', forceDirection: 'horizontal', roundness: 0.4 }
+            });
+        }
+
+        if (children) {
+            Object.entries(children).forEach(([childId, childData]) => {
+                traverse(childId, childData.children, nodeId, childData);
+            });
+        }
+    }
+
+    // We don't have root node data in the 'pipeline' response structure for the root itself,
+    // only for children.
+    // But we know the root is the selected node.
+    // We can pass a placeholder or try to use the selected node data if available globally?
+    // Let's use a placeholder for now or try to pass it.
+    traverse(data.root_node, data.call_graph);
+
+    if (nodes.length === 0) {
+        container.innerHTML = 'No outgoing calls found.';
+        return;
+    }
+
+    const netData = { nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges) };
+    const options = {
+        layout: {
+            hierarchical: false // Use physics layout like main graph
+        },
+        physics: {
+            enabled: true,
+            solver: 'barnesHut',
+            barnesHut: {
+                gravitationalConstant: -200000,
+                centralGravity: 0.1,
+                springLength: 400,
+                springConstant: 0.01,
+                damping: 0.3,
+                avoidOverlap: 1
+            },
+            stabilization: {
+                enabled: true,
+                iterations: 1000,
+                fit: true
+            }
+        },
+        interaction: {
+            hover: true,
+            dragNodes: true,
+            zoomView: true,
+            dragView: true
+        }
+    };
+
+    const network = new vis.Network(container, netData, options);
+
+    network.once("stabilizationIterationsDone", function () {
+        network.setOptions({ physics: { enabled: false } });
+        network.fit({ animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
+    });
 }
 
 // --- SEARCH ---
@@ -580,7 +826,7 @@ function renderGraph(data, centerId) {
     });
 
     const edges = new vis.DataSet(visualEdges);
-    const container = document.getElementById('network');
+    const container = document.getElementById('graphContainer');
     const graphData = { nodes, edges };
 
     const options = {
@@ -703,8 +949,3 @@ function updateDetailsPanel(node, allEdges, allNodes) {
 function escapeHtml(text) {
     return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
-
-closeGraphBtn.addEventListener('click', () => {
-    graphView.classList.add('hidden');
-    codeView.classList.remove('hidden');
-});

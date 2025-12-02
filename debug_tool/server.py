@@ -17,6 +17,7 @@ from code_graph_indexer.indexer import CodebaseIndexer
 from code_graph_indexer.storage.sqlite import SqliteGraphStorage
 from code_graph_indexer.retriever import CodeRetriever
 from code_graph_indexer.providers.embedding import FastEmbedProvider, DummyEmbeddingProvider
+from code_graph_indexer.navigator import CodeNavigator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,33 +29,9 @@ app = FastAPI()
 storage: Optional[SqliteGraphStorage] = None
 retriever: Optional[CodeRetriever] = None
 
-def get_components():
-    global storage, retriever
-    if storage is None:
-        # Initialize persistent storage
-        db_path = os.path.join(os.path.dirname(__file__), "..", "sheep_index.db")
-        storage = SqliteGraphStorage(db_path)
-        
-        # Initialize Embedder (Fallback logic)
-        try:
-            embedder = FastEmbedProvider()
-        except ImportError:
-            embedder = DummyEmbeddingProvider()
-            logger.warning("FastEmbed not installed. Using DummyEmbeddingProvider.")
-        except Exception as e:
-            logger.warning(f"Failed to load FastEmbed: {e}. Using DummyEmbeddingProvider.")
-            embedder = DummyEmbeddingProvider()
-            
-        retriever = CodeRetriever(storage, embedder)
-    return storage, retriever, embedder
-
-def get_components():
-    s, r, _ = get_components_full()
-    return s, r
-
 def get_components_full():
-    global storage, retriever
-    if storage is None:
+    global storage, retriever, navigator
+    if storage is None or retriever is None or navigator is None:
         # Initialize persistent storage
         db_path = os.path.join(os.path.dirname(__file__), "..", "sheep_index.db")
         storage = SqliteGraphStorage(db_path)
@@ -70,12 +47,16 @@ def get_components_full():
             embedder = DummyEmbeddingProvider()
             
         retriever = CodeRetriever(storage, embedder)
-        return storage, retriever, embedder
-    # We need to retrieve the embedder from the retriever if already initialized
-    # But retriever.embedder is protected/private? No, it's public in python usually.
-    # Let's check retriever.py if needed, but assuming it's accessible or we store it.
-    # Actually, let's just store it in a global variable too to be safe.
-    return storage, retriever, retriever.embedder
+        navigator = CodeNavigator(storage)
+        return storage, retriever, embedder, navigator
+    
+    # Ensure embedder is available
+    embedder = retriever.embedder if hasattr(retriever, 'embedder') else None
+    return storage, retriever, embedder, navigator
+
+def get_components():
+    s, r, _, n = get_components_full()
+    return s, r, n
 
 class IndexRequest(BaseModel):
     repo_path: str
@@ -193,7 +174,7 @@ class HtmlGenerator:
 
 @app.get("/api/repositories")
 def get_repositories():
-    store, _ = get_components()
+    store, _, _ = get_components()
     try:
         store._cursor.execute("SELECT * FROM repositories")
         cols = [d[0] for d in store._cursor.description]
@@ -223,7 +204,7 @@ def get_repositories():
 
 @app.post("/api/search")
 def search_code(request: SearchRequest):
-    _, retr, _ = get_components_full() # Ensure we get the full components including embedder if needed
+    _, retr, _, _ = get_components_full() # Ensure we get the full components including embedder if needed
     try:
         results = retr.retrieve(
             query=request.query,
@@ -256,7 +237,7 @@ def search_code(request: SearchRequest):
 
 @app.post("/api/index")
 def trigger_index(request: IndexRequest):
-    store, _ = get_components()
+    store, _, _ = get_components()
     repo_path = request.repo_path.strip()
     
     if not os.path.exists(repo_path):
@@ -268,7 +249,7 @@ def trigger_index(request: IndexRequest):
         indexer.index()
         
         # Run embeddings
-        _, _, embedder = get_components_full()
+        _, _, embedder, _ = get_components_full()
         # We need to consume the generator
         for _ in indexer.embed(embedder):
             pass
@@ -281,7 +262,7 @@ def trigger_index(request: IndexRequest):
 
 @app.get("/api/files")
 def get_files(repo_id: Optional[str] = None):
-    store, _ = get_components()
+    store, _, _ = get_components()
     try:
         if repo_id:
             store._cursor.execute("SELECT * FROM files WHERE repo_id = ?", (repo_id,))
@@ -297,7 +278,7 @@ def get_files(repo_id: Optional[str] = None):
 
 @app.get("/api/file_view")
 def get_file_view(path: str, repo_id: str):
-    store, _ = get_components()
+    store, _, _ = get_components()
     
     # 1. Get Local Path for this Repo
     store._cursor.execute("SELECT local_path FROM repositories WHERE id = ?", (repo_id,))
@@ -354,7 +335,7 @@ def get_file_view(path: str, repo_id: str):
 
 @app.get("/api/chunk/{chunk_id}/graph")
 def get_chunk_graph(chunk_id: str, repo_id: Optional[str] = None):
-    store, _ = get_components()
+    store, _, _ = get_components()
         
     try:
         # 1. Get the center node
@@ -439,6 +420,26 @@ def get_chunk_graph(chunk_id: str, repo_id: Optional[str] = None):
 
     except Exception as e:
         logger.exception("Failed to get graph")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/navigator/{node_id}/{action}")
+def navigator_action(node_id: str, action: str):
+    _, _, _, nav = get_components_full()
+    try:
+        if action == "neighbor_next":
+            return nav.read_neighbor_chunk(node_id, "next") or {}
+        elif action == "neighbor_prev":
+            return nav.read_neighbor_chunk(node_id, "prev") or {}
+        elif action == "parent":
+            return nav.read_parent_chunk(node_id) or {}
+        elif action == "impact":
+            return {"refs": nav.analyze_impact(node_id)}
+        elif action == "pipeline":
+            return nav.visualize_pipeline(node_id)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+    except Exception as e:
+        logger.exception(f"Navigator action {action} failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 app.mount("/", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static"), html=True), name="static")

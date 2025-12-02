@@ -54,23 +54,54 @@
 
             <!-- Center: Content (Code or Graph or Search) -->
             <div id="centerPanel" class="panel">
-                <div id="codeView">
-                    <div class="panel-header">
-                        <h2 id="currentFile">Select a file</h2>
-                        <button id="viewGraphBtn" class="hidden">View Graph</button>
+                <div class="panel-header">
+                    <h2 id="currentFile">Select a file</h2>
+
+                    <!-- Context Tabs (Hidden until chunk selected) -->
+                    <div id="contextTabs" class="segmented-control hidden">
+                        <button class="tab-btn active" id="codeTabBtn">Code</button>
+                        <button class="tab-btn" id="graphTabBtn">Graph</button>
+                        <button class="tab-btn" id="navigatorTabBtn">Navigator</button>
                     </div>
-                    <div id="codeContainer"></div>
+
+                    <!-- Global Actions -->
+                    <div class="global-actions">
+                        <button id="searchTabBtn" class="icon-btn" title="Search">🔍</button>
+                    </div>
                 </div>
 
-                <div id="graphView" class="hidden">
-                    <div class="panel-header">
-                        <h2>Dependency Graph</h2>
-                        <button id="closeGraphBtn">Back to Code</button>
-                    </div>
-                    <div id="network"></div>
+                <div id="codeView" class="view-content">
+                    <div id="codeContainer">Select a file to view code.</div>
                 </div>
 
-                <div id="searchView" class="hidden" style="display: flex; flex-direction: column; height: 100%;">
+                <div id="graphView" class="view-content hidden">
+                    <div id="graphContainer"></div>
+                </div>
+
+                <div id="navigatorView" class="view-content hidden">
+                    <div class="nav-grid">
+                        <div class="nav-section" id="navNeighbors">
+                            <h3>Neighbors</h3>
+                            <div class="nav-content">Select a node to see neighbors.</div>
+                        </div>
+                        <div class="nav-section" id="navParent">
+                            <h3>Parent Context</h3>
+                            <div class="nav-content">Select a node to see parent.</div>
+                        </div>
+                        <div class="nav-section" id="navImpact">
+                            <h3>Impact Analysis (Incoming)</h3>
+                            <div class="nav-content">Select a node to see impact.</div>
+                        </div>
+                        <div class="nav-section full-width" id="navPipeline">
+                            <h3>Call Pipeline (Outgoing)</h3>
+                            <div id="pipelineGraph"
+                                style="height: 400px; background: #1e1e1e; border: 1px solid #3e3e42;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="searchView" class="view-content hidden"
+                    style="display: flex; flex-direction: column; height: 100%;">
                     <div class="panel-header">
                         <h2>Semantic Search (Debug)</h2>
                         <button id="closeSearchBtn">Close</button>
