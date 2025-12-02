@@ -95,6 +95,7 @@ class GitMetadataProvider(MetadataProvider):
         lower = file_path.lower()
         if any(x in lower for x in ["test", "spec", "__tests__"]): return "test"
         if lower.endswith((".json", ".yaml", ".yml", ".env", ".toml", ".xml")): return "config"
+        if any(x in lower for x in ["config"]): return "config"
         if lower.endswith((".md", ".txt", ".rst")): return "docs"
         return "code"
 

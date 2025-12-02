@@ -89,11 +89,25 @@ class DbAdapter:
             if b_start is None or b_end is None:
                 continue 
             
+            # Derive type/label
+            node_type = n.get('type', 'Code Block')
+            
+            # Try to enrich with semantic labels if available in metadata
+            meta = n.get('metadata', {})
+            matches = meta.get('semantic_matches', [])
+            labels = []
+            for m in matches:
+                lbl = m.get('label') or m.get('value')
+                if lbl: labels.append(lbl)
+            
+            if labels:
+                node_type = " | ".join(labels)
+
             res.append(DbAdapter.NodeView(
                 id=n['id'],
                 file_path=n.get('file_path'), 
                 chunk_hash=n.get('chunk_hash', ''),
-                type=n['type'],
+                type=node_type,
                 start_line=n.get('start_line', 0),
                 end_line=n.get('end_line', 0),
                 byte_range=[b_start, b_end],
@@ -204,7 +218,7 @@ def get_repositories():
 
 @app.post("/api/search")
 def search_code(request: SearchRequest):
-    _, retr, _, _ = get_components_full() # Ensure we get the full components including embedder if needed
+    _, retr, _, _ = get_components_full()
     try:
         results = retr.retrieve(
             query=request.query,
@@ -213,21 +227,14 @@ def search_code(request: SearchRequest):
             strategy=request.strategy
         )
         
-        # The user wants specific fields from the doc/result
-        # The RetrievedContext object has to_dict() but let's ensure it has everything
-        # or construct the response manually if needed.
-        # Based on the user request, they want:
-        # node_id, file_path, chunk_type, content, score, retrieval_method, start_line, end_line, repo_id, branch, parent_context, outgoing_definitions
-        
         response = []
         for r in results:
-            # r is RetrievedContext
             item = r.to_dict()
-            # Ensure all requested fields are present
-            # The library model might already have them, but let's double check or map them if names differ.
-            # User asked for 'node_id', 'chunk_type' etc.
-            # Let's assume to_dict() returns what we need, but we can augment it if necessary.
-            # Actually, let's look at models.py to be sure, but for now rely on to_dict() and add if missing.
+            # Map semantic_labels to chunk_type for frontend
+            if 'semantic_labels' in item:
+                item['chunk_type'] = " | ".join(item['semantic_labels'])
+            else:
+                item['chunk_type'] = "Code Block"
             response.append(item)
             
         return {"results": response}
@@ -424,18 +431,100 @@ def get_chunk_graph(chunk_id: str, repo_id: Optional[str] = None):
 
 @app.get("/api/navigator/{node_id}/{action}")
 def navigator_action(node_id: str, action: str):
-    _, _, _, nav = get_components_full()
+    store, _, _, nav = get_components_full()
+    
+    def fetch_content_map(chunk_hashes: List[str]) -> Dict[str, str]:
+        if not chunk_hashes: return {}
+        placeholders = ",".join(["?"] * len(chunk_hashes))
+        store._cursor.execute(f"SELECT chunk_hash, content FROM contents WHERE chunk_hash IN ({placeholders})", chunk_hashes)
+        return {row[0]: row[1] for row in store._cursor}
+
+    def inject_content_into_node(node: Dict[str, Any]):
+        if not node or 'chunk_hash' not in node: return
+        cmap = fetch_content_map([node['chunk_hash']])
+        node['content'] = cmap.get(node['chunk_hash'])
+
     try:
         if action == "neighbor_next":
-            return nav.read_neighbor_chunk(node_id, "next") or {}
+            res = nav.read_neighbor_chunk(node_id, "next")
+            if res: inject_content_into_node(res)
+            return res or {}
+            
         elif action == "neighbor_prev":
-            return nav.read_neighbor_chunk(node_id, "prev") or {}
+            res = nav.read_neighbor_chunk(node_id, "prev")
+            if res: inject_content_into_node(res)
+            return res or {}
+            
         elif action == "parent":
-            return nav.read_parent_chunk(node_id) or {}
+            # Parent might not have content fetched by default
+            res = nav.read_parent_chunk(node_id)
+            if res: inject_content_into_node(res)
+            return res or {}
+            
         elif action == "impact":
-            return {"refs": nav.analyze_impact(node_id)}
+            refs = nav.analyze_impact(node_id)
+            # Refs are from edges join nodes. They might not have chunk_hash in the result dict from sqlite.py
+            # sqlite.py get_incoming_references returns: id, type, file_path, start_line, relation, context_snippet
+            # It does NOT return chunk_hash. We need to fetch it to get content.
+            # Or we can fetch content by node ID.
+            
+            # Let's fetch content by node ID for all refs
+            ref_ids = [r['id'] for r in refs]
+            if ref_ids:
+                placeholders = ",".join(["?"] * len(ref_ids))
+                # Get chunk_hash for these nodes
+                store._cursor.execute(f"SELECT id, chunk_hash FROM nodes WHERE id IN ({placeholders})", ref_ids)
+                id_to_hash = {row[0]: row[1] for row in store._cursor}
+                
+                # Get content
+                hashes = [h for h in id_to_hash.values() if h]
+                cmap = fetch_content_map(hashes)
+                
+                for r in refs:
+                    h = id_to_hash.get(r['id'])
+                    if h: r['content'] = cmap.get(h)
+                    
+            return {"refs": refs}
+            
         elif action == "pipeline":
-            return nav.visualize_pipeline(node_id)
+            tree = nav.visualize_pipeline(node_id)
+            # Tree structure: { root_node: ID, call_graph: { childID: { ..., children: ... } } }
+            # We need to traverse and collect target_ids to fetch content.
+            # But wait, the tree nodes in 'call_graph' values are dicts with 'file', 'type', 'symbol'.
+            # They don't have 'chunk_hash'.
+            # We have the keys which are target_ids.
+            
+            node_ids = []
+            def collect_ids(graph):
+                if not graph: return
+                for nid, data in graph.items():
+                    node_ids.append(nid)
+                    collect_ids(data.get('children'))
+            
+            collect_ids(tree.get('call_graph'))
+            
+            if node_ids:
+                placeholders = ",".join(["?"] * len(node_ids))
+                store._cursor.execute(f"SELECT id, chunk_hash FROM nodes WHERE id IN ({placeholders})", node_ids)
+                id_to_hash = {row[0]: row[1] for row in store._cursor}
+                
+                hashes = [h for h in id_to_hash.values() if h]
+                cmap = fetch_content_map(hashes)
+                
+                def inject_recursive(graph):
+                    if not graph: return
+                    for nid, data in graph.items():
+                        h = id_to_hash.get(nid)
+                        if h: data['content'] = cmap.get(h)
+                        # Also inject start_line if missing? 
+                        # sqlite.py get_outgoing_calls returns line. navigator.py passes it?
+                        # navigator.py: "start_line": call.get('line') -> Yes.
+                        inject_recursive(data.get('children'))
+                
+                inject_recursive(tree.get('call_graph'))
+                
+            return tree
+            
         else:
             raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
     except Exception as e:
