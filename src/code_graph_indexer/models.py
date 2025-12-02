@@ -3,18 +3,14 @@ from typing import List, Dict, Any, Optional
 
 @dataclass
 class Repository:
-    """
-    Rappresenta lo stato di una repository indicizzata.
-    Corrisponde alla tabella 'repositories' nel DB.
-    """
     id: str
     url: str
     name: str
     branch: str
     last_commit: str
-    status: str       # 'indexing', 'completed', 'failed'
+    status: str
     updated_at: str
-    local_path: Optional[str] = None # Path fisico al worktree
+    local_path: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -40,11 +36,9 @@ class ChunkNode:
     file_id: str
     file_path: str
     chunk_hash: str
-    type: str
     start_line: int
     end_line: int
     byte_range: List[int]
-    # Contiene tag, modificatori e tipo originale (es. {"tags": ["async"], "original_type": "method_definition"})
     metadata: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
@@ -60,10 +54,6 @@ class ChunkContent:
 
 @dataclass
 class CodeRelation:
-    """
-    Rappresenta un arco nel grafo.
-    Supporta sia collegamento spaziale (range) che diretto (id).
-    """
     source_file: str
     target_file: str
     relation_type: str
@@ -74,7 +64,7 @@ class CodeRelation:
     source_byte_range: Optional[List[int]] = None
     target_byte_range: Optional[List[int]] = None
     
-    # Coordinate Dirette (Usate da Parser/Tree-sitter) - NUOVI CAMPI
+    # Coordinate Dirette
     source_id: Optional[str] = None
     target_id: Optional[str] = None
     
@@ -88,7 +78,7 @@ class ParsingResult:
     files: List[FileRecord]
     nodes: List[ChunkNode]
     contents: Dict[str, ChunkContent]
-    relations: List[CodeRelation] = field(default_factory=list) # <--- NUOVO CAMPO
+    relations: List[CodeRelation] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -97,45 +87,42 @@ class ParsingResult:
             "contents": [c.to_dict() for c in self.contents.values()],
             "relations": [r.to_dict() for r in self.relations]
         }
-    
 
 @dataclass
 class RetrievedContext:
     """
     Rappresenta un singolo risultato di ricerca arricchito per l'Agente.
-    Contiene il codice, il punteggio e il contesto grafo.
     """
     node_id: str
     file_path: str
-    chunk_type: str        # es. "function", "class"
-    content: str           # Il codice effettivo
+    content: str
+    
+    # [NEW] Sostituisce 'chunk_type' che era ambiguo
+    # Es. ["Application Entry Point", "Function Definition"]
+    semantic_labels: List[str] = field(default_factory=list)
     
     # Ranking Info
-    score: float           # Score finale normalizzato (0-1 approx)
-    retrieval_method: str  # "hybrid", "dense", "sparse"
+    score: float = 0.0
+    retrieval_method: str = "unknown"
     
     # Metadata di navigazione
-    start_line: int
-    end_line: int
-    language: str = "python"
+    start_line: int = 0
+    end_line: int = 0
     repo_id: str = ""
     branch: str = "main"  
     
     # --- Context Enrichment (Graph) ---
-    # Il contesto gerarchico (es. "class PaymentProcessor")
     parent_context: Optional[str] = None 
-    
-    # Definizioni usate nel chunk (es. firme di funzioni chiamate)
     outgoing_definitions: List[str] = field(default_factory=list) 
-
-    
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     def render(self) -> str:
         """Helper per visualizzare il contesto in un prompt LLM."""
-        header = f"### File: {self.file_path} ({self.start_line}-{self.end_line}) [{self.chunk_type}]"
+        labels_str = " | ".join(self.semantic_labels) if self.semantic_labels else "Code Block"
+        header = f"### File: {self.file_path} (L{self.start_line}-{self.end_line}) [{labels_str}]"
+        
         context_str = ""
         if self.parent_context:
             context_str = f"\nContext: In {self.parent_context}"

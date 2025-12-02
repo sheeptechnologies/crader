@@ -68,20 +68,32 @@ class CodeRetriever:
     def _build_response(self, docs: List[dict]) -> List[RetrievedContext]:
         results = []
         for doc in docs:
-            # L'espansione del grafo usa l'ID del nodo, che è globale
             ctx_info = self.walker.expand_context(doc)
             
+            # [NEW] Estrazione Label dai Metadata
+            meta = doc.get('metadata', {})
+            if isinstance(meta, str): # Se viene da SQLite row
+                import json
+                try: meta = json.loads(meta)
+                except: meta = {}
+                
+            labels = []
+            matches = meta.get('semantic_matches', [])
+            for m in matches:
+                if 'label' in m: labels.append(m['label'])
+            
+            # Fallback se non ci sono labels
+            if not labels: labels = ["Code Block"]
+
             methods = "+".join(sorted(list(doc.get('methods', ['unknown']))))
             score = doc.get('final_rrf_score', doc.get('score', 0.0))
-            
-            # Recuperiamo il nome del branch dai metadati del documento (salvati a DB)
-            # Non serve più passarlo come input, è intrinseco nel dato.
-            doc_branch = doc.get('branch', 'unknown')
+            doc_branch = doc.get('branch', 'main')
 
             results.append(RetrievedContext(
                 node_id=doc['id'],
                 file_path=doc.get('file_path', 'unknown'),
-                chunk_type=doc.get('type', 'code'),
+                # chunk_type RIMOSSO
+                semantic_labels=labels, # [NEW]
                 content=doc.get('content', ''),
                 score=score,
                 retrieval_method=methods,
