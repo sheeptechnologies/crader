@@ -81,19 +81,28 @@ class TreeSitterRepoParser:
                 if len(line) > 2500: return True
         except: pass
         return False
+    
+    # ==============================================================================
+    #  SEMANTIC QUERY ENGINE
+    # ==============================================================================
 
     def _load_query_for_language(self, language_name: str) -> Optional[str]:
+        """Carica il file .scm dalla cartella 'queries'."""
         try:
-            base_path = os.path.dirname(__file__)
+            # Costruisce il path assoluto verso src/code_graph_indexer/parsing/queries/<lang>.scm
+            base_path = os.path.dirname(__file__) 
             query_path = os.path.join(base_path, "queries", f"{language_name}.scm")
+            
             if os.path.exists(query_path):
                 with open(query_path, "r", encoding="utf-8") as f:
                     return f.read()
         except Exception as e:
-            print(f"[WARN] Could not load query for {language_name}: {e}")
+            print(f"[WARN] Errore caricamento query per {language_name}: {e}")
         return None
 
     def _generate_label(self, category: str, value: str) -> str:
+        """Genera un'etichetta leggibile per i metadati."""
+        # Mappa di label predefinite per rendere l'output più pulito
         labels = {
             ("role", "entry_point"): "Application Entry Point",
             ("role", "test_suite"): "Test Suite Class",
@@ -103,9 +112,14 @@ class TreeSitterRepoParser:
             ("type", "class"): "Class Definition",
             ("type", "function"): "Function Definition",
         }
+        # Fallback generico: "entry_point" -> "Entry Point"
         return labels.get((category, value), f"{value.replace('_', ' ').title()}")
 
     def _get_semantic_captures(self, tree, language_name: str) -> List[Dict[str, Any]]:
+        """
+        Esegue le query Tree-sitter e ritorna una lista di catture semantiche.
+        Filtra automaticamente le catture di servizio (senza punto).
+        """
         query_scm = self._load_query_for_language(language_name)
         if not query_scm: return []
         
@@ -116,23 +130,34 @@ class TreeSitterRepoParser:
         try:
             query = lang_obj.query(query_scm)
             captures = query.captures(tree.root_node)
+            
             results = []
             for node, capture_name in captures:
+                # Expect format: "category.value" (es. "role.entry_point")
                 parts = capture_name.split('.')
-                if len(parts) < 2: continue
+                
+                # [FIX] Ignoriamo le catture interne usate per i predicati (es. @name, @val, @attr)
+                # Se non contiene un punto, non è un tag semantico ufficiale.
+                if len(parts) < 2:
+                    continue
+                
                 category, value = parts[0], parts[1]
+                
                 results.append({
-                    "start": node.start_byte, "end": node.end_byte,
+                    "start": node.start_byte,
+                    "end": node.end_byte,
                     "metadata": {
-                        "category": category, "value": value,
+                        "category": category,
+                        "value": value,
                         "label": self._generate_label(category, value)
                     }
                 })
             return results
-        except Exception as e:
-            print(f"[WARN] Query error for {language_name}: {e}")
-            return []
 
+        except Exception as e:
+            print(f"[WARN] Semantic Query Error ({language_name}): {e}")
+            return []
+    
     def stream_semantic_chunks(self, file_list: Optional[List[str]] = None) -> Generator[Tuple[FileRecord, List[ChunkNode], List[ChunkContent], List[CodeRelation]], None, None]:
         files_to_process = set(file_list) if file_list else None
         

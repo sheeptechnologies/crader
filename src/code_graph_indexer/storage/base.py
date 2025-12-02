@@ -74,10 +74,11 @@ class GraphStorage(ABC):
 
     # --- RETRIEVAL & NAVIGATION ---
     @abstractmethod
-    def search_fts(self, query: str, limit: int = 20, repo_id: str = None, branch: str = None) -> List[Dict[str, Any]]: pass
+    def search_fts(self, query: str, limit: int = 20, repo_id: str = None, 
+                   branch: str = None, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]: pass
     @abstractmethod
-    def search_vectors(self, query_vector: List[float], limit: int = 20, repo_id: str = None, branch: str = None) -> List[Dict[str, Any]]: pass
-    
+    def search_vectors(self, query_vector: List[float], limit: int = 20, repo_id: str = None, 
+                       branch: str = None, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]: pass
     @abstractmethod
     def get_context_neighbors(self, node_id: str) -> Dict[str, List[Dict[str, Any]]]: pass
     @abstractmethod

@@ -573,6 +573,21 @@ async function performSearch() {
 
     searchResults.innerHTML = '<div style="color:#888; text-align:center; margin-top:20px;">Searching...</div>';
 
+    // Collect Filters
+    const filters = {};
+
+    const pathPrefix = document.getElementById('filterPathPrefix').value.trim();
+    if (pathPrefix) filters.path_prefix = pathPrefix.split(',').map(s => s.trim());
+
+    const excludeLang = document.getElementById('filterExcludeLang').value.trim();
+    if (excludeLang) filters.exclude_language = excludeLang.split(',').map(s => s.trim());
+
+    const excludeRoles = Array.from(document.querySelectorAll('#filterExcludeRole input:checked')).map(cb => cb.value);
+    if (excludeRoles.length > 0) filters.exclude_role = excludeRoles;
+
+    const excludeCats = Array.from(document.querySelectorAll('#filterExcludeCategory input:checked')).map(cb => cb.value);
+    if (excludeCats.length > 0) filters.exclude_category = excludeCats;
+
     try {
         const res = await fetch(`${API_BASE}/search`, {
             method: 'POST',
@@ -580,7 +595,8 @@ async function performSearch() {
             body: JSON.stringify({
                 query: query,
                 repo_id: currentRepoId,
-                strategy: searchStrategy.value
+                strategy: searchStrategy.value,
+                filters: Object.keys(filters).length > 0 ? filters : null
             })
         });
 

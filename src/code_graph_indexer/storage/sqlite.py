@@ -5,7 +5,7 @@ import logging
 import struct
 import datetime
 import uuid
-from typing import List, Dict, Any, Optional, Generator
+from typing import List, Dict, Any, Optional, Generator, Tuple
 
 try:
     import numpy as np
@@ -217,25 +217,219 @@ class SqliteGraphStorage(GraphStorage):
 
     # --- RETRIEVAL (FIXED) ---
 
-    def search_fts(self, query: str, limit: int = 20, repo_id: str = None, branch: str = None) -> List[Dict[str, Any]]:
+    # ==========================================
+    # FILTERING HELPER
+    # ==========================================
+
+    def _build_filter_clause(self, filters: Dict[str, Any]) -> Tuple[str, List[Any]]:
+        """
+        Costruisce la clausola WHERE dinamica.
+        [FIX] Supporta liste per tutti i campi (OR logic per include, AND per exclude).
+        """
+        if not filters: return "", []
+            
+        clauses = []
+        params = []
+        
+        # Helper robusto per normalizzare a lista
+        def as_list(val):
+            if val is None: return []
+            return val if isinstance(val, list) else [val]
+
+        # 1. PATH (OR)
+        if "path_prefix" in filters and filters["path_prefix"]:
+            paths = as_list(filters["path_prefix"])
+            path_clauses = []
+            for p in paths:
+                if not isinstance(p, str): continue
+                clean = p.strip(os.sep)
+                path_clauses.append("f.path LIKE ?")
+                params.append(f"{clean}%")
+            if path_clauses:
+                clauses.append(f"({' OR '.join(path_clauses)})")
+            
+        # 2. LANGUAGE (IN / NOT IN)
+        if "language" in filters and filters["language"]:
+            langs = as_list(filters["language"])
+            if langs:
+                ph = ",".join(["?"] * len(langs))
+                clauses.append(f"f.language IN ({ph})")
+                params.extend(langs)
+
+        if "exclude_language" in filters and filters["exclude_language"]:
+            ex_langs = as_list(filters["exclude_language"])
+            if ex_langs:
+                ph = ",".join(["?"] * len(ex_langs))
+                clauses.append(f"f.language NOT IN ({ph})")
+                params.extend(ex_langs)
+            
+        # 3. SEMANTIC FILTERS (JSON)
+        def add_json_list_match(key, values, exclude=False):
+            vals = as_list(values)
+            if not vals: return
+            
+            ph = ",".join(["?"] * len(vals))
+            op = "NOT EXISTS" if exclude else "EXISTS"
+            
+            subquery = f"""
+                {op} (
+                    SELECT 1 FROM json_each(n.metadata_json, '$.semantic_matches') 
+                    WHERE json_extract(value, '$.{key}') IN ({ph})
+                )
+            """
+            clauses.append(subquery)
+            params.extend(vals)
+
+        if "role" in filters: add_json_list_match("value", filters["role"])
+        if "exclude_role" in filters: add_json_list_match("value", filters["exclude_role"], exclude=True)
+
+        # 4. CATEGORY (HYBRID)
+        if "category" in filters and filters["category"]:
+            cats = as_list(filters["category"])
+            if cats:
+                ph = ",".join(["?"] * len(cats))
+                file_logic = f"f.category IN ({ph})"
+                chunk_logic = f"""
+                    EXISTS (
+                        SELECT 1 FROM json_each(n.metadata_json, '$.semantic_matches') 
+                        WHERE json_extract(value, '$.category') IN ({ph})
+                    )
+                """
+                clauses.append(f"({file_logic} OR {chunk_logic})")
+                params.extend(cats)
+                params.extend(cats)
+
+        if "exclude_category" in filters and filters["exclude_category"]:
+            ex_cats = as_list(filters["exclude_category"])
+            if ex_cats:
+                ph = ",".join(["?"] * len(ex_cats))
+                file_logic = f"f.category NOT IN ({ph})"
+                chunk_logic = f"""
+                    NOT EXISTS (
+                        SELECT 1 FROM json_each(n.metadata_json, '$.semantic_matches') 
+                        WHERE json_extract(value, '$.category') IN ({ph})
+                    )
+                """
+                clauses.append(f"({file_logic} AND {chunk_logic})")
+                params.extend(ex_cats)
+                params.extend(ex_cats)
+
+        if not clauses: return "", []
+        return " AND " + " AND ".join(clauses), params
+
+    # ==========================================
+    # RETRIEVAL METHODS
+    # ==========================================
+
+    def search_vectors(self, query_vector: List[float], limit: int = 20, 
+                       repo_id: str = None, branch: str = None, 
+                       filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        
+        if not HAS_NUMPY: return []
+
+        # JOIN Completa: Embeddings -> Nodes -> Contents -> Files
+        # Necessaria per applicare i filtri su path/lang (files) e semantic (nodes)
+        sql = """
+            SELECT ne.id, ne.embedding, ne.chunk_id, ne.file_path, 
+                   ne.start_line, ne.end_line, 
+                   ne.repo_id, ne.branch, n.metadata_json, c.content
+            FROM node_embeddings ne
+            JOIN nodes n ON ne.chunk_id = n.id
+            JOIN contents c ON n.chunk_hash = c.chunk_hash
+            JOIN files f ON n.file_id = f.id
+            WHERE 1=1
+        """
+        params = []
+        
+        # Filtri Base (Context)
+        if repo_id:
+            sql += " AND ne.repo_id = ?"
+            params.append(repo_id)
+        if branch:
+            sql += " AND ne.branch = ?"
+            params.append(branch)
+            
+        # Filtri Avanzati (Agente)
+        filter_sql, filter_params = self._build_filter_clause(filters)
+        sql += filter_sql
+        params.extend(filter_params)
+            
+        self._cursor.execute(sql, params)
+        rows = self._cursor.fetchall()
+        
+        if not rows: return []
+
+        # Calcolo Similarità Cosine (In-Memory con Numpy per SQLite)
+        ids, vectors, metadata_map = [], [], {}
+        dim = len(query_vector); fmt = f"{dim}f"
+        
+        for r in rows:
+            emb_id, blob = r[0], r[1]
+            if not blob or len(blob) != dim * 4: continue 
+            try:
+                vec = struct.unpack(fmt, blob)
+                vectors.append(vec); ids.append(emb_id)
+                
+                metadata_map[emb_id] = {
+                    "id": r[2], 
+                    "file_path": r[3], 
+                    "start_line": r[4], 
+                    "end_line": r[5], 
+                    "repo_id": r[6], 
+                    "branch": r[7],
+                    "metadata": json.loads(r[8] or "{}"), 
+                    "content": r[9]
+                }
+            except Exception: continue
+
+        if not vectors: return []
+
+        np_vecs = np.array(vectors, dtype=np.float32)
+        np_query = np.array(query_vector, dtype=np.float32)
+        
+        norm_vecs = np.linalg.norm(np_vecs, axis=1, keepdims=True)
+        norm_query = np.linalg.norm(np_query)
+        
+        if norm_query == 0: return []
+        norm_vecs[norm_vecs == 0] = 1e-10
+        
+        similarities = np.dot(np_vecs, np_query) / (norm_vecs.squeeze() * norm_query)
+        
+        # Top-K
+        k_indices = np.argsort(similarities)[-limit:][::-1]
+        
+        results = []
+        for idx in k_indices:
+            emb_id = ids[idx]
+            score = float(similarities[idx])
+            meta = metadata_map[emb_id]
+            results.append({**meta, "score": score})
+            
+        return results
+
+    def search_fts(self, query: str, limit: int = 20, repo_id: str = None, 
+                   branch: str = None, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        
+        # Pulizia e Preparazione Strategie FTS
         clean_query = query.replace('"', '').replace("'", "")
         words = clean_query.split()
         if not words: return []
 
-        # [FIX] Quota ogni singola parola per gestire caratteri speciali (., -, @, ecc.)
-        # Es: "app.py" -> '"app.py"'
-        # Es: "login-handler" -> '"login-handler"'
+        # "Blind Quoting" per gestire caratteri speciali (es. app.py -> "app.py")
         quoted_words = [f'"{w}"' for w in words]
 
         strategies = [
-            f'"{clean_query}"',              # 1. Phrase Match ("tutta la frase")
+            f'"{clean_query}"',              # 1. Phrase Match
         ]
-        
         if len(words) > 1:
-            strategies.append(" AND ".join(quoted_words)) # 2. AND Match ("parola1" AND "parola2")
-            strategies.append(" OR ".join(quoted_words))  # 3. OR Match ("parola1" OR "parola2")
+            strategies.append(" AND ".join(quoted_words)) # 2. AND Match
+            strategies.append(" OR ".join(quoted_words))  # 3. OR Match
 
-        # [FIX] Rimossa alias 'fts' per compatibilità
+        # Query Base FTS
+        # JOIN necessarie per: 
+        # - Recuperare contenuto (contents)
+        # - Filtrare per repo/path (files)
+        # - Filtrare per metadati semantici (nodes)
         base_sql = """
             SELECT 
                 nodes_fts.node_id, nodes_fts.file_path, n.start_line, n.end_line, 
@@ -248,6 +442,8 @@ class SqliteGraphStorage(GraphStorage):
         """
         
         params_base = []
+        
+        # Filtri Base
         if repo_id:
             base_sql += " AND f.repo_id = ?"
             params_base.append(repo_id)
@@ -255,16 +451,21 @@ class SqliteGraphStorage(GraphStorage):
             base_sql += " AND r.branch = ?"
             params_base.append(branch)
             
+        # Filtri Avanzati
+        filter_sql, filter_params = self._build_filter_clause(filters)
+        base_sql += filter_sql
+        params_base.extend(filter_params)
+            
         base_sql += " ORDER BY nodes_fts.rank ASC LIMIT ?"
         params_base.append(limit)
 
+        # Loop Strategie (Fallback)
         for i, strategy_query in enumerate(strategies):
             try:
-                # DEBUG: Scommenta se vuoi vedere le query generate
-                # print(f"Trying FTS Strategy {i}: {strategy_query}")
-                
+                # Eseguiamo query con la strategia corrente
                 self._cursor.execute(base_sql, [strategy_query] + params_base)
                 rows = self._cursor.fetchall()
+                
                 if rows:
                     results = []
                     for row in rows:
@@ -281,72 +482,13 @@ class SqliteGraphStorage(GraphStorage):
                         })
                     return results
             except Exception as e:
-                # Logghiamo l'errore specifico ma continuiamo con la prossima strategia
-                logger.warning(f"FTS Strategy '{strategy_query}' failed: {e}")
+                # Log errore specifico ma continua (es. errore syntax FTS su caratteri strani)
+                logger.debug(f"FTS Strategy {i} failed: {e}")
                 continue
         
         return []
-
-    def search_vectors(self, query_vector: List[float], limit: int = 20, repo_id: str = None, branch: str = None) -> List[Dict[str, Any]]:
-        if not HAS_NUMPY: return []
-
-        # JOIN per recuperare il testo dalla tabella contents (normalizzazione)
-        sql = """
-            SELECT ne.id, ne.embedding, ne.chunk_id, ne.file_path, 
-                   ne.start_line, ne.end_line, 
-                   ne.repo_id, ne.branch, n.metadata_json, c.content
-            FROM node_embeddings ne
-            JOIN nodes n ON ne.chunk_id = n.id
-            JOIN contents c ON n.chunk_hash = c.chunk_hash
-            WHERE 1=1
-        """
-        params = []
-        
-        if repo_id: sql += " AND ne.repo_id = ?"; params.append(repo_id)
-        if branch: sql += " AND ne.branch = ?"; params.append(branch)
-            
-        self._cursor.execute(sql, params)
-        rows = self._cursor.fetchall()
-        
-        if not rows: return []
-
-        ids, vectors, metadata_map = [], [], {}
-        dim = len(query_vector); fmt = f"{dim}f"
-        
-        for r in rows:
-            emb_id, blob = r[0], r[1]
-            if not blob or len(blob) != dim * 4: continue 
-            try:
-                vec = struct.unpack(fmt, blob)
-                vectors.append(vec); ids.append(emb_id)
-                metadata_map[emb_id] = {
-                    "id": r[2], "file_path": r[3], 
-                    "start_line": r[4], "end_line": r[5], "repo_id": r[6], "branch": r[7],
-                    "metadata": json.loads(r[8] or "{}"), 
-                    "content": r[9]
-                }
-            except: continue
-
-        if not vectors: return []
-
-        np_vecs = np.array(vectors, dtype=np.float32)
-        np_query = np.array(query_vector, dtype=np.float32)
-        norm_vecs = np.linalg.norm(np_vecs, axis=1, keepdims=True)
-        norm_query = np.linalg.norm(np_query)
-        if norm_query == 0: return []
-        norm_vecs[norm_vecs == 0] = 1e-10
-        
-        similarities = np.dot(np_vecs, np_query) / (norm_vecs.squeeze() * norm_query)
-        k_indices = np.argsort(similarities)[-limit:][::-1]
-        
-        results = []
-        for idx in k_indices:
-            emb_id = ids[idx]
-            score = float(similarities[idx])
-            meta = metadata_map[emb_id]
-            results.append({**meta, "score": score})
-        return results
-
+    
+    
     # --- BATCH & UTILS ---
     def get_nodes_cursor(self, repo_id: str = None, branch: str = None) -> Generator[Dict[str, Any], None, None]:
         base_query = """

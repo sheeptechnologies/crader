@@ -118,6 +118,50 @@
                             </select>
                             <button id="searchBtn">Search</button>
                         </div>
+
+                        <!-- Filters Section -->
+                        <div
+                            style="margin-bottom: 15px; padding: 10px; background: #252526; border: 1px solid #3e3e42; border-radius: 4px;">
+                            <div style="display: flex; gap: 15px; flex-wrap: wrap; margin-bottom: 10px;">
+                                <div style="flex: 1; min-width: 200px;">
+                                    <label style="display:block; color:#aaa; font-size:12px; margin-bottom:4px;">Path
+                                        Prefix (e.g. src/)</label>
+                                    <input type="text" id="filterPathPrefix" placeholder="src/, lib/"
+                                        style="width:100%; padding:6px; background:#3c3c3c; border:1px solid #3e3e42; color:#ccc;">
+                                </div>
+                                <div style="flex: 1; min-width: 200px;">
+                                    <label style="display:block; color:#aaa; font-size:12px; margin-bottom:4px;">Exclude
+                                        Language (e.g. python)</label>
+                                    <input type="text" id="filterExcludeLang" placeholder="python, javascript"
+                                        style="width:100%; padding:6px; background:#3c3c3c; border:1px solid #3e3e42; color:#ccc;">
+                                </div>
+                            </div>
+
+                            <div style="display: flex; gap: 20px; flex-wrap: wrap;">
+                                <div style="flex: 1;">
+                                    <label style="display:block; color:#aaa; font-size:12px; margin-bottom:4px;">Exclude
+                                        Role</label>
+                                    <div style="display:flex; flex-wrap:wrap; gap:8px;" id="filterExcludeRole">
+                                        <!-- Checkboxes injected by JS or hardcoded -->
+                                        <label><input type="checkbox" value="test_case"> Test Case</label>
+                                        <label><input type="checkbox" value="test_suite"> Test Suite</label>
+                                        <label><input type="checkbox" value="api_endpoint"> API Endpoint</label>
+                                        <label><input type="checkbox" value="data_schema"> Data Schema</label>
+                                        <label><input type="checkbox" value="entry_point"> Entry Point</label>
+                                    </div>
+                                </div>
+                                <div style="flex: 1;">
+                                    <label style="display:block; color:#aaa; font-size:12px; margin-bottom:4px;">Exclude
+                                        Category</label>
+                                    <div style="display:flex; flex-wrap:wrap; gap:8px;" id="filterExcludeCategory">
+                                        <label><input type="checkbox" value="test"> Test</label>
+                                        <label><input type="checkbox" value="config"> Config</label>
+                                        <label><input type="checkbox" value="docs"> Docs</label>
+                                        <label><input type="checkbox" value="definition"> Definition</label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                     <div id="searchResults" style="flex-grow: 1; overflow-y: auto; padding: 20px; background: #1e1e1e;">
                         <div style="color: #858585; text-align: center; margin-top: 50px;">Enter a query to search the

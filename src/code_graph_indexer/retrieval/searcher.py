@@ -11,11 +11,12 @@ class SearchExecutor:
     @staticmethod
     def vector_search(storage: GraphStorage, embedder: EmbeddingProvider, 
                      query: str, limit: int, repo_id: Optional[str], branch: Optional[str],
+                     filters: Optional[Dict[str, Any]], # [NEW]
                      candidates: Dict[str, Any]):
         try:
             query_vec = embedder.embed([query])[0]
-            # Passiamo branch allo storage
-            results = storage.search_vectors(query_vec, limit, repo_id, branch)
+            # [NEW] Passiamo filters allo storage
+            results = storage.search_vectors(query_vec, limit, repo_id, branch, filters=filters)
             SearchExecutor._accumulate(candidates, results, "vector")
         except Exception as e:
             logger.error(f"❌ Vector search failed: {e}")
@@ -23,10 +24,11 @@ class SearchExecutor:
     @staticmethod
     def keyword_search(storage: GraphStorage, query: str, limit: int, 
                       repo_id: Optional[str], branch: Optional[str], 
+                      filters: Optional[Dict[str, Any]], # [NEW]
                       candidates: Dict[str, Any]):
         try:
-            # Passiamo branch allo storage
-            results = storage.search_fts(query, limit, repo_id, branch)
+            # [NEW] Passiamo filters allo storage
+            results = storage.search_fts(query, limit, repo_id, branch, filters=filters)
             SearchExecutor._accumulate(candidates, results, "keyword")
         except Exception as e:
             logger.error(f"❌ Keyword search failed: {e}")

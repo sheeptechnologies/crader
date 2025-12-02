@@ -65,6 +65,7 @@ class SearchRequest(BaseModel):
     query: str
     repo_id: str
     strategy: str = "hybrid"
+    filters: Optional[Dict[str, Any]] = None
 
 # --- ADAPTERS & GENERATORS (Adapted from User Snippet) ---
 
@@ -224,7 +225,8 @@ def search_code(request: SearchRequest):
             query=request.query,
             repo_id=request.repo_id,
             limit=10,
-            strategy=request.strategy
+            strategy=request.strategy,
+            filters=request.filters
         )
         
         response = []
