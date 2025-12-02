@@ -476,51 +476,94 @@ class SqliteGraphStorage(GraphStorage):
     # --- IMPLEMENTAZIONE RETRIEVAL ---
 
     def search_fts(self, query: str, limit: int = 20, repo_id: str = None, branch: str = None) -> List[Dict[str, Any]]:
-        escaped_query_text = query.replace('"', '""')
-        safe_query = f'"{escaped_query_text}"'
+        """
+        Esegue Keyword Search con strategia di fallback:
+        1. Phrase Match (Esatto)
+        2. AND Match (Tutte le parole presenti)
+        3. OR Match (Almeno una parola presente)
+        """
+        # Pulizia base della query
+        clean_query = query.replace('"', '').replace("'", "")
+        words = clean_query.split()
         
-        sql = """
+        # Se la query è vuota, esci
+        if not words: return []
+
+        # Costruiamo 3 strategie di query FTS5
+        strategies = []
+        
+        # 1. PHRASE MATCH: "parola1 parola2" (Deve esistere la frase esatta)
+        strategies.append(f'"{clean_query}"')
+        
+        # 2. AND MATCH: parola1 AND parola2 (Devono esserci tutte, ordine sparso)
+        if len(words) > 1:
+            strategies.append(" AND ".join(words))
+            
+        # 3. OR MATCH: parola1 OR parola2 (Basta che ce ne sia una - Relaxed)
+        if len(words) > 1:
+            strategies.append(" OR ".join(words))
+
+        # Query SQL Base (uguale a prima)
+        base_sql = """
             SELECT 
                 n.id, n.file_path, n.start_line, n.end_line, n.type,
                 contents_fts.rank,
                 c.content,
-                ne.repo_id,
-                ne.branch
+                f.repo_id,
+                r.branch
             FROM contents_fts
             JOIN nodes n ON n.chunk_hash = contents_fts.chunk_hash
             JOIN contents c ON c.chunk_hash = n.chunk_hash
-            JOIN node_embeddings ne ON ne.chunk_id = n.id
+            JOIN files f ON n.file_id = f.id
+            JOIN repositories r ON f.repo_id = r.id
             WHERE contents_fts MATCH ? 
         """
-        params = [safe_query]
         
+        params_base = []
         if repo_id:
-            sql += " AND ne.repo_id = ?"
-            params.append(repo_id)
+            base_sql += " AND f.repo_id = ?"
+            params_base.append(repo_id)
+        if branch:
+            base_sql += " AND r.branch = ?"
+            params_base.append(branch)
             
-        sql += " ORDER BY contents_fts.rank ASC LIMIT ?"
-        params.append(limit)
-        
-        try:
-            self._cursor.execute(sql, params)
-            results = []
-            for row in self._cursor:
-                results.append({
-                    "id": row[0],
-                    "file_path": row[1],
-                    "start_line": row[2],
-                    "end_line": row[3],
-                    "type": row[4],
-                    "score": row[5],
-                    "content": row[6],
-                    "repo_id": row[7],
-                    "branch": row[8]
-                })
-            return results
-        except sqlite3.OperationalError as e:
-            logger.warning(f"FTS Search failed on query '{query}': {e}")
-            return []
+        base_sql += " ORDER BY contents_fts.rank ASC LIMIT ?"
+        params_base.append(limit)
 
+        # --- ESECUZIONE FALLBACK ---
+        for strategy_query in strategies:
+            try:
+                # Copiamo i parametri base e inseriamo la query corrente all'inizio
+                current_params = [strategy_query] + params_base
+                
+                self._cursor.execute(base_sql, current_params)
+                rows = self._cursor.fetchall()
+                
+                # Se troviamo risultati con questa strategia, li restituiamo e ci fermiamo!
+                # Questo privilegia i match esatti rispetto a quelli "sporchi".
+                if rows:
+                    results = []
+                    for row in rows:
+                        results.append({
+                            "id": row[0],
+                            "file_path": row[1],
+                            "start_line": row[2],
+                            "end_line": row[3],
+                            "type": row[4],
+                            "score": row[5],
+                            "content": row[6],
+                            "repo_id": row[7],
+                            "branch": row[8]
+                        })
+                    return results
+                    
+            except sqlite3.OperationalError as e:
+                # Se una strategia fallisce (es. caratteri illegali), proviamo la successiva
+                logger.warning(f"FTS Strategy '{strategy_query}' failed: {e}")
+                continue
+
+        return []   
+    
     def search_vectors(self, query_vector: List[float], limit: int = 20, repo_id: str = None, branch: str = None) -> List[Dict[str, Any]]:
         if not HAS_NUMPY: return []
 
@@ -594,6 +637,7 @@ class SqliteGraphStorage(GraphStorage):
             results.append({**meta, "score": score})
             
         return results
+
 
     def get_context_neighbors(self, node_id: str) -> Dict[str, List[Dict[str, Any]]]:
         result = {"parents": [], "calls": []}
