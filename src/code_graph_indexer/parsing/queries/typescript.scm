@@ -1,4 +1,3 @@
-; Importiamo regole base JS (copia-incolla o estensione logica)
 ; === Testing ===
 (call_expression
   function: (identifier) @func_name
@@ -16,15 +15,15 @@
 (class_declaration) @type.class
 (function_declaration) @type.function
 (arrow_function) @type.function
+; [FIX] Rinominato function_expression -> function
+(function) @type.function
 
 ; === Angular / NestJS Decorators ===
-; @Controller('users') -> API
 (decorator
   (call_expression
     function: (identifier) @dec_name
     (#eq? @dec_name "Controller"))) @role.api_endpoint
 
-; @Get(), @Post() -> API Method
 (decorator
   (call_expression
     function: (identifier) @dec_name

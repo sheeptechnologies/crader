@@ -34,6 +34,15 @@ class GraphStorage(ABC):
         pass
 
     @abstractmethod
+    def get_vectors_by_hashes(self, vector_hashes: List[str], model_name: str) -> Dict[str, List[float]]:
+        """
+        Recupera vettori esistenti dato il loro hash. 
+        Utile per evitare di ricalcolare embedding per codice identico già presente nel DB.
+        Returns: { 'hash1': [0.1, ...], 'hash2': [...] }
+        """
+        pass
+
+    @abstractmethod
     def delete_previous_data(self, repo_id: str, branch: str): pass
 
     # --- READ / LOOKUP ---

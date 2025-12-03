@@ -18,14 +18,13 @@ class PostgresGraphStorage(GraphStorage):
     def __init__(self, db_url: str, min_size: int = 4, max_size: int = 20, vector_dim: int = 1536):
         """
         Storage basato su PostgreSQL con Connection Pooling.
-        vector_dim: Dimensione dei vettori (es. 1536 per OpenAI, 768 per FastEmbed).
         """
         self._db_url = db_url
         self.vector_dim = vector_dim
         
-        # Salviamo i parametri del pool per poterlo ricreare se necessario
-        self._pool_min = min_size
-        self._pool_max = max_size
+        # Salviamo i parametri per poter ricreare il pool
+        self._min_size = min_size
+        self._max_size = max_size
         self._pool_kwargs = {
             "row_factory": dict_row,
             "autocommit": True 
@@ -34,16 +33,18 @@ class PostgresGraphStorage(GraphStorage):
         safe_url = db_url.split('@')[-1] if '@' in db_url else "..."
         logger.info(f"🐘 Connecting to Postgres (Pool): {safe_url} | Vector Dim: {vector_dim}")
         
-        # Init Pool
+        # 1. Creiamo il pool iniziale
         self._create_pool()
+        
+        # 2. Inizializziamo lo schema (che resetterà il pool alla fine)
         self._init_schema()
 
     def _create_pool(self):
         """Crea una nuova istanza del Connection Pool."""
         self.pool = ConnectionPool(
             conninfo=self._db_url,
-            min_size=self._pool_min,
-            max_size=self._pool_max,
+            min_size=self._min_size,
+            max_size=self._max_size,
             kwargs=self._pool_kwargs,
             configure=self._configure_connection
         )
@@ -54,7 +55,7 @@ class PostgresGraphStorage(GraphStorage):
         try:
             register_vector(conn)
         except psycopg.ProgrammingError:
-            pass 
+            pass # Vector non esiste ancora (primo avvio)
 
     def close(self):
         """Chiude il pool e tutte le connessioni."""
@@ -63,18 +64,19 @@ class PostgresGraphStorage(GraphStorage):
             logger.info("🐘 Postgres Pool closed.")
 
     def commit(self):
-        """Stub per compatibilità. Postgres usa autocommit o transazioni contestuali."""
+        """Stub per compatibilità."""
         pass
 
     def _init_schema(self):
         """Crea tabelle ed estensioni."""
-        # 1. Setup Schema usando il pool corrente
+        # Usiamo il pool corrente per creare le tabelle
         with self.pool.connection() as conn:
             with conn.cursor() as cur:
+                # 1. Estensioni
                 cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
                 cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
                 
-                # 1. Repositories
+                # 2. Repositories
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS repositories (
                         id UUID PRIMARY KEY,
@@ -84,7 +86,7 @@ class PostgresGraphStorage(GraphStorage):
                     )
                 """)
 
-                # 2. Files
+                # 3. Files
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS files (
                         id UUID PRIMARY KEY,
@@ -97,7 +99,7 @@ class PostgresGraphStorage(GraphStorage):
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_files_repo ON files (repo_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files (path)")
 
-                # 3. Nodes (JSONB Metadata)
+                # 4. Nodes (JSONB Metadata)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS nodes (
                         id UUID PRIMARY KEY,
@@ -112,10 +114,10 @@ class PostgresGraphStorage(GraphStorage):
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes (file_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_nodes_meta ON nodes USING GIN (metadata)")
 
-                # 4. Contents
+                # 5. Contents
                 cur.execute("CREATE TABLE IF NOT EXISTS contents (chunk_hash TEXT PRIMARY KEY, content TEXT)")
                 
-                # 5. Edges
+                # 6. Edges
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS edges (
                         source_id UUID, target_id UUID, relation_type TEXT, metadata JSONB
@@ -124,7 +126,7 @@ class PostgresGraphStorage(GraphStorage):
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_edges_src ON edges (source_id)")
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_edges_tgt ON edges (target_id)")
 
-                # 6. FTS Unified Index
+                # 7. FTS Unified Index
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS nodes_fts (
                         node_id UUID PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
@@ -133,7 +135,7 @@ class PostgresGraphStorage(GraphStorage):
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_fts_vec ON nodes_fts USING GIN (search_vector)")
 
-                # 7. Embeddings (pgvector)
+                # 8. Embeddings (pgvector)
                 cur.execute(f"""
                     CREATE TABLE IF NOT EXISTS node_embeddings (
                         id UUID PRIMARY KEY,
@@ -152,9 +154,9 @@ class PostgresGraphStorage(GraphStorage):
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_emb_repo ON node_embeddings (repo_id)")
 
         # [FIX CRITICO] Reset del Pool
-        # Chiudiamo il pool vecchio (che ha connessioni senza 'vector' caricato)
-        # e ne creiamo uno nuovo. Questo forzerà l'esecuzione di _configure_connection
-        # su connessioni fresche, che ora troveranno l'estensione vector presente.
+        # Chiudiamo il vecchio pool e ne creiamo uno NUOVO.
+        # Questo farà scattare _configure_connection sulle nuove connessioni,
+        # che ora troveranno l'estensione vector e caricheranno i tipi corretti.
         self.pool.close()
         self._create_pool()
 
@@ -164,91 +166,78 @@ class PostgresGraphStorage(GraphStorage):
     
     def _build_filter_clause(self, filters: Dict[str, Any]) -> Tuple[str, List[Any]]:
         if not filters: return "", []
-        
-        clauses = []
-        params = []
-        
+        clauses = []; params = []
         def as_list(val): return val if isinstance(val, list) else [val]
 
-        # 1. Path
+        # Path
         if filters.get("path_prefix"):
             paths = as_list(filters["path_prefix"])
             clauses.append("f.path LIKE ANY(%s)")
             params.append([p.strip('/') + '%' for p in paths])
 
-        # 2. Language
+        # Language
         if filters.get("language"):
-            clauses.append("f.language = ANY(%s)")
-            params.append(as_list(filters["language"]))
-            
+            clauses.append("f.language = ANY(%s)"); params.append(as_list(filters["language"]))
         if filters.get("exclude_language"):
-            clauses.append("f.language != ALL(%s)")
-            params.append(as_list(filters["exclude_language"]))
+            clauses.append("f.language != ALL(%s)"); params.append(as_list(filters["exclude_language"]))
 
-        # 3. Semantic Filters (JSON)
-        # Helper per aggiungere match su liste
+        # Semantic Filters
         def add_json_match(key, values, exclude=False):
             vals = as_list(values)
             json_ors = []
-            json_params_temp = []
-            
             for v in vals:
+                # Cerca l'oggetto {"value": v} dentro l'array semantic_matches
                 json_pattern = json.dumps({"semantic_matches": [{"value": v}]})
                 json_ors.append(f"n.metadata @> %s::jsonb")
-                json_params_temp.append(json_pattern)
-            
+                params.append(json_pattern)
             combined = f"({' OR '.join(json_ors)})"
             if exclude: clauses.append(f"NOT {combined}")
             else: clauses.append(combined)
-            
-            # Appendiamo subito i parametri perché questo blocco è atomico
-            params.extend(json_params_temp)
 
         if "role" in filters: add_json_match("value", filters["role"]) 
         if "exclude_role" in filters: add_json_match("value", filters["exclude_role"], exclude=True)
 
-        # 4. Category (Ibrido) - [FIXED PARAMETER ORDER]
+        # Category (Hybrid) - [FIX] Ordine parametri corretto
         if filters.get("category"):
             cats = as_list(filters["category"])
             
-            # Prepariamo SQL e Parametri separatamente
+            # Parametri per chunk logic (JSONB)
+            chunk_params = []
             json_ors = []
-            json_params_temp = []
             for c in cats:
                 json_ors.append(f"n.metadata @> %s::jsonb")
-                json_params_temp.append(json.dumps({"semantic_matches": [{"category": c}]}))
+                chunk_params.append(json.dumps({"semantic_matches": [{"category": c}]}))
             
-            chunk_logic = " OR ".join(json_ors)
             file_logic = "f.category = ANY(%s)"
+            chunk_logic = " OR ".join(json_ors)
             
-            # Costruzione stringa SQL: File Prima, Chunk Dopo
             clauses.append(f"({file_logic} OR {chunk_logic})")
             
-            # Costruzione Parametri: Ordine identico alla stringa!
-            params.append(cats)           # Param per file_logic
-            params.extend(json_params_temp) # Params per chunk_logic
+            # ORDINE PARAMETRI: Prima File, Poi Chunk
+            params.append(cats)
+            params.extend(chunk_params)
 
         if filters.get("exclude_category"):
             ex_cats = as_list(filters["exclude_category"])
             
+            chunk_params = []
             json_ors = []
-            json_params_temp = []
             for c in ex_cats:
                 json_ors.append(f"n.metadata @> %s::jsonb")
-                json_params_temp.append(json.dumps({"semantic_matches": [{"category": c}]}))
+                chunk_params.append(json.dumps({"semantic_matches": [{"category": c}]}))
             
-            chunk_logic = f"NOT ({' OR '.join(json_ors)})"
             file_logic = "f.category != ALL(%s)"
+            chunk_logic = f"NOT ({' OR '.join(json_ors)})"
             
-            # Costruzione stringa SQL
             clauses.append(f"({file_logic} AND {chunk_logic})")
             
-            # Costruzione Parametri: Ordine identico!
-            params.append(ex_cats)        # Param per file_logic
-            params.extend(json_params_temp) # Params per chunk_logic
+            # ORDINE PARAMETRI: Prima File, Poi Chunk
+            params.append(ex_cats)
+            params.extend(chunk_params)
 
         if not clauses: return "", []
         return " AND " + " AND ".join(clauses), params
+
     # ==========================================
     # WRITE METHODS
     # ==========================================
@@ -272,30 +261,19 @@ class PostgresGraphStorage(GraphStorage):
                 data = []
                 for n in nodes:
                     d = n.to_dict()
-                    
-                    # [FIX] Serializziamo il dict in stringa JSON.
-                    # Psycopg non lo fa in automatico per evitare ambiguità.
-                    # Postgres convertirà la stringa in JSONB al volo.
-                    d['metadata'] = json.dumps(d.get('metadata', {}))
-                    
-                    # Calcolo Start/End
+                    d['metadata'] = json.dumps(d.get('metadata', {})) # JSONB richiede stringa o dict (psycopg3 gestisce entrambi, ma dumps è sicuro)
+                    # Calcolo size mancante nel modello
                     b_start = d['byte_range'][0]
                     b_end = d['byte_range'][1]
-                    
                     d['byte_start'] = b_start
                     d['byte_end'] = b_end
-                    
-                    # Calcolo size mancante
                     d['size'] = b_end - b_start
-                    
                     data.append(d)
                 
                 cur.executemany("""
                     INSERT INTO nodes (
-                        id, file_id, file_path, 
-                        start_line, end_line, 
-                        byte_start, byte_end, 
-                        chunk_hash, size, metadata
+                        id, file_id, file_path, start_line, end_line, 
+                        byte_start, byte_end, chunk_hash, size, metadata
                     )
                     VALUES (
                         %(id)s, %(file_id)s, %(file_path)s, 
@@ -328,13 +306,14 @@ class PostgresGraphStorage(GraphStorage):
         if not vector_documents: return
         with self.pool.connection() as conn:
             with conn.cursor() as cur:
+                # [FIX] Usiamo %(embedding)s per matchare la chiave nel dict
                 cur.executemany("""
                     INSERT INTO node_embeddings (
                         id, chunk_id, repo_id, file_path, branch, language, category,
                         start_line, end_line, vector_hash, model_name, created_at, embedding
                     ) VALUES (
                         %(id)s, %(chunk_id)s, %(repo_id)s, %(file_path)s, %(branch)s, %(language)s, %(category)s,
-                        %(start_line)s, %(end_line)s, %(vector_hash)s, %(model_name)s, %(created_at)s, %(vector)s
+                        %(start_line)s, %(end_line)s, %(vector_hash)s, %(model_name)s, %(created_at)s, %(embedding)s
                     )
                     ON CONFLICT (id) DO NOTHING
                 """, vector_documents)
@@ -453,7 +432,12 @@ class PostgresGraphStorage(GraphStorage):
             logger.error(f"Postgres FTS Error: {e}")
             return []
 
-    # --- BATCH & UTILS ---
+    # --- CACHE & UTILS ---
+
+    def get_vectors_by_hashes(self, vector_hashes: List[str], model_name: str) -> Dict[str, List[float]]:
+        # Metodo stub se non implementiamo ancora la cache globale
+        # In Postgres, potremmo fare una query su unique_vectors se esistesse
+        return {} 
 
     def get_nodes_to_embed(self, repo_id: str, model_name: str) -> Generator[Dict[str, Any], None, None]:
         sql = """
@@ -466,7 +450,7 @@ class PostgresGraphStorage(GraphStorage):
             WHERE f.repo_id = %s AND ne.id IS NULL
         """
         with self.pool.connection() as conn:
-            with conn.transaction():
+            with conn.transaction(): # Transazione esplicita per evitare NoActiveSqlTransaction
                 rows = conn.execute(sql, (model_name, repo_id)).fetchall()
             
             for r in rows:
@@ -476,7 +460,7 @@ class PostgresGraphStorage(GraphStorage):
                     "chunk_hash": r['chunk_hash'], 
                     "start_line": r['start_line'],
                     "end_line": r['end_line'], 
-                    "metadata_json": json.dumps(r['metadata']),
+                    "metadata_json": json.dumps(r['metadata']), 
                     "repo_id": str(r['repo_id']), 
                     "branch": r['branch'],
                     "language": r['language'], 
@@ -502,7 +486,7 @@ class PostgresGraphStorage(GraphStorage):
                 "repositories": conn.execute("SELECT COUNT(*) as c FROM repositories").fetchone()['c']
             }
 
-    # ... Metodi standard ...
+    # ... Metodi standard (copia 1:1 dalla versione precedente o sqlite.py) ...
     def get_repository(self, repo_id):
         with self.pool.connection() as conn:
             return conn.execute("SELECT * FROM repositories WHERE id=%s", (repo_id,)).fetchone()
@@ -541,6 +525,7 @@ class PostgresGraphStorage(GraphStorage):
                 conn.execute("DELETE FROM files WHERE repo_id=%s", (repo_id,))
         except Exception as e: logger.error(f"Del error: {e}")
 
+    # Navigator methods
     def get_context_neighbors(self, node_id):
         res = {"parents": [], "calls": []}
         with self.pool.connection() as conn:
