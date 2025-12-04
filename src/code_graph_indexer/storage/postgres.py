@@ -77,11 +77,13 @@ class PostgresGraphStorage(GraphStorage):
                 cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
                 
                 # 2. Repositories
+                # [FIX] Aggiunta colonna queued_commit
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS repositories (
                         id UUID PRIMARY KEY,
                         url TEXT NOT NULL, branch TEXT NOT NULL,
                         name TEXT, last_commit TEXT, status TEXT, updated_at TIMESTAMP, local_path TEXT,
+                        queued_commit TEXT,
                         UNIQUE(url, branch)
                     )
                 """)
@@ -153,12 +155,95 @@ class PostgresGraphStorage(GraphStorage):
                 """)
                 cur.execute("CREATE INDEX IF NOT EXISTS idx_emb_repo ON node_embeddings (repo_id)")
 
-        # [FIX CRITICO] Reset del Pool
-        # Chiudiamo il vecchio pool e ne creiamo uno NUOVO.
-        # Questo farà scattare _configure_connection sulle nuove connessioni,
-        # che ora troveranno l'estensione vector e caricheranno i tipi corretti.
+        # Reset del Pool per caricare i tipi
         self.pool.close()
         self._create_pool()
+
+    # ==========================================
+    # LOCKING & CONCURRENCY (FIXED)
+    # ==========================================
+
+    def acquire_indexing_lock(self, url: str, branch: str, name: str, 
+                            commit_hash: str, local_path: str = None, 
+                            timeout_minutes: int = 30) -> Tuple[bool, Optional[str]]:
+        
+        now = datetime.datetime.utcnow()
+        threshold = now - datetime.timedelta(minutes=timeout_minutes)
+        
+        existing = self.get_repository_by_context(url, branch)
+        
+        with self.pool.connection() as conn:
+            if existing:
+                repo_id = str(existing['id'])
+                current_status = existing['status']
+                last_update = existing['updated_at']
+                
+                # Se libero, fallito o zombie -> PRENDI IL LOCK
+                if current_status != 'indexing' or (last_update and last_update < threshold):
+                    conn.execute("""
+                        UPDATE repositories 
+                        SET status='indexing', updated_at=%s, name=%s, last_commit=%s, local_path=%s, queued_commit=NULL
+                        WHERE id=%s
+                    """, (now, name, commit_hash, local_path, repo_id))
+                    return True, repo_id
+                else:
+                    # [FIX] OCCUPATO -> ACCODA LA RICHIESTA
+                    logger.info(f"⏳ Repo occupato. Accodo commit {commit_hash} per dopo.")
+                    conn.execute(
+                        "UPDATE repositories SET queued_commit = %s WHERE id = %s",
+                        (commit_hash, repo_id)
+                    )
+                    return False, repo_id
+            else:
+                # Nuovo -> Crea e Locka
+                new_id = str(uuid.uuid4())
+                try:
+                    conn.execute("""
+                        INSERT INTO repositories (id, url, branch, name, last_commit, status, updated_at, local_path)
+                        VALUES (%s, %s, %s, %s, %s, 'indexing', %s, %s)
+                    """, (new_id, url, branch, name, commit_hash, now, local_path))
+                    return True, new_id
+                except psycopg.errors.UniqueViolation:
+                    # Race condition
+                    return False, None
+
+    def release_indexing_lock(self, repo_id: str, success: bool, commit_hash: str = None) -> Optional[str]:
+        """
+        Rilascia o Rinnova il lock.
+        Returns: next_commit_hash (se c'è lavoro in coda) o None (se finito).
+        """
+        now = datetime.datetime.utcnow()
+        
+        with self.pool.connection() as conn:
+            # CASO 1: Errore
+            if not success:
+                conn.execute("UPDATE repositories SET status='failed', updated_at=%s WHERE id=%s", (now, repo_id))
+                logger.info(f"🔓 Lock RILASCIATO per {repo_id} (Status: failed)")
+                return None
+
+            # CASO 2: Successo -> Check Coda
+            with conn.transaction():
+                row = conn.execute("SELECT queued_commit FROM repositories WHERE id=%s FOR UPDATE", (repo_id,)).fetchone()
+                next_commit = row['queued_commit'] if row else None
+                
+                if next_commit:
+                    # PIGGYBACK: Rinnova lock e continua
+                    logger.info(f"🔄 Trovato lavoro in coda ({next_commit}). Il worker continua.")
+                    conn.execute("""
+                        UPDATE repositories 
+                        SET last_commit=%s, updated_at=%s, queued_commit=NULL 
+                        WHERE id=%s
+                    """, (commit_hash, now, repo_id))
+                    return next_commit
+                else:
+                    # FINITO: Rilascia lock
+                    conn.execute("""
+                        UPDATE repositories 
+                        SET status='completed', last_commit=%s, updated_at=%s 
+                        WHERE id=%s
+                    """, (commit_hash, now, repo_id))
+                    logger.info(f"🔓 Coda vuota. Lock RILASCIATO per {repo_id} (Status: completed)")
+                    return None
 
     # ==========================================
     # FILTER HELPER
@@ -186,7 +271,6 @@ class PostgresGraphStorage(GraphStorage):
             vals = as_list(values)
             json_ors = []
             for v in vals:
-                # Cerca l'oggetto {"value": v} dentro l'array semantic_matches
                 json_pattern = json.dumps({"semantic_matches": [{"value": v}]})
                 json_ors.append(f"n.metadata @> %s::jsonb")
                 params.append(json_pattern)
@@ -197,43 +281,26 @@ class PostgresGraphStorage(GraphStorage):
         if "role" in filters: add_json_match("value", filters["role"]) 
         if "exclude_role" in filters: add_json_match("value", filters["exclude_role"], exclude=True)
 
-        # Category (Hybrid) - [FIX] Ordine parametri corretto
+        # Category
         if filters.get("category"):
             cats = as_list(filters["category"])
-            
-            # Parametri per chunk logic (JSONB)
-            chunk_params = []
             json_ors = []
             for c in cats:
                 json_ors.append(f"n.metadata @> %s::jsonb")
-                chunk_params.append(json.dumps({"semantic_matches": [{"category": c}]}))
-            
-            file_logic = "f.category = ANY(%s)"
+                params.append(json.dumps({"semantic_matches": [{"category": c}]}))
             chunk_logic = " OR ".join(json_ors)
-            
+            file_logic = "f.category = ANY(%s)"; params.append(cats)
             clauses.append(f"({file_logic} OR {chunk_logic})")
-            
-            # ORDINE PARAMETRI: Prima File, Poi Chunk
-            params.append(cats)
-            params.extend(chunk_params)
 
         if filters.get("exclude_category"):
             ex_cats = as_list(filters["exclude_category"])
-            
-            chunk_params = []
             json_ors = []
             for c in ex_cats:
                 json_ors.append(f"n.metadata @> %s::jsonb")
-                chunk_params.append(json.dumps({"semantic_matches": [{"category": c}]}))
-            
-            file_logic = "f.category != ALL(%s)"
+                params.append(json.dumps({"semantic_matches": [{"category": c}]}))
             chunk_logic = f"NOT ({' OR '.join(json_ors)})"
-            
+            file_logic = "f.category != ALL(%s)"; params.append(ex_cats)
             clauses.append(f"({file_logic} AND {chunk_logic})")
-            
-            # ORDINE PARAMETRI: Prima File, Poi Chunk
-            params.append(ex_cats)
-            params.extend(chunk_params)
 
         if not clauses: return "", []
         return " AND " + " AND ".join(clauses), params
@@ -261,13 +328,10 @@ class PostgresGraphStorage(GraphStorage):
                 data = []
                 for n in nodes:
                     d = n.to_dict()
-                    d['metadata'] = json.dumps(d.get('metadata', {})) # JSONB richiede stringa o dict (psycopg3 gestisce entrambi, ma dumps è sicuro)
-                    # Calcolo size mancante nel modello
-                    b_start = d['byte_range'][0]
-                    b_end = d['byte_range'][1]
-                    d['byte_start'] = b_start
-                    d['byte_end'] = b_end
-                    d['size'] = b_end - b_start
+                    d['metadata'] = json.dumps(d.get('metadata', {}))
+                    d['byte_start'] = d['byte_range'][0]
+                    d['byte_end'] = d['byte_range'][1]
+                    d['size'] = d['byte_end'] - d['byte_start']
                     data.append(d)
                 
                 cur.executemany("""
@@ -306,7 +370,6 @@ class PostgresGraphStorage(GraphStorage):
         if not vector_documents: return
         with self.pool.connection() as conn:
             with conn.cursor() as cur:
-                # [FIX] Usiamo %(embedding)s per matchare la chiave nel dict
                 cur.executemany("""
                     INSERT INTO node_embeddings (
                         id, chunk_id, repo_id, file_path, branch, language, category,
@@ -432,12 +495,7 @@ class PostgresGraphStorage(GraphStorage):
             logger.error(f"Postgres FTS Error: {e}")
             return []
 
-    # --- CACHE & UTILS ---
-
-    def get_vectors_by_hashes(self, vector_hashes: List[str], model_name: str) -> Dict[str, List[float]]:
-        # Metodo stub se non implementiamo ancora la cache globale
-        # In Postgres, potremmo fare una query su unique_vectors se esistesse
-        return {} 
+    # --- BATCH & UTILS ---
 
     def get_nodes_to_embed(self, repo_id: str, model_name: str) -> Generator[Dict[str, Any], None, None]:
         sql = """
@@ -450,7 +508,7 @@ class PostgresGraphStorage(GraphStorage):
             WHERE f.repo_id = %s AND ne.id IS NULL
         """
         with self.pool.connection() as conn:
-            with conn.transaction(): # Transazione esplicita per evitare NoActiveSqlTransaction
+            with conn.transaction():
                 rows = conn.execute(sql, (model_name, repo_id)).fetchall()
             
             for r in rows:
@@ -460,12 +518,25 @@ class PostgresGraphStorage(GraphStorage):
                     "chunk_hash": r['chunk_hash'], 
                     "start_line": r['start_line'],
                     "end_line": r['end_line'], 
-                    "metadata_json": json.dumps(r['metadata']), 
+                    "metadata_json": json.dumps(r['metadata']),
                     "repo_id": str(r['repo_id']), 
                     "branch": r['branch'],
                     "language": r['language'], 
                     "category": r['category']
                 }
+
+    def get_vectors_by_hashes(self, vector_hashes: List[str], model_name: str) -> Dict[str, List[float]]:
+        if not vector_hashes: return {}
+        res = {}
+        with self.pool.connection() as conn:
+            query = """
+                SELECT DISTINCT ON (vector_hash) vector_hash, embedding 
+                FROM node_embeddings 
+                WHERE vector_hash = ANY(%s) AND model_name = %s
+            """
+            for r in conn.execute(query, (vector_hashes, model_name)).fetchall():
+                if r['embedding'] is not None: res[r['vector_hash']] = r['embedding']
+        return res
 
     def find_chunk_id(self, file_path: str, byte_range: List[int], repo_id: str = None) -> Optional[str]:
         if not byte_range: return None
@@ -486,7 +557,6 @@ class PostgresGraphStorage(GraphStorage):
                 "repositories": conn.execute("SELECT COUNT(*) as c FROM repositories").fetchone()['c']
             }
 
-    # ... Metodi standard (copia 1:1 dalla versione precedente o sqlite.py) ...
     def get_repository(self, repo_id):
         with self.pool.connection() as conn:
             return conn.execute("SELECT * FROM repositories WHERE id=%s", (repo_id,)).fetchone()
@@ -496,25 +566,13 @@ class PostgresGraphStorage(GraphStorage):
             return conn.execute("SELECT * FROM repositories WHERE url=%s AND branch=%s", (url, branch)).fetchone()
 
     def register_repository(self, id, name, url, branch, commit_hash, local_path=None):
-        now = datetime.datetime.utcnow()
-        with self.pool.connection() as conn:
-            repo = self.get_repository_by_context(url, branch)
-            if repo:
-                rid = repo['id']
-                conn.execute("UPDATE repositories SET name=%s, last_commit=%s, status='indexing', updated_at=%s, local_path=%s WHERE id=%s", 
-                             (name, commit_hash, now, local_path, rid))
-            else:
-                rid = str(uuid.uuid4())
-                conn.execute("INSERT INTO repositories (id, name, url, branch, last_commit, status, updated_at, local_path) VALUES (%s, %s, %s, %s, %s, 'indexing', %s, %s)",
-                             (rid, name, url, branch, commit_hash, now, local_path))
-            return str(rid)
+        pass # Legacy, usato da acquire_indexing_lock
 
     def update_repository_status(self, repo_id, status, commit_hash=None):
         now = datetime.datetime.utcnow()
         sql = "UPDATE repositories SET status=%s, updated_at=%s" + (", last_commit=%s" if commit_hash else "") + " WHERE id=%s"
         params = [status, now, commit_hash, repo_id] if commit_hash else [status, now, repo_id]
-        with self.pool.connection() as conn:
-            conn.execute(sql, params)
+        with self.pool.connection() as conn: conn.execute(sql, params)
 
     def delete_previous_data(self, repo_id, branch):
         try:
@@ -525,7 +583,6 @@ class PostgresGraphStorage(GraphStorage):
                 conn.execute("DELETE FROM files WHERE repo_id=%s", (repo_id,))
         except Exception as e: logger.error(f"Del error: {e}")
 
-    # Navigator methods
     def get_context_neighbors(self, node_id):
         res = {"parents": [], "calls": []}
         with self.pool.connection() as conn:
@@ -540,14 +597,12 @@ class PostgresGraphStorage(GraphStorage):
             curr = conn.execute("SELECT file_id, start_line, end_line FROM nodes WHERE id=%s", (node_id,)).fetchone()
             if not curr: return None
             fid, s, e = curr['file_id'], curr['start_line'], curr['end_line']
-            
             if direction == "next":
                 sql = "SELECT n.id, n.start_line, n.end_line, n.chunk_hash, c.content, n.metadata FROM nodes n JOIN contents c ON n.chunk_hash=c.chunk_hash WHERE n.file_id=%s AND n.start_line >= %s AND n.id!=%s ORDER BY n.start_line ASC LIMIT 1"
                 p = (fid, e, node_id)
             else:
                 sql = "SELECT n.id, n.start_line, n.end_line, n.chunk_hash, c.content, n.metadata FROM nodes n JOIN contents c ON n.chunk_hash=c.chunk_hash WHERE n.file_id=%s AND n.end_line <= %s AND n.id!=%s ORDER BY n.end_line DESC LIMIT 1"
                 p = (fid, s, node_id)
-            
             row = conn.execute(sql, p).fetchone()
             if row: return {"id": str(row['id']), "start_line": row['start_line'], "end_line": row['end_line'], "chunk_hash": row['chunk_hash'], "content": row['content'], "metadata": row['metadata']}
             return None
@@ -576,8 +631,7 @@ class PostgresGraphStorage(GraphStorage):
                 sql = "SELECT path, repo_id, language, category FROM files WHERE path = ANY(%s)"
                 params = [batch]
                 if repo_id: sql += " AND repo_id=%s"; params.append(repo_id)
-                for r in conn.execute(sql, params).fetchall():
-                    res[r['path']] = dict(r)
+                for r in conn.execute(sql, params).fetchall(): res[r['path']] = dict(r)
         return res
 
     def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]:

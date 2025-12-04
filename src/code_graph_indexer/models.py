@@ -8,6 +8,7 @@ class Repository:
     name: str
     branch: str
     last_commit: str
+    queued_commit: str
     status: str
     updated_at: str
     local_path: Optional[str] = None
