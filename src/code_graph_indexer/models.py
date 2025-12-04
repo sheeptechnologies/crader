@@ -26,7 +26,11 @@ class FileRecord:
     language: str
     size_bytes: int
     category: str
+
     indexed_at: str
+    
+    parsing_status: str = "success"  # 'success', 'skipped', 'failed'
+    parsing_error: Optional[str] = None # Messaggio di errore se failed/skipped
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
