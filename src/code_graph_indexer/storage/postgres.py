@@ -501,7 +501,11 @@ class PostgresGraphStorage(GraphStorage):
             return []
 
     # --- BATCH & UTILS ---
-    def get_nodes_to_embed(self, repo_id: str, model_name: str) -> Generator[Dict[str, Any], None, None]:
+    def get_nodes_to_embed(self, repo_id: str, model_name: str, batch_size: int = 2000) -> Generator[Dict[str, Any], None, None]:
+        """
+        Recupera i nodi da embeddare usando un Server-Side Cursor per efficienza RAM.
+        """
+        # Query invariata: recupera tutto il contesto necessario per l'embedding
         sql = """
             SELECT n.id, n.file_path, n.chunk_hash, n.start_line, n.end_line, n.metadata,
                    f.repo_id, r.branch, f.language, f.category 
@@ -511,24 +515,39 @@ class PostgresGraphStorage(GraphStorage):
             LEFT JOIN node_embeddings ne ON (n.id = ne.chunk_id AND ne.model_name = %s)
             WHERE f.repo_id = %s AND ne.id IS NULL
         """
-        with self.pool.connection() as conn:
-            with conn.transaction():
-                rows = conn.execute(sql, (model_name, repo_id)).fetchall()
-            
-            for r in rows:
-                yield {
-                    "id": str(r['id']), 
-                    "file_path": r['file_path'], 
-                    "chunk_hash": r['chunk_hash'], 
-                    "start_line": r['start_line'],
-                    "end_line": r['end_line'], 
-                    "metadata_json": json.dumps(r['metadata']),
-                    "repo_id": str(r['repo_id']), 
-                    "branch": r['branch'],
-                    "language": r['language'], 
-                    "category": r['category']
-                }
+        
+        import uuid
+        # Generiamo un nome univoco per il cursore lato server
+        cursor_name = f"embed_stream_{uuid.uuid4().hex}"
 
+        # [FIX] Otteniamo una connessione dal pool (context manager gestisce il rilascio)
+        with self.pool.connection() as conn:
+            
+            # I cursori lato server in Postgres richiedono una transazione attiva
+            with conn.transaction():
+                
+                # 'name' attiva la modalità server-side. 'row_factory=dict_row' è già settato nel pool.
+                with conn.cursor(name=cursor_name) as cur:
+                    cur.itersize = batch_size
+                    
+                    # Esegue la query (ma non scarica i dati ancora)
+                    cur.execute(sql, (model_name, repo_id))
+                    
+                    # Itera sui risultati chunk per chunk
+                    for r in cur:
+                        yield {
+                            "id": str(r['id']), 
+                            "file_path": r['file_path'], 
+                            "chunk_hash": r['chunk_hash'], 
+                            "start_line": r['start_line'],
+                            "end_line": r['end_line'], 
+                            # Postgres restituisce già un dict per le colonne JSONB, lo riconvertiamo a stringa per coerenza interna
+                            "metadata_json": json.dumps(r['metadata']),
+                            "repo_id": str(r['repo_id']), 
+                            "branch": r['branch'],
+                            "language": r['language'], 
+                            "category": r['category']
+                        }
     def get_vectors_by_hashes(self, vector_hashes: List[str], model_name: str) -> Dict[str, List[float]]:
         if not vector_hashes: return {}
         res = {}
@@ -553,6 +572,7 @@ class PostgresGraphStorage(GraphStorage):
             return {
                 "files": conn.execute("SELECT COUNT(*) as c FROM files").fetchone()['c'],
                 "total_nodes": conn.execute("SELECT COUNT(*) as c FROM nodes").fetchone()['c'],
+                "total_edges": conn.execute("SELECT COUNT(*) as c FROM edges").fetchone()['c'],
                 "embeddings": conn.execute("SELECT COUNT(*) as c FROM node_embeddings").fetchone()['c'],
                 "repositories": conn.execute("SELECT COUNT(*) as c FROM repositories").fetchone()['c']
             }
