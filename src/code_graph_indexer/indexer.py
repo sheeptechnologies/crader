@@ -13,6 +13,11 @@ logger = logging.getLogger(__name__)
 
 class CodebaseIndexer:
     def __init__(self, repo_path: str, storage: GraphStorage):
+        """
+        Inizializza l'indicizzatore.
+        :param repo_path: Path della cartella sorgente.
+        :param storage: Istanza di GraphStorage (SQLite, Postgres, ecc.).
+        """
         self.repo_path = os.path.abspath(repo_path)
         if not os.path.isdir(self.repo_path):
             raise ValueError(f"Path not found: {self.repo_path}")
@@ -26,12 +31,14 @@ class CodebaseIndexer:
     def index(self, force: bool = False):
         logger.info(f"🚀 Indexing Request: {self.repo_path}")
         
-        # 1. Setup Iniziale
+        # 1. Recupero metadati iniziali
         repo_info = self.parser.metadata_provider.get_repo_info()
-        url = repo_info['url']; branch = repo_info['branch']
-        commit = repo_info['commit_hash']; name = repo_info['name']
+        url = repo_info['url']
+        branch = repo_info['branch']
+        commit = repo_info['commit_hash']
+        name = repo_info['name']
         
-        # 2. Acquire Lock (Try to become the Active Worker)
+        # 2. ACQUIRE LOCK (o Accoda)
         locked, internal_repo_id = self.storage.acquire_indexing_lock(
             url=url, branch=branch, name=name, 
             commit_hash=commit, local_path=self.repo_path
@@ -51,6 +58,11 @@ class CodebaseIndexer:
             try:
                 logger.info(f"🔨 Processing Commit: {current_work_commit}")
                 
+                # [FIX CRITICO] Aggiorniamo il commit nel parser!
+                # Altrimenti i FileRecord verrebbero taggati con il vecchio hash cachato all'init.
+                if hasattr(self.parser, 'repo_info'):
+                    self.parser.repo_info['commit_hash'] = current_work_commit
+                
                 # --- PIPELINE START ---
                 logger.info(f"🧹 Pulizia storage per ID: {internal_repo_id}")
                 self.storage.delete_previous_data(internal_repo_id, branch)
@@ -63,8 +75,10 @@ class CodebaseIndexer:
                         self.builder.add_files([f_rec])
                         self.builder.add_chunks(nodes)
                         self.builder.add_contents(contents_list)
+                        
                         contents_map = {c.chunk_hash: c for c in contents_list}
                         self.builder.index_search_content(nodes, contents_map)
+                        
                         if rels_list:
                             self.builder.add_relations(rels_list, repo_id=internal_repo_id)
                         files_count += 1
@@ -89,8 +103,6 @@ class CodebaseIndexer:
                 # --- PIPELINE END ---
 
                 # 4. CHECK & RELEASE (Unified Logic)
-                # Se release_indexing_lock ritorna un hash, significa che dobbiamo continuare.
-                # Se ritorna None, abbiamo finito.
                 next_commit = self.storage.release_indexing_lock(
                     internal_repo_id, 
                     success=True, 
@@ -98,8 +110,8 @@ class CodebaseIndexer:
                 )
                 
                 if next_commit:
+                    # C'è nuovo lavoro! Aggiorniamo la variabile e ripetiamo il loop
                     current_work_commit = next_commit
-                    # (Opzionale: qui faresti git checkout se necessario)
                     continue 
                 else:
                     stats = self.storage.get_stats()
@@ -110,20 +122,28 @@ class CodebaseIndexer:
                 logger.error(f"❌ Indexing fallito per commit {current_work_commit}: {e}")
                 # Rilascio forzato in errore (success=False)
                 self.storage.release_indexing_lock(internal_repo_id, success=False)
-                raise e        
+                raise e
+
     def embed(self, provider: EmbeddingProvider, batch_size: int = 32, debug: bool = False):
+        """
+        Avvia la generazione degli embedding.
+        """
         logger.info(f"🤖 Avvio Embedding con {provider.model_name}")
-        repo_info = self.parser.metadata_provider.get_repo_info()
-        url = repo_info['url']; branch = repo_info['branch']
         
+        repo_info = self.parser.metadata_provider.get_repo_info()
+        url = repo_info['url']
+        branch = repo_info['branch']
+        
+        # Recuperiamo l'ID interno dal DB
         repo_record = None
         if hasattr(self.storage, 'get_repository_by_context'):
             repo_record = self.storage.get_repository_by_context(url, branch)
 
         if not repo_record:
-             raise ValueError(f"Repository {url} ({branch}) non trovata nel DB.")
+             raise ValueError(f"Repository {url} ({branch}) non trovata nel DB. Esegui prima index()!")
              
         internal_repo_id = repo_record['id']
+        
         embedder = CodeEmbedder(self.storage, provider)
         
         yield from embedder.run_indexing(
@@ -133,7 +153,7 @@ class CodebaseIndexer:
             yield_debug_docs=debug
         )
 
-    # API Proxy
+    # --- API Proxy ---
     def get_nodes(self): return self.storage.get_all_nodes()
     def get_contents(self): return self.storage.get_all_contents()
     def get_edges(self): return self.storage.get_all_edges()

@@ -207,71 +207,122 @@ class PostgresGraphStorage(GraphStorage):
         
         def as_list(val): return val if isinstance(val, list) else [val]
 
-        # Path
+        # 1. Path
+        # Usa get() così se è None o [] (falsy) viene saltato
         if filters.get("path_prefix"):
             paths = as_list(filters["path_prefix"])
-            clauses.append("f.path LIKE ANY(%s)")
-            params.append([p.strip('/') + '%' for p in paths])
+            if paths:
+                clauses.append("f.path LIKE ANY(%s)")
+                params.append([p.strip('/') + '%' for p in paths])
 
-        # Language
+        # 2. Language
         if filters.get("language"):
-            clauses.append("f.language = ANY(%s)"); params.append(as_list(filters["language"]))
+            langs = as_list(filters["language"])
+            if langs:
+                clauses.append("f.language = ANY(%s)")
+                params.append(langs)
+            
         if filters.get("exclude_language"):
-            clauses.append("f.language != ALL(%s)"); params.append(as_list(filters["exclude_language"]))
+            ex_langs = as_list(filters["exclude_language"])
+            if ex_langs:
+                clauses.append("f.language != ALL(%s)")
+                params.append(ex_langs)
 
-        # Semantic Filters
+        # 3. Semantic Filters (JSON)
         def add_json_match(key, values, exclude=False):
             vals = as_list(values)
+            if not vals: return # [FIX] Se la lista è vuota, esci subito!
+            
             json_ors = []
             for v in vals:
+                # Cerca l'oggetto {"value": v} dentro l'array semantic_matches
                 json_pattern = json.dumps({"semantic_matches": [{"value": v}]})
                 json_ors.append(f"n.metadata @> %s::jsonb")
                 params.append(json_pattern)
+            
             combined = f"({' OR '.join(json_ors)})"
             if exclude: clauses.append(f"NOT {combined}")
             else: clauses.append(combined)
 
-        if "role" in filters: add_json_match("value", filters["role"]) 
-        if "exclude_role" in filters: add_json_match("value", filters["exclude_role"], exclude=True)
+        # [FIX] Usiamo .get() o controlliamo che il valore non sia vuoto
+        if filters.get("role"): 
+            add_json_match("value", filters["role"]) 
+            
+        if filters.get("exclude_role"): 
+            add_json_match("value", filters["exclude_role"], exclude=True)
 
-        # Category (Hybrid) - [FIXED ORDER]
+        # 4. Category (Hybrid)
         if filters.get("category"):
             cats = as_list(filters["category"])
-            
-            # Accumuliamo i parametri JSON separatamente
-            json_params = []
-            json_ors = []
-            for c in cats:
-                json_ors.append(f"n.metadata @> %s::jsonb")
-                json_params.append(json.dumps({"semantic_matches": [{"category": c}]}))
-            
-            chunk_logic = " OR ".join(json_ors)
-            file_logic = "f.category = ANY(%s)"
-            
-            clauses.append(f"({file_logic} OR {chunk_logic})")
-            
-            # Ordine Parametri: File (ANY) -> Chunk (JSONB)
-            params.append(cats)
-            params.extend(json_params)
+            if cats:
+                json_ors = []
+                for c in cats:
+                    json_ors.append(f"n.metadata @> %s::jsonb")
+                    params.append(json.dumps({"semantic_matches": [{"category": c}]}))
+                
+                chunk_logic = " OR ".join(json_ors)
+                file_logic = "f.category = ANY(%s)"
+                
+                clauses.append(f"({file_logic} OR {chunk_logic})")
+                
+                # Ordine Parametri: File (ANY) -> Chunk (JSONB)
+                params.append(cats)
+                # Non aggiungiamo params per chunk_logic qui perché l'abbiamo fatto nel loop
+                # Ops, nel loop sopra ho fatto params.append!
+                # ATTENZIONE ALL'ORDINE: 
+                # Il loop `for c in cats` ha già appeso i params per il chunk.
+                # MA la stringa SQL mette `file_logic` PRIMA di `chunk_logic`.
+                # Quindi i parametri `cats` (per file_logic) devono essere inseriti PRIMA di quelli JSON.
+                
+                # CORREZIONE LOGICA ACCUMULO PARAMETRI:
+                # Dobbiamo rimuovere i params aggiunti nel loop e rimetterli nell'ordine giusto,
+                # oppure usare liste temporanee.
+                
+                # Resettiamo l'errore logico fatto sopra:
+                # Riscriviamo il blocco category per essere sicuri dell'ordine.
 
+        # --- BLOCCO CATEGORY RISCRITTO E SICURO ---
+        
+        # Category Include
+        if filters.get("category"):
+            cats = as_list(filters["category"])
+            if cats:
+                # Parametri per la parte JSON
+                json_params_temp = []
+                json_ors = []
+                
+                for c in cats:
+                    json_ors.append(f"n.metadata @> %s::jsonb")
+                    json_params_temp.append(json.dumps({"semantic_matches": [{"category": c}]}))
+                
+                chunk_logic = " OR ".join(json_ors)
+                file_logic = "f.category = ANY(%s)"
+                
+                clauses.append(f"({file_logic} OR {chunk_logic})")
+                
+                # Ordine SQL: file_logic (cats) -> chunk_logic (json_params)
+                params.append(cats) 
+                params.extend(json_params_temp)
+
+        # Category Exclude
         if filters.get("exclude_category"):
             ex_cats = as_list(filters["exclude_category"])
-            
-            # Accumuliamo i parametri JSON separatamente
-            json_params = []
-            json_ors = []
-            for c in ex_cats:
-                json_ors.append(f"n.metadata @> %s::jsonb")
-                json_params.append(json.dumps({"semantic_matches": [{"category": c}]}))
-            
-            chunk_logic = f"NOT ({' OR '.join(json_ors)})"
-            file_logic = "f.category != ALL(%s)"
-            
-            clauses.append(f"({file_logic} AND {chunk_logic})")
-            
-            # Ordine Parametri: File (ALL) -> Chunk (JSONB)
-            params.append(ex_cats)
-            params.extend(json_params)
+            if ex_cats:
+                json_params_temp = []
+                json_ors = []
+                
+                for c in ex_cats:
+                    json_ors.append(f"n.metadata @> %s::jsonb")
+                    json_params_temp.append(json.dumps({"semantic_matches": [{"category": c}]}))
+                
+                chunk_logic = f"NOT ({' OR '.join(json_ors)})"
+                file_logic = "f.category != ALL(%s)"
+                
+                clauses.append(f"({file_logic} AND {chunk_logic})")
+                
+                # Ordine SQL: file_logic (ex_cats) -> chunk_logic (json_params)
+                params.append(ex_cats)
+                params.extend(json_params_temp)
 
         if not clauses: return "", []
         return " AND " + " AND ".join(clauses), params

@@ -37,6 +37,8 @@ class CodeRetriever:
         if not repo_id:
             raise ValueError("Il parametro 'repo_id' è obbligatorio per garantire l'isolamento della ricerca.")
 
+        repo_id = str(repo_id)
+        
         # Logga anche i filtri se presenti
         filter_log = f" | Filters: {filters}" if filters else ""
         logger.info(f"🔎 Retrieving: '{query}' (Repo: {repo_id[:8]}...){filter_log}")

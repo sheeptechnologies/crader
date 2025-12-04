@@ -1,22 +1,21 @@
+
 import os
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import sys
 import json
 from typing import Optional, List, Union
 
-# --- CONFIGURAZIONE PATH -------------------------------------------------------
+# --- CONFIGURAZIONE PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(current_dir, "..", "src"))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-# --- ENV / DOTENV --------------------------------------------------------------
+# --- ENV ---
 try:
     from dotenv import load_dotenv
-
     load_dotenv()
 except ImportError:
-    print("⚠️ python-dotenv non trovato. Assicurati di averlo installato.")
+    pass
 
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
@@ -27,41 +26,72 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
-# --- IMPORT LIBRERIA CODE GRAPH INDEXER ----------------------------------------
-from code_graph_indexer import (
-    CodebaseIndexer,
-    CodeRetriever,
-    CodeReader,
-    CodeNavigator,
-)
-from code_graph_indexer.storage.sqlite import SqliteGraphStorage
-from code_graph_indexer.providers.embedding import FastEmbedProvider
+# --- IMPORT LIBRERIA ---
+from code_graph_indexer import CodebaseIndexer, CodeRetriever, CodeReader, CodeNavigator
+from code_graph_indexer.storage.postgres import PostgresGraphStorage
 from code_graph_indexer.schema import VALID_ROLES, VALID_CATEGORIES
 
+# Import dinamico provider
+try:
+    from code_graph_indexer.providers.openai_emb import OpenAIEmbeddingProvider
+except ImportError:
+    from code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider
+
 # ==============================================================================
-# 1. SETUP SISTEMA (Backend)
+# 1. SETUP SISTEMA (Enterprise: Postgres + OpenAI)
 # ==============================================================================
 
-# Percorsi (verifica che siano corretti per il tuo ambiente)
+# Configura qui la porta corretta (5433 o 5435 a seconda del tuo docker ps)
+DB_PORT = "5433" 
+DB_URL = f"postgresql://sheep_user:sheep_password@localhost:{DB_PORT}/sheep_index"
 REPO_PATH = "/Users/filippodaminato/Desktop/test_repos/7f10a3a2e3b9/worktrees/main"
-DB_PATH = "sheep_index_test.db"
 
-if not os.path.exists(DB_PATH):
-    print(f"⚠️ ATTENZIONE: DB {DB_PATH} non trovato. Esegui prima il notebook di indexing!")
-    storage = SqliteGraphStorage(":memory:")  # Fallback in-memory
-else:
-    storage = SqliteGraphStorage(DB_PATH)
+print(f"🐘 Connecting to: {DB_URL}")
 
-provider = FastEmbedProvider()
+try:
+    # [POSTGRES] Usiamo Postgres con vettori OpenAI (1536)
+    storage = PostgresGraphStorage(DB_URL, vector_dim=1536)
+    provider = OpenAIEmbeddingProvider(model="text-embedding-3-small")
+except Exception as e:
+    print(f"❌ Errore Setup Infrastruttura: {e}")
+    sys.exit(1)
 
-# Indexer solo per recuperare ID repo
-indexer = CodebaseIndexer(REPO_PATH, storage)
-CURRENT_REPO_ID = "3f5aaca6-e8e5-4f3c-95a6-3cabc68c0eee"	
+# --- LOGICA COLD START (Auto-Indexing) ---
+try:
+    indexer = CodebaseIndexer(REPO_PATH, storage)
+    repo_info = indexer.parser.metadata_provider.get_repo_info()
+    url = repo_info['url']
+    branch = repo_info['branch']
+    print(f"📂 Repository: {url} (Branch: {branch})")
 
-# Motori
+    existing_record = storage.get_repository_by_context(url, branch)
+
+    if not existing_record or existing_record.get('status') != 'completed':
+        print("\n🚀 REPO NON TROVATA O INCOMPLETA. AVVIO INDEXING AUTOMATICO...")
+        try:
+            indexer.index(force=True)
+            print("🤖 Generazione Embeddings in corso...")
+            list(indexer.embed(provider, batch_size=100))
+            print("✅ Setup completato! DB popolato.")
+            existing_record = storage.get_repository_by_context(url, branch)
+        except Exception as e:
+            print(f"❌ Errore durante Auto-Indexing: {e}")
+            sys.exit(1)
+    else:
+        print("✅ Repo già indicizzata nel DB. Skipping setup.")
+
+    CURRENT_REPO_ID = existing_record['id']
+    print(f"🔑 Session Repo ID: {CURRENT_REPO_ID}")
+
+except Exception as e:
+    print(f"⚠️ Errore critico recupero repo: {e}")
+    sys.exit(1)
+
+# Facade
 retriever = CodeRetriever(storage, provider)
 reader = CodeReader(storage)
 navigator = CodeNavigator(storage)
+
 
 print(f"✅ Sistema Inizializzato. Repo ID: {CURRENT_REPO_ID}")
 
@@ -175,7 +205,7 @@ tools = [search_codebase, read_file_content, inspect_node_relationships]
 # 4. AGENTE LANGGRAPH
 # ==============================================================================
 
-llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
 SYSTEM_PROMPT = (
     "Sei un Senior Software Engineer esperto.\n"
