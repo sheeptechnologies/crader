@@ -6,6 +6,12 @@ import logging
 import time
 from typing import List, Dict, Any
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # --- SETUP PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
@@ -13,7 +19,7 @@ if src_dir not in sys.path: sys.path.insert(0, src_dir)
 
 from code_graph_indexer import CodebaseIndexer, CodeRetriever
 from code_graph_indexer.storage.postgres import PostgresGraphStorage
-from code_graph_indexer.providers.embedding import FastEmbedProvider
+from code_graph_indexer.providers.embedding import FastEmbedProvider,OpenAIEmbeddingProvider
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
@@ -123,9 +129,9 @@ def run_rigorous_test():
     
     try:
         logger.info(f"🐘 Connecting to DB...")
-        # [FIX] Usa vector_dim=768 per FastEmbed
-        storage = PostgresGraphStorage(DB_URL, vector_dim=768)
-        provider = FastEmbedProvider()
+
+        storage = PostgresGraphStorage(DB_URL, vector_dim=1536)
+        provider = OpenAIEmbeddingProvider(model="text-embedding-3-small")
         indexer = CodebaseIndexer(REPO_DIR, storage)
         
         # --- 1. IDEMPOTENZA & STABILITA' ---

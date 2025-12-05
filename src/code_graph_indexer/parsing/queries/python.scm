@@ -41,12 +41,15 @@
     (identifier) @parent)
   (#eq? @parent "BaseModel")) @role.data_schema
 
+
 ; ============================================================
-; 2. BASE TYPES (Fallback Strutturali)
+; 2. BASE TYPES (Fallback Strutturali - ANCORATI AI NOMI)
 ; ============================================================
 
-; Classi Generiche
-(class_definition) @type.class
+; Cattura solo l'identificatore della classe, non tutto il corpo
+(class_definition
+  name: (identifier) @type.class)
 
-; Funzioni Generiche (include metodi se dentro classi)
-(function_definition) @type.function
+; Cattura solo l'identificatore della funzione
+(function_definition
+  name: (identifier) @type.function)
