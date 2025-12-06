@@ -116,24 +116,78 @@ class RetrievedContext:
     repo_id: str = ""
     branch: str = "main"  
     
+    
     # --- Context Enrichment (Graph) ---
-    parent_context: Optional[str] = None 
+    parent_context: Optional[str] = None  #deprecata?
     outgoing_definitions: List[str] = field(default_factory=list) 
+
+    language: str = "text"
+    nav_hints: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     def render(self) -> str:
-        """Helper per visualizzare il contesto in un prompt LLM."""
-        labels_str = " | ".join(self.semantic_labels) if self.semantic_labels else "Code Block"
-        header = f"### File: {self.file_path} (L{self.start_line}-{self.end_line}) [ID: {self.node_id}] [{labels_str}]"
+        """Visualizzazione 'SOTA' per l'Agente."""
         
-        context_str = ""
-        if self.parent_context:
-            context_str = f"\nContext: In {self.parent_context}"
+        # 1. Breadcrumbs Semantici
+        # Es: "src/auth.py > Class AuthManager"
+        path_str = self.file_path
+        if self.nav_hints.get("parent"):
+            p_label = self.nav_hints["parent"].get("label", "Container")
+            path_str += f" > {p_label}"
+
+        # 2. Labels (Tags)
+        labels_block = ""
+        if self.semantic_labels:
+            labels_block = " ".join([f"[{l}]" for l in self.semantic_labels])
+        else:
+            labels_block = "[Code Block]"
+
+        # 3. Header
+        out = []
+        out.append(f"FILE: {path_str} (L{self.start_line}-{self.end_line})")
+        out.append(f"LABELS: {labels_block}")
+        out.append(f"NODE ID: {self.node_id}")
+
+        # 4. Codice con Syntax Highlighting Corretto
+        md_lang = self.language.lower()
         
-        refs = ""
+        out.append(f"\n```{md_lang}")
+        out.append(self.content)
+        out.append("```")
+
+        # 5. Relazioni (Filtriamo quelle vuote)
         if self.outgoing_definitions:
-            refs = "\nReferences: " + ", ".join(self.outgoing_definitions)
+            out.append(f"\nRELATIONS:")
+            # Limitiamo a 5 per non intasare
+            for ref in self.outgoing_definitions[:5]:
+                 out.append(f"- {ref}")
+            if len(self.outgoing_definitions) > 5:
+                out.append(f"- ... ({len(self.outgoing_definitions)-5} more)")
+
+        # 6. Navigazione Attiva (Active Retrieval)
+        navs = []
+        if self.nav_hints.get("parent"):
+            p = self.nav_hints["parent"]
+            navs.append(f"SEMANTIC_PARENT_CHUNK: {p['label']} (ID: {p['id']})")
+        else:
+            navs.append(f"SEMANTIC_PARENT_CHUNK: None")
             
-        return f"{header}{context_str}\n```python\n{self.content}\n```{refs}\n"
+        if self.nav_hints.get("prev"):
+            p = self.nav_hints["prev"]
+            navs.append(f"PREV_FILE_CHUNK: {p['label']} (ID: {p['id']})")
+        else:
+            navs.append(f"PREV_FILE_CHUNK: None")
+
+        if self.nav_hints.get("next"):
+            n = self.nav_hints["next"]
+            navs.append(f"NEXT_FILE_CHUNK: {n['label']} (ID: {n['id']})")
+        else:
+            navs.append(f"NEXT_FILE_CHUNK: None")
+            
+        if navs:
+            out.append("\n[CODE NAVIGATION]:")
+            out.extend(navs)
+
+        return "\n".join(out) + "\n"

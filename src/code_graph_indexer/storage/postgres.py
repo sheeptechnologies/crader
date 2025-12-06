@@ -56,88 +56,6 @@ class PostgresGraphStorage(GraphStorage):
     def commit(self):
         pass
 
-    # def _init_schema(self):
-    #     with self.pool.connection() as conn:
-    #         with conn.cursor() as cur:
-    #             cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    #             cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-                
-    #             cur.execute("""
-    #                 CREATE TABLE IF NOT EXISTS repositories (
-    #                     id UUID PRIMARY KEY,
-    #                     url TEXT NOT NULL, branch TEXT NOT NULL,
-    #                     name TEXT, last_commit TEXT, status TEXT, updated_at TIMESTAMP, local_path TEXT,
-    #                     queued_commit TEXT,
-    #                     UNIQUE(url, branch)
-    #                 )
-    #             """)
-
-    #             cur.execute("""
-    #                 CREATE TABLE IF NOT EXISTS files (
-    #                     id UUID PRIMARY KEY,
-    #                     repo_id UUID REFERENCES repositories(id),
-    #                     commit_hash TEXT, file_hash TEXT,
-    #                     path TEXT, language TEXT, size_bytes BIGINT, category TEXT, indexed_at TIMESTAMP,
-    #                     parsing_status TEXT DEFAULT 'success', parsing_error TEXT,
-    #                     UNIQUE(repo_id, path)
-    #                 )
-    #             """)
-    #             cur.execute("CREATE INDEX IF NOT EXISTS idx_files_repo ON files (repo_id)")
-    #             cur.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files (path)")
-    #             cur.execute("CREATE INDEX IF NOT EXISTS idx_files_status ON files (parsing_status)")
-
-    #             cur.execute("""
-    #                 CREATE TABLE IF NOT EXISTS nodes (
-    #                     id UUID PRIMARY KEY,
-    #                     file_id UUID REFERENCES files(id) ON DELETE CASCADE,
-    #                     file_path TEXT,
-    #                     start_line INT, end_line INT, 
-    #                     byte_start INT, byte_end INT,
-    #                     chunk_hash TEXT, size INT,
-    #                     metadata JSONB 
-    #                 )
-    #             """)
-    #             cur.execute("CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes (file_id)")
-    #             cur.execute("CREATE INDEX IF NOT EXISTS idx_nodes_meta ON nodes USING GIN (metadata)")
-
-    #             cur.execute("CREATE TABLE IF NOT EXISTS contents (chunk_hash TEXT PRIMARY KEY, content TEXT)")
-                
-    #             cur.execute("""
-    #                 CREATE TABLE IF NOT EXISTS edges (
-    #                     source_id UUID, target_id UUID, relation_type TEXT, metadata JSONB
-    #                 )
-    #             """)
-    #             cur.execute("CREATE INDEX IF NOT EXISTS idx_edges_src ON edges (source_id)")
-    #             cur.execute("CREATE INDEX IF NOT EXISTS idx_edges_tgt ON edges (target_id)")
-
-    #             cur.execute("""
-    #                 CREATE TABLE IF NOT EXISTS nodes_fts (
-    #                     node_id UUID PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-    #                     file_path TEXT, semantic_tags TEXT, content TEXT, search_vector TSVECTOR
-    #                 )
-    #             """)
-    #             cur.execute("CREATE INDEX IF NOT EXISTS idx_fts_vec ON nodes_fts USING GIN (search_vector)")
-
-    #             cur.execute(f"""
-    #                 CREATE TABLE IF NOT EXISTS node_embeddings (
-    #                     id UUID PRIMARY KEY,
-    #                     chunk_id UUID REFERENCES nodes(id) ON DELETE CASCADE,
-    #                     repo_id UUID,
-    #                     file_path TEXT, branch TEXT, language TEXT, category TEXT,
-    #                     start_line INT, end_line INT,
-    #                     vector_hash TEXT, model_name TEXT, created_at TIMESTAMP,
-    #                     embedding VECTOR({self.vector_dim})
-    #                 )
-    #             """)
-    #             cur.execute("""
-    #                 CREATE INDEX IF NOT EXISTS idx_emb_vector 
-    #                 ON node_embeddings USING hnsw (embedding vector_cosine_ops)
-    #             """)
-    #             cur.execute("CREATE INDEX IF NOT EXISTS idx_emb_repo ON node_embeddings (repo_id)")
-
-    #     self.pool.close()
-    #     self._create_pool()
-
     def acquire_indexing_lock(self, url: str, branch: str, name: str, 
                             commit_hash: str, local_path: str = None, 
                             timeout_minutes: int = 30) -> Tuple[bool, Optional[str]]:
@@ -407,13 +325,51 @@ class PostgresGraphStorage(GraphStorage):
     # RETRIEVAL
     # ==========================================
 
+    def get_neighbor_metadata(self, node_id: str) -> Dict[str, Any]:
+        """
+        Recupera metadati leggeri per Next/Prev/Parent.
+        """
+        info = {"next": None, "prev": None, "parent": None}
+        with self.pool.connection() as conn:
+            curr = conn.execute("SELECT file_id, start_line, end_line FROM nodes WHERE id=%s", (node_id,)).fetchone()
+            if not curr: return info
+            fid, s, e = curr['file_id'], curr['start_line'], curr['end_line']
+
+            # Next Sibling
+            rn = conn.execute("SELECT id, metadata FROM nodes WHERE file_id=%s AND start_line >= %s AND id!=%s ORDER BY start_line ASC LIMIT 1", (fid, e, node_id)).fetchone()
+            if rn: info["next"] = self._format_nav_node(rn)
+
+            # Prev Sibling
+            rp = conn.execute("SELECT id, metadata FROM nodes WHERE file_id=%s AND end_line <= %s AND id!=%s ORDER BY end_line DESC LIMIT 1", (fid, s, node_id)).fetchone()
+            if rp: info["prev"] = self._format_nav_node(rp)
+                
+            # Parent
+            rpar = conn.execute("SELECT t.id, t.metadata FROM edges e JOIN nodes t ON e.target_id=t.id WHERE e.source_id=%s AND e.relation_type='child_of' LIMIT 1", (node_id,)).fetchone()
+            if rpar: info["parent"] = self._format_nav_node(rpar)
+            
+        return info
+
+    def _format_nav_node(self, row):
+        """Helper per estrarre una label leggibile dai metadati."""
+        meta = row['metadata']
+        matches = meta.get('semantic_matches', [])
+        # Cerca la label più significativa
+        label = "Code Block"
+        for m in matches:
+            if m.get('category') == 'role':
+                label = m.get('label') or m.get('value')
+                break # Role vince su tutto
+            if m.get('category') == 'type':
+                label = m.get('label') or m.get('value')
+        return {"id": str(row['id']), "label": label}
+
     def search_vectors(self, query_vector: List[float], limit: int = 20, 
                        repo_id: str = None, branch: str = None, 
                        filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         
         sql = """
             SELECT ne.chunk_id, ne.file_path, ne.start_line, ne.end_line, 
-                   ne.repo_id, ne.branch, n.metadata, c.content,
+                   ne.repo_id, ne.branch, n.metadata, c.content, f.language,
                    (ne.embedding <=> %s::vector) as distance
             FROM node_embeddings ne
             JOIN nodes n ON ne.chunk_id = n.id
@@ -448,6 +404,7 @@ class PostgresGraphStorage(GraphStorage):
                     "branch": row['branch'],
                     "metadata": row['metadata'],
                     "content": row['content'],
+                    "language": row['language'],
                     "score": sim
                 })
             return results
@@ -458,7 +415,7 @@ class PostgresGraphStorage(GraphStorage):
         sql = """
             SELECT 
                 fts.node_id, fts.file_path, n.start_line, n.end_line, 
-                fts.content, f.repo_id, r.branch, n.metadata,
+                fts.content, f.repo_id, r.branch, n.metadata,f.language,
                 ts_rank(fts.search_vector, websearch_to_tsquery('english', %s)) as rank
             FROM nodes_fts fts
             JOIN nodes n ON fts.node_id = n.id
@@ -493,7 +450,8 @@ class PostgresGraphStorage(GraphStorage):
                         "content": row['content'],
                         "repo_id": str(row['repo_id']),
                         "branch": row['branch'],
-                        "metadata": row['metadata']
+                        "metadata": row['metadata'],
+                        "language": row['language']
                     })
                 return results
         except Exception as e:

@@ -80,9 +80,8 @@ class CodeRetriever:
         for doc in docs:
             ctx_info = self.walker.expand_context(doc)
             
-            # Estrazione Label Semantiche dai metadati
             meta = doc.get('metadata', {})
-            # Se viene da SQLite row grezza, potrebbe essere stringa o dict
+            # Compatibilità se meta è stringa
             if isinstance(meta, str):
                 import json
                 try: meta = json.loads(meta)
@@ -91,28 +90,32 @@ class CodeRetriever:
             labels = []
             matches = meta.get('semantic_matches', [])
             for m in matches:
-                # Priorità: Label leggibile > Valore tecnico
                 label = m.get('label') or m.get('value')
                 if label: labels.append(label)
             
-            if not labels: labels = ["Code Block"] # Fallback
+            if not labels: labels = ["Code Block"]
 
-            methods = "+".join(sorted(list(doc.get('methods', ['unknown']))))
-            score = doc.get('final_rrf_score', doc.get('score', 0.0))
-            doc_branch = doc.get('branch', 'main')
+            # [NEW] Recupero Nav Hints
+            nav_hints = {}
+            if hasattr(self.storage, 'get_neighbor_metadata'):
+                nav_hints = self.storage.get_neighbor_metadata(doc['id'])
 
             results.append(RetrievedContext(
                 node_id=doc['id'],
                 file_path=doc.get('file_path', 'unknown'),
-                semantic_labels=list(set(labels)), # [MODIFIED] Uso semantic_labels invece di chunk_type
+                semantic_labels=list(set(labels)),
                 content=doc.get('content', ''),
-                score=score,
-                retrieval_method=methods,
+                score=doc.get('final_rrf_score', doc.get('score', 0.0)),
+                retrieval_method="+".join(sorted(list(doc.get('methods', ['unknown'])))),
                 start_line=doc.get('start_line', 0),
                 end_line=doc.get('end_line', 0),
                 repo_id=doc.get('repo_id', ''),
-                branch=doc_branch,
+                branch=doc.get('branch', 'main'),
                 parent_context=ctx_info['parent_context'],
-                outgoing_definitions=ctx_info['outgoing_definitions']
+                outgoing_definitions=ctx_info['outgoing_definitions'],
+                
+                # [NEW] Nuovi campi popolati
+                language=doc.get('language', 'text'),
+                nav_hints=nav_hints
             ))
         return results
