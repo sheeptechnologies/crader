@@ -126,7 +126,7 @@ class RetrievedContext:
     def render(self) -> str:
         """Helper per visualizzare il contesto in un prompt LLM."""
         labels_str = " | ".join(self.semantic_labels) if self.semantic_labels else "Code Block"
-        header = f"### File: {self.file_path} (L{self.start_line}-{self.end_line}) [{labels_str}]"
+        header = f"### File: {self.file_path} (L{self.start_line}-{self.end_line}) [ID: {self.node_id}] [{labels_str}]"
         
         context_str = ""
         if self.parent_context:

@@ -412,7 +412,7 @@ class PostgresGraphStorage(GraphStorage):
                        filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         
         sql = """
-            SELECT ne.id, ne.file_path, ne.start_line, ne.end_line, 
+            SELECT ne.chunk_id, ne.file_path, ne.start_line, ne.end_line, 
                    ne.repo_id, ne.branch, n.metadata, c.content,
                    (ne.embedding <=> %s::vector) as distance
             FROM node_embeddings ne
@@ -440,7 +440,7 @@ class PostgresGraphStorage(GraphStorage):
             for row in conn.execute(sql, params).fetchall():
                 sim = 1 - row['distance']
                 results.append({
-                    "id": str(row['id']),
+                    "id": str(row['chunk_id']),
                     "file_path": row['file_path'],
                     "start_line": row['start_line'],
                     "end_line": row['end_line'],
@@ -615,13 +615,13 @@ class PostgresGraphStorage(GraphStorage):
             if not curr: return None
             fid, s, e = curr['file_id'], curr['start_line'], curr['end_line']
             if direction == "next":
-                sql = "SELECT n.id, n.start_line, n.end_line, n.chunk_hash, c.content, n.metadata FROM nodes n JOIN contents c ON n.chunk_hash=c.chunk_hash WHERE n.file_id=%s AND n.start_line >= %s AND n.id!=%s ORDER BY n.start_line ASC LIMIT 1"
+                sql = "SELECT n.id, n.start_line, n.end_line, n.chunk_hash, c.content, n.metadata, n.file_path FROM nodes n JOIN contents c ON n.chunk_hash=c.chunk_hash WHERE n.file_id=%s AND n.start_line >= %s AND n.id!=%s ORDER BY n.start_line ASC LIMIT 1"
                 p = (fid, e, node_id)
             else:
-                sql = "SELECT n.id, n.start_line, n.end_line, n.chunk_hash, c.content, n.metadata FROM nodes n JOIN contents c ON n.chunk_hash=c.chunk_hash WHERE n.file_id=%s AND n.end_line <= %s AND n.id!=%s ORDER BY n.end_line DESC LIMIT 1"
+                sql = "SELECT n.id, n.start_line, n.end_line, n.chunk_hash, c.content, n.metadata, n.file_path FROM nodes n JOIN contents c ON n.chunk_hash=c.chunk_hash WHERE n.file_id=%s AND n.end_line <= %s AND n.id!=%s ORDER BY n.end_line DESC LIMIT 1"
                 p = (fid, s, node_id)
             row = conn.execute(sql, p).fetchone()
-            if row: return {"id": str(row['id']), "start_line": row['start_line'], "end_line": row['end_line'], "chunk_hash": row['chunk_hash'], "content": row['content'], "metadata": row['metadata']}
+            if row: return {"id": str(row['id']), "start_line": row['start_line'], "end_line": row['end_line'], "chunk_hash": row['chunk_hash'], "content": row['content'], "metadata": row['metadata'], "file_path": row['file_path']}
             return None
 
     def get_incoming_references(self, target_node_id, limit=50):

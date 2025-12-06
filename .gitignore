@@ -15,3 +15,5 @@ build/
 *.graphml
 *.db*
 :memory:
+
+node_modules/

@@ -74,7 +74,7 @@ class CodeNavigator:
             for call in calls:
                 child_data = {
                     "file": call['file'],
-                    "type": call['target_type'], # Questo viene dalla tabella edges, ok
+                    "type": call['relation'], # Fixed: use 'relation' instead of 'target_type'
                     "symbol": call.get('symbol'),
                     "children": _walk(call['target_id'], depth + 1)
                 }

@@ -126,7 +126,33 @@ class SearchFiltersInput(BaseModel):
 # ==============================================================================
 # 3. DEFINIZIONE TOOLS
 # ==============================================================================
-
+@tool
+def list_repo_structure(path: str = "", max_depth: int = 2):
+    """
+    Elenca file e cartelle nella repository. 
+    Usa questo tool ALL'INIZIO per capire com'è organizzato il progetto (es. dove sono i source file, dove sono i test).
+    """
+    try:
+        items = reader.list_directory(CURRENT_REPO_ID, path)
+        output = [f"Listing '{path or '/'}':"]
+        for item in items:
+            icon = "📁" if item['type'] == 'dir' else "📄"
+            output.append(f"{icon} {item['name']}")
+            
+            # Mini-esplorazione per profondità 2
+            if item['type'] == 'dir' and max_depth > 1:
+                try:
+                    sub_items = reader.list_directory(CURRENT_REPO_ID, item['path'])
+                    # Mostra solo i primi 5 file per non intasare
+                    for i, sub in enumerate(sub_items):
+                        if i >= 5: 
+                            output.append(f"  └─ ... ({len(sub_items)-5} more)")
+                            break
+                        sub_icon = "  └─ 📁" if sub['type'] == 'dir' else "  └─ 📄"
+                        output.append(f"{sub_icon} {sub['name']}")
+                except: pass
+        return "\n".join(output)
+    except Exception as e: return f"Errore listing: {e}"
 
 @tool
 def search_codebase(query: str, filters: Optional[SearchFiltersInput] = None):
@@ -199,7 +225,7 @@ def inspect_node_relationships(node_id: str):
     return "\n".join(report)
 
 
-tools = [search_codebase, read_file_content, inspect_node_relationships]
+tools = [search_codebase, read_file_content, inspect_node_relationships,list_repo_structure]
 
 # ==============================================================================
 # 4. AGENTE LANGGRAPH

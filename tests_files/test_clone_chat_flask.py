@@ -1,5 +1,6 @@
 import os
 import sys
+import uuid
 import json
 import tempfile
 import subprocess
@@ -160,21 +161,104 @@ def read_file_content(file_path: str, start_line: Optional[int] = None, end_line
 
 @tool
 def inspect_node_relationships(node_id: str):
-    """Analizza relazioni (Parent, Next, Callers)."""
-    report = []
-    parent = navigator.read_parent_chunk(node_id)
-    if parent: report.append(f"⬆️ PARENT: {parent.get('type')} in {parent.get('file_path')}")
-    nxt = navigator.read_neighbor_chunk(node_id, "next")
-    if nxt: report.append(f"➡️ NEXT: {nxt.get('type')} (ID: {nxt.get('id')})")
-    impact = navigator.analyze_impact(node_id)
-    if impact:
-        report.append(f"⬅️ CALLED BY ({len(impact)} refs):")
-        for i in impact[:5]: report.append(f"   - {i['file']} L{i['line']}")
-    pipe = navigator.visualize_pipeline(node_id)
-    if pipe and pipe.get("call_graph"): report.append(f"⤵️ CALLS: {json.dumps(pipe['call_graph'], indent=2)}")
-    return "\n".join(report) if report else "Nessuna relazione trovata."
+    """
+    Analizza le relazioni (Parent, Next, Callers, Calls) di un Chunk ID.
+    Usa questo dopo aver trovato un ID con la ricerca.
+    
+    IMPORTANTE: node_id DEVE essere un UUID (es. '3fa85f64-5717...'), NON un file path.
+    Trovi l'UUID nell'output di `search_codebase`.
+    """
+    # [FIX] Validazione Input: L'Agente a volte manda path invece di UUID
+    try:
+        uuid.UUID(node_id)
+    except ValueError:
+        return (
+            f"ERRORE: '{node_id}' non è un ID valido. "
+            "Hai passato un file path? Devi passare il 'node_id' (UUID) "
+            "che trovi nei risultati di `search_codebase` (es. 'a1b2c3d4-....')."
+        )
 
-tools = [search_codebase, read_file_content, inspect_node_relationships]
+    report = []
+    try:
+        # 1. Parent
+        parent = navigator.read_parent_chunk(node_id)
+        if parent: 
+            report.append(f"⬆️ PARENT: {parent.get('type')} in {parent.get('file_path')}")
+        else:
+            report.append("⬆️ PARENT: None (Top-level node)")
+
+        # 2. Next
+        nxt = navigator.read_neighbor_chunk(node_id, "next")
+        if nxt: 
+            prev = nxt.get('content', '').split('\n')[0][:80]
+            report.append(f"➡️ NEXT: {nxt.get('type')} (ID: {nxt.get('id')})\n   Preview: {prev}...")
+            
+        # 3. Impact
+        impact = navigator.analyze_impact(node_id)
+        if impact:
+            report.append(f"⬅️ CALLED BY ({len(impact)} refs):")
+            for i in impact[:5]:
+                report.append(f"   - {i['file']} L{i['line']} ({i['relation']})")
+        else:
+            report.append("⬅️ CALLED BY: None")
+            
+        # 4. Pipeline
+        pipe = navigator.visualize_pipeline(node_id)
+        if pipe and pipe.get("call_graph"):
+            report.append(f"⤵️ CALLS: {json.dumps(pipe['call_graph'], indent=2)}")
+        else:
+            report.append("⤵️ CALLS: None")
+            
+        return "\n".join(report)
+    
+    except Exception as e: 
+        return f"Errore interno ispezione: {e}"
+    
+@tool
+def find_folder(name_pattern: str):
+    """
+    Cerca il percorso di una cartella dato un nome parziale.
+    Usa questo se `list_repo_structure` fallisce perché non trovi la cartella prevista.
+    Es: cerchi "flask" -> trova "src/flask".
+    """
+    try:
+        dirs = reader.find_directories(CURRENT_REPO_ID, name_pattern)
+        if not dirs:
+            return f"Nessuna cartella trovata contenente '{name_pattern}'."
+        return "Cartelle trovate:\n" + "\n".join([f"- {d}" for d in dirs])
+    except Exception as e:
+        return f"Errore ricerca cartelle: {e}"
+    
+@tool
+def list_repo_structure(path: str = "", max_depth: int = 2):
+    """
+    Elenca file e cartelle nella repository. 
+    Usa questo tool ALL'INIZIO per capire com'è organizzato il progetto (es. dove sono i source file, dove sono i test).
+    """
+    try:
+        items = reader.list_directory(CURRENT_REPO_ID, path)
+        output = [f"Listing '{path or '/'}':"]
+        for item in items:
+            icon = "📁" if item['type'] == 'dir' else "📄"
+            output.append(f"{icon} {item['name']}")
+            
+            # Mini-esplorazione per profondità 2
+            if item['type'] == 'dir' and max_depth > 1:
+                try:
+                    sub_items = reader.list_directory(CURRENT_REPO_ID, item['path'])
+                    # Mostra solo i primi 5 file per non intasare
+                    for i, sub in enumerate(sub_items):
+                        if i >= 5: 
+                            output.append(f"  └─ ... ({len(sub_items)-5} more)")
+                            break
+                        sub_icon = "  └─ 📁" if sub['type'] == 'dir' else "  └─ 📄"
+                        output.append(f"{sub_icon} {sub['name']}")
+                except: pass
+        return "\n".join(output)
+    except Exception as e: return f"Errore listing: {e}"
+
+
+tools = [search_codebase, read_file_content, inspect_node_relationships, list_repo_structure,find_folder]
 
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 SYSTEM_PROMPT = "Sei un Senior Software Engineer esperto su Flask. Rispondi usando SOLO i tool."

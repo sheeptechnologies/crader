@@ -1,0 +1,795 @@
+import os
+import shutil
+import logging
+from typing import List, Optional, Dict, Any
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import git
+
+from src.code_graph_indexer.indexer import CodebaseIndexer
+from src.code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider, DummyEmbeddingProvider
+from fastapi.responses import StreamingResponse
+from src.code_graph_indexer.retriever import CodeRetriever
+from src.code_graph_indexer.navigator import CodeNavigator
+from debugger.agent_utils import get_agent
+from debugger.database import get_storage
+
+# Setup Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("DebuggerServer")
+
+from dotenv import load_dotenv
+load_dotenv()
+
+app = FastAPI(title="Sheep Debugger API")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- Pydantic Models ---
+class RepoRequest(BaseModel):
+    path_or_url: str
+    branch: str = "main"
+    name: Optional[str] = None
+
+class IndexRequest(BaseModel):
+    force: bool = False
+
+class EmbedRequest(BaseModel):
+    provider: str = "openai" # openai, dummy
+    model: str = "text-embedding-3-small"
+
+class SearchRequest(BaseModel):
+    query: str
+    repo_id: str
+    limit: int = 10
+    filters: Optional[Dict[str, Any]] = None
+
+# --- Helpers ---
+def clone_repo(url: str, target_dir: str, branch: str):
+    if os.path.exists(target_dir):
+        logger.info(f"Directory {target_dir} exists. Pulling...")
+        repo = git.Repo(target_dir)
+        repo.remotes.origin.pull()
+        repo.git.checkout(branch)
+    else:
+        logger.info(f"Cloning {url} to {target_dir}...")
+        git.Repo.clone_from(url, target_dir, branch=branch)
+
+# --- Endpoints ---
+
+@app.get("/api/repos")
+def list_repos():
+    storage = get_storage()
+    # We need to expose a method in storage to list all repos, 
+    # but for now we can query the table directly if needed or add a method to SqliteGraphStorage.
+    # Let's assume we can query directly using the cursor for now or add a method.
+    # Since we can't easily modify the library code in this step without a separate tool call,
+    # let's use a raw query here or rely on get_stats which counts them.
+    # Ideally, we should add `get_all_repositories` to SqliteGraphStorage.
+    # For now, let's use a raw query via the connection if possible, or just implement a workaround.
+    # Accessing private _cursor is not ideal but works for a debugger tool.
+    
+    # Use connection pool for Postgres
+    with storage.pool.connection() as conn:
+        rows = conn.execute("SELECT * FROM repositories").fetchall()
+        # rows are dicts because of dict_row factory in PostgresGraphStorage
+        return rows
+
+@app.post("/api/repos")
+def add_repo(req: RepoRequest):
+    # Determine if it's a local path or a git URL
+    is_url = req.path_or_url.startswith("http") or req.path_or_url.startswith("git@")
+    
+    repo_name = req.name or os.path.basename(req.path_or_url).replace(".git", "")
+    local_path = req.path_or_url
+    
+    if is_url:
+        # Clone to a temporary or specific directory
+        # For this debugger, let's clone into a 'repos' subdirectory in debugger
+        base_dir = os.path.join(os.path.dirname(__file__), "repos")
+        os.makedirs(base_dir, exist_ok=True)
+        local_path = os.path.join(base_dir, repo_name)
+        try:
+            clone_repo(req.path_or_url, local_path, req.branch)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to clone: {e}")
+
+    # Register in DB
+    storage = get_storage()
+    
+    # Get commit hash
+    try:
+        repo = git.Repo(local_path)
+        commit_hash = repo.head.commit.hexsha
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid git repo at {local_path}: {e}")
+
+    # PostgresGraphStorage.register_repository is a no-op, so we insert manually
+    import uuid
+    import datetime
+    
+    repo_id = str(uuid.uuid4())
+    url = req.path_or_url if is_url else f"file://{local_path}"
+    now = datetime.datetime.utcnow()
+    
+    # Check if exists first
+    existing = storage.get_repository_by_context(url, req.branch)
+    if existing:
+        repo_id = str(existing['id'])
+        # Update path if needed
+        with storage.pool.connection() as conn:
+            conn.execute("UPDATE repositories SET local_path = %s WHERE id = %s", (local_path, repo_id))
+    else:
+        with storage.pool.connection() as conn:
+            conn.execute("""
+                INSERT INTO repositories (id, url, branch, name, last_commit, status, updated_at, local_path)
+                VALUES (%s, %s, %s, %s, %s, 'registered', %s, %s)
+            """, (repo_id, url, req.branch, repo_name, commit_hash, now, local_path))
+    
+    return {"id": repo_id, "status": "registered", "local_path": local_path}
+
+@app.delete("/api/repos/{repo_id}")
+def delete_repo(repo_id: str):
+    storage = get_storage()
+    # Check if exists
+    repo = storage.get_repository(repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repo not found")
+        
+    # Delete from DB
+    # We should probably delete related data too (files, nodes, etc.)
+    # But PostgresGraphStorage might not have a cascade delete set up or a method for full cleanup.
+    # Let's check if we can just delete from 'repositories' and rely on FK cascade?
+    # PostgresGraphStorage schema usually has FKs. Let's assume cascade or manual cleanup.
+    # For now, let's try deleting from repositories.
+    
+    with storage.pool.connection() as conn:
+        # Delete related data first to be safe if no cascade
+        conn.execute("DELETE FROM node_embeddings WHERE repo_id = %s", (repo_id,))
+        conn.execute("DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE file_id IN (SELECT id FROM files WHERE repo_id = %s))", (repo_id,))
+        conn.execute("DELETE FROM edges WHERE source_id IN (SELECT id FROM nodes WHERE file_id IN (SELECT id FROM files WHERE repo_id = %s))", (repo_id,))
+        conn.execute("DELETE FROM nodes WHERE file_id IN (SELECT id FROM files WHERE repo_id = %s)", (repo_id,))
+        conn.execute("DELETE FROM files WHERE repo_id = %s", (repo_id,))
+        conn.execute("DELETE FROM repositories WHERE id = %s", (repo_id,))
+        
+    return {"status": "deleted", "id": repo_id}
+
+@app.post("/api/repos/{repo_id}/index")
+def index_repo(repo_id: str, req: IndexRequest, background_tasks: BackgroundTasks):
+    storage = get_storage()
+    repo = storage.get_repository(repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repo not found")
+    
+    local_path = repo['local_path']
+    if not local_path or not os.path.exists(local_path):
+        raise HTTPException(status_code=400, detail="Local path not found. Cannot index.")
+
+    def _run_index():
+        try:
+            indexer = CodebaseIndexer(local_path, storage)
+            indexer.index(force=req.force)
+            storage.update_repository_status(repo_id, "indexed")
+        except Exception as e:
+            logger.error(f"Indexing failed: {e}")
+            storage.update_repository_status(repo_id, "failed")
+
+    storage.update_repository_status(repo_id, "indexing")
+    background_tasks.add_task(_run_index)
+    return {"status": "indexing_started"}
+
+@app.post("/api/repos/{repo_id}/embed")
+def embed_repo(repo_id: str, req: EmbedRequest, background_tasks: BackgroundTasks):
+    storage = get_storage()
+    repo = storage.get_repository(repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repo not found")
+        
+    local_path = repo['local_path']
+    
+    provider = None
+    try:
+        if req.provider == "openai":
+            provider = OpenAIEmbeddingProvider(model=req.model)
+        else:
+            provider = DummyEmbeddingProvider()
+    except ValueError as e:
+        # Likely missing API Key
+        raise HTTPException(status_code=400, detail=str(e))
+    except ImportError:
+        raise HTTPException(status_code=500, detail="OpenAI library not installed.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to initialize provider: {e}")
+
+    def _run_embed():
+        try:
+            indexer = CodebaseIndexer(local_path, storage)
+            # Consume generator
+            for _ in indexer.embed(provider, debug=True):
+                pass
+            storage.update_repository_status(repo_id, "embedded")
+        except Exception as e:
+            logger.error(f"Embedding failed: {e}")
+            storage.update_repository_status(repo_id, "embedding_failed")
+
+    storage.update_repository_status(repo_id, "embedding")
+    background_tasks.add_task(_run_embed)
+    return {"status": "embedding_started"}
+
+@app.get("/api/repos/{repo_id}/files")
+def get_file_tree(repo_id: str):
+    storage = get_storage()
+    # Get all files for this repo
+    # Get all files for this repo
+    with storage.pool.connection() as conn:
+        files = conn.execute("SELECT path, category, language, parsing_status FROM files WHERE repo_id = %s", (repo_id,)).fetchall()
+    
+    # Build tree
+    tree = []
+    for row in files:
+        path = row['path']
+        cat = row['category']
+        lang = row['language']
+        parts = path.split('/')
+        current_level = tree
+        for i, part in enumerate(parts):
+            # Check if existing
+            found = next((item for item in current_level if item["name"] == part), None)
+            if not found:
+                is_file = (i == len(parts) - 1)
+                new_node = {
+                    "name": part,
+                    "path": "/".join(parts[:i+1]),
+                    "type": "file" if is_file else "directory",
+                    "children": [] if not is_file else None,
+                    "category": cat if is_file else None,
+                    "language": lang if is_file else None,
+                    "status": row['parsing_status'] if is_file else None
+                }
+                current_level.append(new_node)
+                current_level = new_node["children"]
+            else:
+                if found["type"] == "directory":
+                    current_level = found["children"]
+    
+    return tree
+
+@app.get("/api/repos/{repo_id}/file_content")
+def get_file_content(repo_id: str, path: str):
+    storage = get_storage()
+    
+    # Get file content (read from disk for simplicity, or from DB if we stored it? 
+    # The library stores chunks, but maybe not full file content in 'files' table.
+    # Let's check 'files' table schema... it doesn't have content.
+    # So we must read from disk.
+    repo = storage.get_repository(repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repo not found")
+    
+    full_path = os.path.join(repo['local_path'], path)
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="File not found on disk")
+        
+    with open(full_path, 'r', errors='ignore') as f:
+        content = f.read()
+        
+    # Get chunks for this file
+    # Get chunks for this file
+    with storage.pool.connection() as conn:
+        # Join with files to filter by path and repo
+        rows = conn.execute("""
+            SELECT n.id, n.start_line, n.end_line, n.byte_start, n.byte_end, n.metadata, n.chunk_hash
+            FROM nodes n
+            JOIN files f ON n.file_id = f.id
+            WHERE f.repo_id = %s AND f.path = %s
+        """, (repo_id, path)).fetchall()
+    
+    chunks = []
+    for row in rows:
+        d = dict(row)
+        # metadata is already a dict in Postgres (JSONB)
+        # But wait, in PostgresGraphStorage schema: metadata JSONB
+        # psycopg returns it as dict automatically if configured?
+        # Let's check PostgresGraphStorage._pool_kwargs: "row_factory": dict_row.
+        # But JSONB columns are returned as dicts by psycopg 3 by default?
+        # Let's assume it is. If it's a string, we load it.
+        if isinstance(d.get("metadata"), str):
+            import json
+            try:
+                d["metadata"] = json.loads(d["metadata"])
+            except:
+                d["metadata"] = {}
+        chunks.append(d)
+        
+    return {"content": content, "chunks": chunks}
+
+@app.get("/api/chunks/{chunk_id}/graph")
+def get_chunk_graph(chunk_id: str):
+    logger.info(f"Fetching graph for chunk_id: {chunk_id}")
+    storage = get_storage()
+    
+    # Get the node itself
+    with storage.pool.connection() as conn:
+        row = conn.execute("""
+            SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
+            FROM nodes n
+            LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+            WHERE n.id = %s
+        """, (chunk_id,)).fetchone()
+    
+    if not row:
+        logger.error(f"Chunk {chunk_id} not found in DB")
+        raise HTTPException(status_code=404, detail=f"Chunk {chunk_id} not found")
+    
+    import json
+    # Handle metadata if string
+    meta = row['metadata']
+    if isinstance(meta, str):
+        meta = json.loads(meta)
+
+    center_node = {
+        "id": str(row['id']),
+        "file_path": row['file_path'],
+        "start_line": row['start_line'],
+        "end_line": row['end_line'],
+        "content": row['content'],
+        "metadata": meta or {},
+        "type": "center"
+    }
+    
+    nodes = [center_node]
+    edges = []
+    
+    # Get outgoing edges (depth 1)
+    outgoing = storage.get_outgoing_calls(chunk_id, limit=50)
+    for out in outgoing:
+        # We need more info for the target node to display code
+        # get_outgoing_calls returns target_id, file, line, relation, symbol
+        # Let's fetch content for these if possible, or just basic info
+        target_id = out['target_id']
+        
+        # Fetch target node details
+        # Fetch target node details
+        with storage.pool.connection() as conn:
+            t_row = conn.execute("""
+                SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
+                FROM nodes n
+                LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+                WHERE n.id = %s
+            """, (target_id,)).fetchone()
+        
+        if t_row:
+            meta = t_row['metadata']
+            if isinstance(meta, str): meta = json.loads(meta)
+            
+            nodes.append({
+                "id": str(t_row['id']),
+                "file_path": t_row['file_path'],
+                "start_line": t_row['start_line'],
+                "end_line": t_row['end_line'],
+                "content": t_row['content'],
+                "metadata": meta or {},
+                "type": "neighbor"
+            })
+            edges.append({
+                "source": chunk_id,
+                "target": target_id,
+                "relation": out['relation']
+            })
+
+    # Get incoming edges (depth 1)
+    incoming = storage.get_incoming_references(chunk_id, limit=50)
+    for inc in incoming:
+        source_id = inc['source_id']
+        
+        # Fetch source node details
+        # Fetch source node details
+        with storage.pool.connection() as conn:
+            s_row = conn.execute("""
+                SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
+                FROM nodes n
+                LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+                WHERE n.id = %s
+            """, (source_id,)).fetchone()
+        
+        if s_row:
+            meta = s_row['metadata']
+            if isinstance(meta, str): meta = json.loads(meta)
+
+            nodes.append({
+                "id": str(s_row['id']),
+                "file_path": s_row['file_path'],
+                "start_line": s_row['start_line'],
+                "end_line": s_row['end_line'],
+                "content": s_row['content'],
+                "metadata": meta or {},
+                "type": "neighbor"
+            })
+            edges.append({
+                "source": source_id,
+                "target": chunk_id,
+                "relation": inc['relation']
+            })
+
+    # Explicitly fetch child_of relations (parent/child)
+    # Check if this node is a child of another node
+    with storage.pool.connection() as conn:
+        # Parents (this node is source, relation is child_of)
+        parents = conn.execute("""
+            SELECT target_id FROM edges WHERE source_id = %s AND relation_type = 'child_of'
+        """, (chunk_id,)).fetchall()
+        
+        for p in parents:
+            pid = p['target_id']
+            # Fetch parent details
+            p_row = conn.execute("""
+                SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
+                FROM nodes n
+                LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+                WHERE n.id = %s
+            """, (pid,)).fetchone()
+            
+            if p_row:
+                meta = p_row['metadata']
+                if isinstance(meta, str): meta = json.loads(meta)
+                nodes.append({
+                    "id": str(p_row['id']),
+                    "file_path": p_row['file_path'],
+                    "start_line": p_row['start_line'],
+                    "end_line": p_row['end_line'],
+                    "content": p_row['content'],
+                    "metadata": meta or {},
+                    "type": "parent"
+                })
+                edges.append({
+                    "source": chunk_id,
+                    "target": pid,
+                    "relation": "child_of"
+                })
+
+        # Children (this node is target, relation is child_of)
+        children = conn.execute("""
+            SELECT source_id FROM edges WHERE target_id = %s AND relation_type = 'child_of'
+        """, (chunk_id,)).fetchall()
+        
+        for c in children:
+            cid = c['source_id']
+            # Fetch child details
+            c_row = conn.execute("""
+                SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
+                FROM nodes n
+                LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+                WHERE n.id = %s
+            """, (cid,)).fetchone()
+            
+            if c_row:
+                meta = c_row['metadata']
+                if isinstance(meta, str): meta = json.loads(meta)
+                nodes.append({
+                    "id": str(c_row['id']),
+                    "file_path": c_row['file_path'],
+                    "start_line": c_row['start_line'],
+                    "end_line": c_row['end_line'],
+                    "content": c_row['content'],
+                    "metadata": meta or {},
+                    "type": "child"
+                })
+                edges.append({
+                    "source": cid,
+                    "target": chunk_id,
+                    "relation": "child_of"
+                })
+            
+    # Deduplicate nodes
+    unique_nodes = {n['id']: n for n in nodes}.values()
+    
+    return {"nodes": list(unique_nodes), "edges": edges}
+
+@app.get("/api/chunks/{chunk_id}/impact")
+def get_chunk_impact(chunk_id: str):
+    storage = get_storage()
+    navigator = CodeNavigator(storage)
+    
+    try:
+        impact_data = navigator.analyze_impact(chunk_id)
+        
+        # Convert to graph format
+        nodes = []
+        edges = []
+        
+        # Add center node
+        with storage.pool.connection() as conn:
+            row = conn.execute("""
+                SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
+                FROM nodes n
+                LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+                WHERE n.id = %s
+            """, (chunk_id,)).fetchone()
+            if row:
+                nodes.append({
+                    "id": str(row['id']),
+                    "file_path": row['file_path'],
+                    "start_line": row['start_line'],
+                    "end_line": row['end_line'],
+                    "content": row['content'],
+                    "metadata": row['metadata'], # navigator handles enrichment if needed, but here we just pass raw
+                    "type": "center"
+                })
+
+        for ref in impact_data:
+            # ref is {source_id, relation, file, line}
+            # We need to fetch full node details for the source
+             with storage.pool.connection() as conn:
+                s_row = conn.execute("""
+                    SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
+                    FROM nodes n
+                    LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+                    WHERE n.id = %s
+                """, (ref['source_id'],)).fetchone()
+                
+                if s_row:
+                    nodes.append({
+                        "id": str(s_row['id']),
+                        "file_path": s_row['file_path'],
+                        "start_line": s_row['start_line'],
+                        "end_line": s_row['end_line'],
+                        "content": s_row['content'],
+                        "metadata": s_row['metadata'],
+                        "type": "impact"
+                    })
+                    edges.append({
+                        "source": ref['source_id'],
+                        "target": chunk_id,
+                        "relation": ref['relation']
+                    })
+        
+        return {"nodes": nodes, "edges": edges}
+    except Exception as e:
+        logger.error(f"Error in impact analysis: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/chunks/{chunk_id}/pipeline")
+def get_chunk_pipeline(chunk_id: str):
+    storage = get_storage()
+    navigator = CodeNavigator(storage)
+    
+    try:
+        pipeline_tree = navigator.visualize_pipeline(chunk_id)
+        # Flatten tree to graph
+        nodes = []
+        edges = []
+        visited = set()
+
+        def _process_tree(parent_id, children_dict):
+            if not children_dict: return
+            
+            for child_id, child_data in children_dict.items():
+                if child_id not in visited:
+                    visited.add(child_id)
+                    # Fetch node details
+                    with storage.pool.connection() as conn:
+                        c_row = conn.execute("""
+                            SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
+                            FROM nodes n
+                            LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+                            WHERE n.id = %s
+                        """, (child_id,)).fetchone()
+                    
+                    if c_row:
+                        nodes.append({
+                            "id": str(c_row['id']),
+                            "file_path": c_row['file_path'],
+                            "start_line": c_row['start_line'],
+                            "end_line": c_row['end_line'],
+                            "content": c_row['content'],
+                            "metadata": c_row['metadata'],
+                            "type": "pipeline"
+                        })
+                
+                edges.append({
+                    "source": parent_id,
+                    "target": child_id,
+                    "relation": child_data.get('type', 'calls')
+                })
+                
+                if child_data.get('children'):
+                    _process_tree(child_id, child_data['children'])
+
+        # Add root node
+        with storage.pool.connection() as conn:
+            row = conn.execute("""
+                SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
+                FROM nodes n
+                LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+                WHERE n.id = %s
+            """, (chunk_id,)).fetchone()
+            if row:
+                nodes.append({
+                    "id": str(row['id']),
+                    "file_path": row['file_path'],
+                    "start_line": row['start_line'],
+                    "end_line": row['end_line'],
+                    "content": row['content'],
+                    "metadata": row['metadata'],
+                    "type": "center"
+                })
+                visited.add(chunk_id)
+        
+        _process_tree(chunk_id, pipeline_tree.get('call_graph', {}))
+        
+        return {"nodes": nodes, "edges": edges}
+    except Exception as e:
+        logger.error(f"Error in pipeline visualization: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/chunks/{chunk_id}/neighbors")
+def get_chunk_neighbors(chunk_id: str):
+    storage = get_storage()
+    navigator = CodeNavigator(storage)
+    
+    try:
+        nodes = []
+        edges = []
+        
+        # Add center node
+        with storage.pool.connection() as conn:
+            row = conn.execute("""
+                SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
+                FROM nodes n
+                LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+                WHERE n.id = %s
+            """, (chunk_id,)).fetchone()
+            if row:
+                nodes.append({
+                    "id": str(row['id']),
+                    "file_path": row['file_path'],
+                    "start_line": row['start_line'],
+                    "end_line": row['end_line'],
+                    "content": row['content'],
+                    "metadata": row['metadata'],
+                    "type": "center"
+                })
+
+        # Get Prev
+        prev_chunk = navigator.read_neighbor_chunk(chunk_id, direction="prev")
+        if prev_chunk:
+            nodes.append({
+                "id": str(prev_chunk['id']),
+                "file_path": prev_chunk['file_path'],
+                "start_line": prev_chunk['start_line'],
+                "end_line": prev_chunk['end_line'],
+                "content": prev_chunk.get('content', ''),
+                "metadata": prev_chunk.get('metadata', {}),
+                "type": "neighbor"
+            })
+            edges.append({
+                "source": str(prev_chunk['id']),
+                "target": chunk_id,
+                "relation": "previous"
+            })
+
+        # Get Next
+        next_chunk = navigator.read_neighbor_chunk(chunk_id, direction="next")
+        if next_chunk:
+            nodes.append({
+                "id": str(next_chunk['id']),
+                "file_path": next_chunk['file_path'],
+                "start_line": next_chunk['start_line'],
+                "end_line": next_chunk['end_line'],
+                "content": next_chunk.get('content', ''),
+                "metadata": next_chunk.get('metadata', {}),
+                "type": "neighbor"
+            })
+            edges.append({
+                "source": chunk_id,
+                "target": str(next_chunk['id']),
+                "relation": "next"
+            })
+            
+        return {"nodes": nodes, "edges": edges}
+    except Exception as e:
+        logger.error(f"Error in neighbors analysis: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ChatRequest(BaseModel):
+    repo_id: str
+    message: str
+    thread_id: str
+
+@app.post("/api/agent/chat")
+def chat_agent(req: ChatRequest):
+    agent = get_agent(req.repo_id)
+    
+    return StreamingResponse(
+        agent.stream_chat(req.message, req.thread_id),
+        media_type="application/x-ndjson"
+    )
+
+@app.get("/api/chunks/{chunk_id}/parent")
+def get_chunk_parent(chunk_id: str):
+    storage = get_storage()
+    navigator = CodeNavigator(storage)
+    
+    try:
+        nodes = []
+        edges = []
+        
+        # Add center node
+        with storage.pool.connection() as conn:
+            row = conn.execute("""
+                SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
+                FROM nodes n
+                LEFT JOIN contents c ON n.chunk_hash = c.chunk_hash
+                WHERE n.id = %s
+            """, (chunk_id,)).fetchone()
+            if row:
+                nodes.append({
+                    "id": str(row['id']),
+                    "file_path": row['file_path'],
+                    "start_line": row['start_line'],
+                    "end_line": row['end_line'],
+                    "content": row['content'],
+                    "metadata": row['metadata'],
+                    "type": "center"
+                })
+
+        parent = navigator.read_parent_chunk(chunk_id)
+        if parent:
+            nodes.append({
+                "id": str(parent['id']),
+                "file_path": parent['file_path'],
+                "start_line": parent['start_line'],
+                "end_line": parent['end_line'],
+                "content": parent.get('content', ''),
+                "metadata": parent.get('metadata', {}),
+                "type": "parent"
+            })
+            edges.append({
+                "source": chunk_id,
+                "target": str(parent['id']),
+                "relation": "child_of"
+            })
+            
+        return {"nodes": nodes, "edges": edges}
+    except Exception as e:
+        logger.error(f"Error in parent analysis: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/search")
+def search(req: SearchRequest):
+    storage = get_storage()
+    
+    # For search we need an embedder if we want hybrid/vector search
+    # We'll assume OpenAI for now if not specified, or fallback to keyword
+    # But CodeRetriever needs an embedder instance.
+    
+    # If we don't have an API key, we might fail on vector search.
+    # Let's try to initialize OpenAI, if fails use Dummy.
+    try:
+        embedder = OpenAIEmbeddingProvider()
+    except:
+        embedder = DummyEmbeddingProvider()
+        
+    retriever = CodeRetriever(storage, embedder)
+    
+    results = retriever.retrieve(
+        query=req.query,
+        repo_id=req.repo_id,
+        limit=req.limit,
+        filters=req.filters,
+        strategy="hybrid" # Default to hybrid
+    )
+    
+    return results
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8019)
