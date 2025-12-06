@@ -16,8 +16,13 @@ from debugger.agent_utils import get_agent
 from debugger.database import get_storage
 
 # Setup Logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger("DebuggerServer")
+# Ensure our library logs are shown
+logging.getLogger("src.code_graph_indexer").setLevel(logging.INFO)
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -45,6 +50,7 @@ class IndexRequest(BaseModel):
 class EmbedRequest(BaseModel):
     provider: str = "openai" # openai, dummy
     model: str = "text-embedding-3-small"
+    batch_size: int = 100
 
 class SearchRequest(BaseModel):
     query: str
@@ -55,10 +61,19 @@ class SearchRequest(BaseModel):
 # --- Helpers ---
 def clone_repo(url: str, target_dir: str, branch: str):
     if os.path.exists(target_dir):
-        logger.info(f"Directory {target_dir} exists. Pulling...")
-        repo = git.Repo(target_dir)
-        repo.remotes.origin.pull()
-        repo.git.checkout(branch)
+        logger.info(f"Directory {target_dir} exists. Checking git status...")
+        try:
+            repo = git.Repo(target_dir)
+            logger.info("Pulling latest changes...")
+            repo.remotes.origin.pull()
+            repo.git.checkout(branch)
+        except git.exc.InvalidGitRepositoryError:
+            logger.warning(f"Directory {target_dir} exists but is not a valid git repo. Cleaning up and re-cloning...")
+            shutil.rmtree(target_dir)
+            git.Repo.clone_from(url, target_dir, branch=branch)
+        except Exception as e:
+             logger.error(f"Git error: {e}")
+             raise e
     else:
         logger.info(f"Cloning {url} to {target_dir}...")
         git.Repo.clone_from(url, target_dir, branch=branch)
@@ -182,7 +197,7 @@ def index_repo(repo_id: str, req: IndexRequest, background_tasks: BackgroundTask
             logger.error(f"Indexing failed: {e}")
             storage.update_repository_status(repo_id, "failed")
 
-    storage.update_repository_status(repo_id, "indexing")
+    storage.update_repository_status(repo_id, "queued")
     background_tasks.add_task(_run_index)
     return {"status": "indexing_started"}
 
@@ -213,8 +228,13 @@ def embed_repo(repo_id: str, req: EmbedRequest, background_tasks: BackgroundTask
         try:
             indexer = CodebaseIndexer(local_path, storage)
             # Consume generator
-            for _ in indexer.embed(provider, debug=True):
-                pass
+            count = 0
+            for item in indexer.embed(provider, batch_size=req.batch_size, debug=True):
+                count += 1
+                if count % 10 == 0:
+                    logger.info(f"🤖 Embedding progress: {count} items processed...")
+            
+            logger.info(f"✅ Embedding finished. Total items: {count}")
             storage.update_repository_status(repo_id, "embedded")
         except Exception as e:
             logger.error(f"Embedding failed: {e}")

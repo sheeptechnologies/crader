@@ -82,9 +82,15 @@ class CodebaseIndexer:
                         if rels_list:
                             self.builder.add_relations(rels_list, repo_id=internal_repo_id)
                         files_count += 1
+                        
+                        if files_count % 50 == 0:
+                            logger.info(f"⏳ Progress: {files_count} files processed...")
+                            
+                    logger.info(f"✅ Parsing completato: {files_count} file processati.")
                     
-                    logger.info(f"Parsing completato: {files_count} file processati.")
+                    logger.info("⏳ Waiting for SCIP indexer...")
                     scip_json = future_scip.result()
+                    logger.info(f"✅ SCIP Indexing finished. Output: {scip_json}")
                 
                 if scip_json:
                     logger.info("Linking relazioni SCIP...")

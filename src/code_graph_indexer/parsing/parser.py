@@ -73,7 +73,9 @@ class TreeSitterRepoParser:
                 lang_obj = get_language(lang_name)
                 lang_cache[lang_name] = lang_obj
                 self.languages[ext] = lang_obj
-            except Exception: continue
+            except Exception as e:
+                print(f"[ERROR] Failed to load language {lang_name}: {e}")
+                continue
 
         self.parser = Parser()
 
