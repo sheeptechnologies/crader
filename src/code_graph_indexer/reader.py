@@ -75,6 +75,30 @@ class CodeReader:
         except Exception as e:
             logger.error(f"Read error {file_path}: {e}")
             raise IOError(f"Errore lettura file: {str(e)}")
+        
+    def find_directories(self, repo_id: str, name_pattern: str, limit: int = 10) -> List[str]:
+        """
+        Cerca cartelle che contengono 'name_pattern' nel nome.
+        Utile quando l'agente non sa il path esatto (es. 'flask' è in 'src/flask'?).
+        """
+        _, repo_root = self._resolve_physical_path(repo_id, "")
+        
+        matches = []
+        term = name_pattern.lower()
+        
+        # Walk veloce
+        for root, dirs, _ in os.walk(repo_root):
+            # Rimuoviamo cartelle ignorate per velocità
+            dirs[:] = [d for d in dirs if d not in {'.git', '__pycache__', 'node_modules', 'venv', '.venv'}]
+            
+            for d in dirs:
+                if term in d.lower():
+                    rel_path = os.path.relpath(os.path.join(root, d), repo_root)
+                    matches.append(rel_path)
+                    if len(matches) >= limit:
+                        return matches
+        
+        return matches
 
     def list_directory(self, repo_id: str, path: str = "") -> List[Dict[str, Any]]:
         """

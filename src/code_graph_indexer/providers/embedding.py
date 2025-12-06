@@ -1,7 +1,9 @@
+import os
 from abc import ABC, abstractmethod
 from typing import List
 import random
 import logging
+import openai
 
 logger = logging.getLogger(__name__)
 
@@ -89,3 +91,56 @@ class FastEmbedProvider(EmbeddingProvider):
     @property
     def model_name(self) -> str:
         return self._model_name
+    
+
+class OpenAIEmbeddingProvider(EmbeddingProvider):
+    def __init__(self, model: str = "text-embedding-3-small", batch_size: int = 100):
+        self._model = model
+        self._batch_size = batch_size
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable not set.")
+        self.client = openai.Client(api_key=api_key)
+        
+        # Dimensioni note per evitare chiamate API inutili al setup
+        self._dims = {
+            "text-embedding-3-small": 1536,
+            "text-embedding-3-large": 3072,
+            "text-embedding-ada-002": 1536
+        }
+
+    @property
+    def dimension(self) -> int:
+        return self._dims.get(self._model, 1536)
+
+    @property
+    def model_name(self) -> int:
+        return self._model
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        """
+        Genera embedding usando le API di OpenAI con batching automatico.
+        """
+        # Pulizia input: OpenAI non accetta stringhe vuote o solo spazi
+        clean_texts = [t if t.strip() else "empty" for t in texts]
+        
+        all_embeddings = []
+        
+        # Chunking della lista in batch da inviare all'API
+        # (OpenAI ha limiti di token per richiesta, 100 chunk è un buon compromesso)
+        for i in range(0, len(clean_texts), self._batch_size):
+            batch = clean_texts[i : i + self._batch_size]
+            try:
+                response = self.client.embeddings.create(
+                    input=batch,
+                    model=self._model
+                )
+                # Estraiamo i vettori ordinati
+                batch_embeddings = [item.embedding for item in response.data]
+                all_embeddings.extend(batch_embeddings)
+            except Exception as e:
+                logger.error(f"OpenAI API Error on batch {i}: {e}")
+                # Fallback: ritorna vettori di zeri o rilancia? Meglio rilanciare.
+                raise e
+
+        return all_embeddings

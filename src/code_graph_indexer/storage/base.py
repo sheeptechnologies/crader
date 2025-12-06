@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional, Generator
+from typing import List, Dict, Any, Optional, Generator, Tuple
 
 class GraphStorage(ABC):
     """
@@ -27,10 +27,40 @@ class GraphStorage(ABC):
     @abstractmethod
     def add_edge(self, source_id: str, target_id: str, relation_type: str, metadata: Dict[str, Any]): pass
     
-    # [NEW] Metodo FTS Unificato
+    # Metodo FTS Unificato
     @abstractmethod
     def add_search_index(self, search_docs: List[Dict[str, Any]]): 
         """Popola l'indice di ricerca testuale (Path + Tags + Content)."""
+        pass
+
+    @abstractmethod
+    def get_vectors_by_hashes(self, vector_hashes: List[str], model_name: str) -> Dict[str, List[float]]:
+        """
+        Recupera vettori esistenti dato il loro hash. 
+        Utile per evitare di ricalcolare embedding per codice identico già presente nel DB.
+        Returns: { 'hash1': [0.1, ...], 'hash2': [...] }
+        """
+        pass
+
+    @abstractmethod
+    def acquire_indexing_lock(self, url: str, branch: str, name: str, 
+                            commit_hash: str, local_path: str = None, 
+                            timeout_minutes: int = 30) -> Tuple[bool, Optional[str]]:
+        """
+        Tenta di acquisire il lock per l'indicizzazione di una repo.
+        
+        Returns:
+            (True, repo_id): Lock acquisito, puoi procedere.
+            (False, repo_id): Lock occupato da un altro processo.
+            (False, None): Errore generico.
+        """
+        pass
+
+    @abstractmethod
+    def release_indexing_lock(self, repo_id: str, success: bool, commit_hash: str = None):
+        """
+        Rilascia il lock impostando lo stato finale (completed/failed).
+        """
         pass
 
     @abstractmethod

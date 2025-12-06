@@ -8,6 +8,7 @@ class Repository:
     name: str
     branch: str
     last_commit: str
+    queued_commit: str
     status: str
     updated_at: str
     local_path: Optional[str] = None
@@ -25,7 +26,11 @@ class FileRecord:
     language: str
     size_bytes: int
     category: str
+
     indexed_at: str
+    
+    parsing_status: str = "success"  # 'success', 'skipped', 'failed'
+    parsing_error: Optional[str] = None # Messaggio di errore se failed/skipped
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -121,7 +126,7 @@ class RetrievedContext:
     def render(self) -> str:
         """Helper per visualizzare il contesto in un prompt LLM."""
         labels_str = " | ".join(self.semantic_labels) if self.semantic_labels else "Code Block"
-        header = f"### File: {self.file_path} (L{self.start_line}-{self.end_line}) [{labels_str}]"
+        header = f"### File: {self.file_path} (L{self.start_line}-{self.end_line}) [ID: {self.node_id}] [{labels_str}]"
         
         context_str = ""
         if self.parent_context:

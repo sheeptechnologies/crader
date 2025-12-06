@@ -10,8 +10,10 @@ dist/
 build/
 *.egg-info/
 *.scip
-*.json
+
 *.db
 *.graphml
 *.db*
 :memory:
+
+node_modules/

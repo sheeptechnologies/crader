@@ -11,6 +11,13 @@ from ..models import FileRecord, ChunkNode, ChunkContent, ParsingResult, CodeRel
 from ..providers.metadata import MetadataProvider, GitMetadataProvider, LocalMetadataProvider
 
 class TreeSitterRepoParser:
+    """
+    Parser semantico per RAG Enterprise.
+    - Resiliente: Gestisce errori di I/O, encoding e parsing.
+    - Semantico: Usa query Tree-sitter (.scm) per l'arricchimento dei metadati.
+    - Strutturale: Preserva la gerarchia del codice durante il chunking.
+    """
+    
     LANGUAGE_MAP = {
         ".py": "python", ".js": "javascript", ".jsx": "javascript", 
         ".ts": "typescript", ".tsx": "typescript", ".go": "go", 
@@ -32,14 +39,16 @@ class TreeSitterRepoParser:
 
     MAX_CHUNK_SIZE = 800 
     CHUNK_TOLERANCE = 400
+    MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10MB Limit
 
-    # Tipi che interrompono il flusso (Containers)
+    # Tipi che agiscono da barriera semantica (creano un nuovo chunk)
     CONTAINER_TYPES = {
         "class_definition", "class_declaration", "function_definition", "method_definition", 
         "function_declaration", "arrow_function", "interface_declaration", "impl_item", "mod_item",
         "async_function_definition", "decorated_definition", "export_statement"
     }
 
+    # Tipi che vengono incollati al chunk successivo (commenti, decoratori)
     GLUE_TYPES = {"comment", "decorator", "line_comment", "block_comment", "string_literal"}
 
     def __init__(self, repo_path: str, metadata_provider: Optional[MetadataProvider] = None):
@@ -53,6 +62,7 @@ class TreeSitterRepoParser:
         self.repo_info = self.metadata_provider.get_repo_info()
         self.repo_id = self.repo_info.get('repo_id', str(uuid.uuid4()))
         
+        # Caricamento Lingue (Cache)
         self.languages: Dict[str, Any] = {}
         lang_cache: Dict[str, Any] = {}
         for ext, lang_name in self.LANGUAGE_MAP.items():
@@ -71,38 +81,62 @@ class TreeSitterRepoParser:
         if hasattr(self.parser, 'set_language'): self.parser.set_language(lang_object)
         else: self.parser.language = lang_object
 
+    # ==============================================================================
+    #  RESILIENCE & I/O
+    # ==============================================================================
+
+    def _is_binary(self, content_sample: bytes) -> bool:
+        """Rileva file binari controllando la presenza di byte nulli."""
+        return b'\0' in content_sample
+
     def _is_minified_or_generated(self, content: bytes, file_path: str) -> bool:
+        """Euristiche per scartare file minificati o generati automaticamente."""
         path_lower = file_path.lower()
         if any(path_lower.endswith(suffix) for suffix in self.IGNORE_FILE_SUFFIXES): return True
         try:
             sample = content[:4096]
+            # Se non ci sono newline in 1000 char o righe > 2500 char
             if b'\n' not in sample and len(sample) > 1000: return True
             for line in sample.split(b'\n'):
                 if len(line) > 2500: return True
         except: pass
         return False
-    
+
+    def _safe_read_file(self, full_path: str) -> Tuple[Optional[bytes], Optional[str]]:
+        """Legge il file dal disco in modo sicuro."""
+        try:
+            size = os.path.getsize(full_path)
+            if size > self.MAX_FILE_SIZE_BYTES:
+                return None, f"File too large ({size / 1024 / 1024:.2f} MB)"
+
+            with open(full_path, 'rb') as f:
+                head = f.read(1024)
+                if self._is_binary(head):
+                    return None, "Binary file detected"
+                
+                f.seek(0)
+                content = f.read()
+                return content, None
+        except Exception as e:
+            return None, f"Read Error: {str(e)}"
+
     # ==============================================================================
     #  SEMANTIC QUERY ENGINE
     # ==============================================================================
 
     def _load_query_for_language(self, language_name: str) -> Optional[str]:
-        """Carica il file .scm dalla cartella 'queries'."""
         try:
-            # Costruisce il path assoluto verso src/code_graph_indexer/parsing/queries/<lang>.scm
-            base_path = os.path.dirname(__file__) 
+            base_path = os.path.dirname(__file__)
             query_path = os.path.join(base_path, "queries", f"{language_name}.scm")
-            
             if os.path.exists(query_path):
                 with open(query_path, "r", encoding="utf-8") as f:
                     return f.read()
         except Exception as e:
-            print(f"[WARN] Errore caricamento query per {language_name}: {e}")
+            print(f"[WARN] Error loading query {language_name}: {e}")
         return None
 
     def _generate_label(self, category: str, value: str) -> str:
-        """Genera un'etichetta leggibile per i metadati."""
-        # Mappa di label predefinite per rendere l'output più pulito
+        """Etichette umane per embedding e UI."""
         labels = {
             ("role", "entry_point"): "Application Entry Point",
             ("role", "test_suite"): "Test Suite Class",
@@ -112,14 +146,10 @@ class TreeSitterRepoParser:
             ("type", "class"): "Class Definition",
             ("type", "function"): "Function Definition",
         }
-        # Fallback generico: "entry_point" -> "Entry Point"
         return labels.get((category, value), f"{value.replace('_', ' ').title()}")
 
     def _get_semantic_captures(self, tree, language_name: str) -> List[Dict[str, Any]]:
-        """
-        Esegue le query Tree-sitter e ritorna una lista di catture semantiche.
-        Filtra automaticamente le catture di servizio (senza punto).
-        """
+        """Esegue le query Tree-sitter e ritorna una lista di catture filtrate."""
         query_scm = self._load_query_for_language(language_name)
         if not query_scm: return []
         
@@ -130,19 +160,13 @@ class TreeSitterRepoParser:
         try:
             query = lang_obj.query(query_scm)
             captures = query.captures(tree.root_node)
-            
             results = []
             for node, capture_name in captures:
-                # Expect format: "category.value" (es. "role.entry_point")
                 parts = capture_name.split('.')
-                
-                # [FIX] Ignoriamo le catture interne usate per i predicati (es. @name, @val, @attr)
-                # Se non contiene un punto, non è un tag semantico ufficiale.
-                if len(parts) < 2:
-                    continue
+                # [FIX] Ignora le catture interne senza punto (es. @name)
+                if len(parts) < 2: continue
                 
                 category, value = parts[0], parts[1]
-                
                 results.append({
                     "start": node.start_byte,
                     "end": node.end_byte,
@@ -153,11 +177,14 @@ class TreeSitterRepoParser:
                     }
                 })
             return results
-
         except Exception as e:
             print(f"[WARN] Semantic Query Error ({language_name}): {e}")
             return []
-    
+
+    # ==============================================================================
+    #  MAIN PIPELINE
+    # ==============================================================================
+
     def stream_semantic_chunks(self, file_list: Optional[List[str]] = None) -> Generator[Tuple[FileRecord, List[ChunkNode], List[ChunkContent], List[CodeRelation]], None, None]:
         files_to_process = set(file_list) if file_list else None
         
@@ -173,17 +200,34 @@ class TreeSitterRepoParser:
                 rel_path = os.path.relpath(full_path, self.repo_path)
                 if files_to_process and rel_path not in files_to_process: continue
 
+                # [RESILIENCE] Try/Except per file
                 try:
-                    with open(full_path, 'rb') as f: content = f.read()
-                    if self._is_minified_or_generated(content, rel_path): continue
-
+                    content, error_msg = self._safe_read_file(full_path)
+                    
                     file_rec = FileRecord(
-                        id=str(uuid.uuid4()), repo_id=self.repo_id, commit_hash=self.repo_info.get('commit_hash', 'HEAD'),
-                        file_hash=self.metadata_provider.get_file_hash(rel_path, content), path=rel_path,
-                        language=self.LANGUAGE_MAP[ext], size_bytes=len(content),
+                        id=str(uuid.uuid4()), repo_id=self.repo_id, 
+                        commit_hash=self.repo_info.get('commit_hash', 'HEAD'),
+                        file_hash="", path=rel_path,
+                        language=self.LANGUAGE_MAP[ext], size_bytes=0,
                         category=self.metadata_provider.get_file_category(rel_path),
-                        indexed_at=datetime.datetime.utcnow().isoformat() + "Z"
+                        indexed_at=datetime.datetime.utcnow().isoformat() + "Z",
+                        parsing_status="success", parsing_error=None
                     )
+
+                    if error_msg:
+                        file_rec.parsing_status = "skipped"
+                        file_rec.parsing_error = error_msg
+                        yield (file_rec, [], [], [])
+                        continue
+
+                    file_rec.size_bytes = len(content)
+                    file_rec.file_hash = self.metadata_provider.get_file_hash(rel_path, content)
+                    
+                    if self._is_minified_or_generated(content, rel_path):
+                        file_rec.parsing_status = "skipped"
+                        file_rec.parsing_error = "Minified/Generated"
+                        yield (file_rec, [], [], [])
+                        continue
 
                     self._set_parser_language(lang_object)
                     tree = self.parser.parse(content)
@@ -202,8 +246,23 @@ class TreeSitterRepoParser:
                     if nodes:
                         nodes.sort(key=lambda c: c.byte_range[0])
                         yield (file_rec, nodes, list(contents.values()), relations)
+                    else:
+                        yield (file_rec, [], [], [])
+
                 except Exception as e: 
                     print(f"[ERROR] Processing {rel_path}: {e}")
+                    # Salviamo record di errore
+                    try:
+                        err_rec = FileRecord(
+                            id=str(uuid.uuid4()), repo_id=self.repo_id,
+                            commit_hash=self.repo_info.get('commit_hash', 'HEAD'),
+                            file_hash="error", path=rel_path, language=self.LANGUAGE_MAP.get(ext, "unknown"),
+                            size_bytes=0, category="unknown",
+                            indexed_at=datetime.datetime.utcnow().isoformat() + "Z",
+                            parsing_status="failed", parsing_error=str(e)
+                        )
+                        yield (err_rec, [], [], [])
+                    except: pass
 
     def extract_semantic_chunks(self) -> ParsingResult:
         files, nodes, contents, all_rels = [], [], {}, []
@@ -212,7 +271,9 @@ class TreeSitterRepoParser:
             for item in c: contents[item.chunk_hash] = item
         return ParsingResult(files, nodes, contents, all_rels)
 
-    # --- CHUNKING LOGIC ---
+    # ==============================================================================
+    #  LOGICA CHUNKING
+    # ==============================================================================
 
     def _process_scope(self, parent_node: Node, content: bytes, file_path: str, file_id: str, parent_chunk_id: Optional[str],
                        nodes: List, contents: Dict, relations: List, 
@@ -283,16 +344,15 @@ class TreeSitterRepoParser:
                     cid = self._create_chunk(
                         full_barrier_text, barrier_start, barrier_end, content,
                         file_path, file_id, current_active_parent,
-                        nodes, contents, relations, semantic_captures=semantic_captures
+                        nodes, contents, relations, tags=self._extract_tags(child),
+                        semantic_captures=semantic_captures
                     )
                     register_chunk_creation(cid)
-                
                 glue_buffer_bytes = b""; glue_start_byte = None
 
             else:
                 if group_buffer_bytes == b"":
                     group_start_byte = glue_start_byte if glue_start_byte is not None else child.start_byte
-                
                 group_buffer_bytes += glue_buffer_bytes
                 glue_buffer_bytes = b""; glue_start_byte = None
                 group_buffer_bytes += child_bytes
@@ -314,17 +374,18 @@ class TreeSitterRepoParser:
              self._create_chunk(
                 glue_buffer_bytes, start, iterator_node.end_byte, content,
                 file_path, file_id, current_active_parent,
-                nodes, contents, relations, semantic_captures=semantic_captures
+                nodes, contents, relations, tags=[], semantic_captures=semantic_captures
             )
 
     def _handle_large_node(self, node: Node, content: bytes, prefix: bytes, prefix_start: int, 
                            file_path: str, file_id: str, parent_chunk_id: Optional[str],
                            nodes: List, contents: Dict, relations: List,
                            semantic_captures: List[Dict] = None):
+        
         target_node = node
         if node.type == 'decorated_definition':
-            defn = node.child_by_field_name('definition')
-            if defn: target_node = defn
+            definition = node.child_by_field_name('definition')
+            if definition: target_node = definition
         elif node.type == 'export_statement':
             d = node.child_by_field_name('declaration') or node.child_by_field_name('value')
             if d: target_node = d
@@ -342,14 +403,16 @@ class TreeSitterRepoParser:
         full_header = prefix + header_node_text
         
         if len(full_header) > self.MAX_CHUNK_SIZE * 0.6:
-            # Header Chunk
+            # Header Chunk separato
             header_id = self._create_chunk(
                 full_header, prefix_start, body_node.start_byte, content,
                 file_path, file_id, parent_chunk_id,
-                nodes, contents, relations, semantic_captures=semantic_captures
+                nodes, contents, relations, tags=self._extract_tags(node),
+                semantic_captures=semantic_captures
             )
             self._process_scope(target_node, content, file_path, file_id, header_id, nodes, contents, relations, semantic_captures=semantic_captures)
         else:
+            # Flow-Down
             self._process_scope(
                 target_node, content, file_path, file_id, parent_chunk_id, 
                 nodes, contents, relations, 
@@ -370,10 +433,9 @@ class TreeSitterRepoParser:
                 if nl > cursor + (self.MAX_CHUNK_SIZE // 2): end = nl + 1
             chunk = text_bytes[cursor:end]
             current_pid = pid if not first_fragment_id else first_fragment_id
-            
             cid = self._create_chunk(
                 chunk, start_offset + cursor, start_offset + end, full_content,
-                fpath, fid, current_pid, nodes, contents, relations, semantic_captures=semantic_captures
+                fpath, fid, current_pid, nodes, contents, relations, tags=[], semantic_captures=semantic_captures
             )
             if not first_fragment_id: first_fragment_id = cid
             cursor = end
@@ -381,6 +443,7 @@ class TreeSitterRepoParser:
     def _create_chunk(self, text_bytes: bytes, s_byte: int, e_byte: int, full_content: bytes,
                       fpath: str, fid: str, pid: Optional[str], 
                       nodes: List, contents: Dict, relations: List,
+                      tags: List[str] = None,
                       semantic_captures: List[Dict] = None) -> Optional[str]:
         
         text = text_bytes.decode('utf-8', 'ignore')
@@ -393,21 +456,20 @@ class TreeSitterRepoParser:
         s_line = full_content[:s_byte].count(b'\n') + 1
         e_line = s_line + text.count('\n')
         
-        # [NEW] Semantic Enrichment
+        # Semantic Enrichment (Intersezione Range)
         matches = []
         if semantic_captures:
             for cap in semantic_captures:
                 cap_start, cap_end = cap['start'], cap['end']
-                # Contenimento o Intersezione significativa
-                # Il chunk è "dentro" il capture O il capture è "dentro" il chunk
+                # Contenimento o Intersezione
                 if (s_byte >= cap_start and e_byte <= cap_end) or \
                    (cap_start >= s_byte and cap_end <= e_byte):
                     matches.append(cap['metadata'])
 
         metadata = {}
         if matches: metadata["semantic_matches"] = matches
+        if tags: metadata["tags"] = tags
 
-        # Nota: type è rimosso da ChunkNode
         nodes.append(ChunkNode(
             cid, fid, fpath, h, 
             s_line, e_line, [s_byte, e_byte],
@@ -421,3 +483,14 @@ class TreeSitterRepoParser:
             ))
             
         return cid
+
+    def _extract_tags(self, child: Node) -> List[str]:
+        """Helper per tag sintattici (async, static, ecc.)"""
+        tags: List[str] = []
+        if child.type.startswith("async_") or any(c.type == "async" for c in child.children): tags.append("async")
+        if child.type == "decorated_definition" or any(c.type == "decorator" for c in child.children): tags.append("decorated")
+        if child.type == "export_statement" or (child.parent and child.parent.type == "export_statement"): tags.append("exported")
+        if "constructor" in child.type: tags.append("constructor")
+        for c in child.children:
+            if c.type == "static": tags.append("static")
+        return list(set(tags))
