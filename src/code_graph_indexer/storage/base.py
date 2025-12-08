@@ -3,21 +3,35 @@ from typing import List, Dict, Any, Optional, Generator, Tuple
 
 class GraphStorage(ABC):
     """
-    Interfaccia astratta per lo storage (Staging Area).
-    Supporta: Files, Nodes, Edges, Contents + Embeddings + Repositories + FTS.
+    Interfaccia astratta per lo storage Enterprise (Snapshot-based).
+    Definisce il contratto minimo per Identity, Write, Read e Graph Analysis.
     """
     
-    # --- REPOSITORY MANAGEMENT ---
+    # --- IDENTITY & SNAPSHOTS ---
     @abstractmethod
-    def get_repository(self, repo_id: str) -> Optional[Dict[str, Any]]: pass
+    def ensure_repository(self, url: str, branch: str, name: str) -> str: pass
+    
     @abstractmethod
-    def get_repository_by_context(self, url: str, branch: str) -> Optional[Dict[str, Any]]: pass
+    def create_snapshot(self, repository_id: str, commit_hash: str) -> Tuple[str, bool]: pass
+    
     @abstractmethod
-    def register_repository(self, id: str, name: str, url: str, branch: str, commit_hash: str, local_path: str = None) -> str: pass
+    def activate_snapshot(self, repository_id: str, snapshot_id: str, stats: Dict[str, Any] = None): pass
+    
     @abstractmethod
-    def update_repository_status(self, repo_id: str, status: str, commit_hash: str = None): pass
+    def fail_snapshot(self, snapshot_id: str, error: str): pass
+    
+    @abstractmethod
+    def prune_snapshot(self, snapshot_id: str): pass
 
-    # --- WRITE ---
+    @abstractmethod
+    def get_active_snapshot_id(self, repository_id: str) -> Optional[str]: pass
+    
+    @abstractmethod
+    def get_repository(self, repo_id: str) -> Optional[Dict[str, Any]]: 
+        """Serve al Reader (Legacy Mode) per trovare il path su disco."""
+        pass
+
+    # --- WRITE OPERATIONS ---
     @abstractmethod
     def add_files(self, files: List[Any]): pass
     @abstractmethod
@@ -27,93 +41,52 @@ class GraphStorage(ABC):
     @abstractmethod
     def add_edge(self, source_id: str, target_id: str, relation_type: str, metadata: Dict[str, Any]): pass
     
-    # Metodo FTS Unificato
     @abstractmethod
-    def add_search_index(self, search_docs: List[Dict[str, Any]]): 
-        """Popola l'indice di ricerca testuale (Path + Tags + Content)."""
-        pass
+    def add_search_index(self, search_docs: List[Dict[str, Any]]): pass
 
-    @abstractmethod
-    def get_vectors_by_hashes(self, vector_hashes: List[str], model_name: str) -> Dict[str, List[float]]:
-        """
-        Recupera vettori esistenti dato il loro hash. 
-        Utile per evitare di ricalcolare embedding per codice identico già presente nel DB.
-        Returns: { 'hash1': [0.1, ...], 'hash2': [...] }
-        """
-        pass
-
-    @abstractmethod
-    def acquire_indexing_lock(self, url: str, branch: str, name: str, 
-                            commit_hash: str, local_path: str = None, 
-                            timeout_minutes: int = 30) -> Tuple[bool, Optional[str]]:
-        """
-        Tenta di acquisire il lock per l'indicizzazione di una repo.
-        
-        Returns:
-            (True, repo_id): Lock acquisito, puoi procedere.
-            (False, repo_id): Lock occupato da un altro processo.
-            (False, None): Errore generico.
-        """
-        pass
-
-    @abstractmethod
-    def release_indexing_lock(self, repo_id: str, success: bool, commit_hash: str = None):
-        """
-        Rilascia il lock impostando lo stato finale (completed/failed).
-        """
-        pass
-
-    @abstractmethod
-    def delete_previous_data(self, repo_id: str, branch: str): pass
-
-    # --- READ / LOOKUP ---
-    @abstractmethod
-    def find_chunk_id(self, file_path: str, byte_range: List[int], repo_id: str = None) -> Optional[str]: pass
-    @abstractmethod
-    def ensure_external_node(self, node_id: str): pass
     @abstractmethod
     def save_embeddings(self, vector_documents: List[Dict[str, Any]]): pass
+
+    # --- READ & RETRIEVAL ---
+    @abstractmethod
+    def find_chunk_id(self, file_path: str, byte_range: List[int], snapshot_id: str) -> Optional[str]: pass
     
-    # --- BATCH ---
-    @abstractmethod
-    def get_nodes_cursor(self, repo_id: str = None, branch: str = None) -> Generator[Dict[str, Any], None, None]: pass
-    @abstractmethod
-    def get_nodes_to_embed(self, repo_id: str, model_name: str) -> Generator[Dict[str, Any], None, None]: pass
     @abstractmethod
     def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]: pass
+
     @abstractmethod
-    def get_files_bulk(self, file_paths: List[str], repo_id: str = None) -> Dict[str, Dict[str, Any]]: pass
+    def get_vectors_by_hashes(self, vector_hashes: List[str], model_name: str) -> Dict[str, List[float]]: pass
+
+    @abstractmethod
+    def get_nodes_to_embed(self, snapshot_id: str, model_name: str, batch_size: int = 2000) -> Generator[Dict[str, Any], None, None]: pass
+
+    @abstractmethod
+    def search_fts(self, query: str, limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]: pass
+    
+    @abstractmethod
+    def search_vectors(self, query_vector: List[float], limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]: pass
+
+    # --- GRAPH NAVIGATION (Cruciale per Navigator) ---
+    @abstractmethod
+    def get_context_neighbors(self, node_id: str) -> Dict[str, List[Dict[str, Any]]]: pass
+    
+    @abstractmethod
+    def get_neighbor_chunk(self, node_id: str, direction: str = "next") -> Optional[Dict[str, Any]]: pass
+    
+    @abstractmethod
+    def get_incoming_references(self, target_node_id: str, limit: int = 50) -> List[Dict[str, Any]]: pass
+    
+    @abstractmethod
+    def get_outgoing_calls(self, source_node_id: str, limit: int = 50) -> List[Dict[str, Any]]: pass
+    
     @abstractmethod
     def get_incoming_definitions_bulk(self, node_ids: List[str]) -> Dict[str, List[str]]: pass
     
-    # --- GENERAL STATS ---
     @abstractmethod
-    def get_all_files(self) -> Generator[Dict[str, Any], None, None]: pass
-    @abstractmethod
-    def get_all_nodes(self) -> Generator[Dict[str, Any], None, None]: pass
-    @abstractmethod
-    def get_all_contents(self) -> Generator[Dict[str, Any], None, None]: pass
-    @abstractmethod
-    def get_all_edges(self) -> Generator[Dict[str, Any], None, None]: pass
+    def get_neighbor_metadata(self, node_id: str) -> Dict[str, Any]: pass
+
+    # --- UTILS ---
     @abstractmethod
     def get_stats(self) -> Dict[str, int]: pass
     @abstractmethod
-    def commit(self): pass
-    @abstractmethod
     def close(self): pass
-
-    # --- RETRIEVAL & NAVIGATION ---
-    @abstractmethod
-    def search_fts(self, query: str, limit: int = 20, repo_id: str = None, 
-                   branch: str = None, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]: pass
-    @abstractmethod
-    def search_vectors(self, query_vector: List[float], limit: int = 20, repo_id: str = None, 
-                       branch: str = None, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]: pass
-    @abstractmethod
-    def get_context_neighbors(self, node_id: str) -> Dict[str, List[Dict[str, Any]]]: pass
-    @abstractmethod
-    def get_neighbor_chunk(self, node_id: str, direction: str = "next") -> Optional[Dict[str, Any]]: pass
-    @abstractmethod
-    def get_incoming_references(self, target_node_id: str, limit: int = 50) -> List[Dict[str, Any]]: pass
-    @abstractmethod
-    def get_outgoing_calls(self, source_node_id: str, limit: int = 50) -> List[Dict[str, Any]]: pass

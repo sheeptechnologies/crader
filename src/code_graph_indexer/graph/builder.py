@@ -8,6 +8,10 @@ from ..storage.base import GraphStorage
 logger = logging.getLogger(__name__)
 
 class KnowledgeGraphBuilder:
+    """
+    Costruisce il grafo scrivendo nodi, file e relazioni sullo Storage.
+    Snapshot-Aware: Le relazioni esterne (SCIP) vengono risolte nel contesto dello snapshot corrente.
+    """
     def __init__(self, storage: GraphStorage):
         self.storage = storage
 
@@ -22,42 +26,21 @@ class KnowledgeGraphBuilder:
 
     def index_search_content(self, nodes: List[ChunkNode], contents: Dict[str, ChunkContent]):
         """
-        Prepara e salva i dati per la ricerca FTS unificata (nodes_fts).
-        Combina Path, Tag Semantici (Puliti e Deduplicati) e Contenuto.
+        Prepara e salva i dati per la ricerca FTS unificata.
         """
         search_batch = []
-        
         for node in nodes:
-            # 1. Recupera contenuto
             content_obj = contents.get(node.chunk_hash)
             raw_content = content_obj.content if content_obj else ""
             
-            # 2. Recupera metadati
             meta = node.metadata or {}
             matches = meta.get("semantic_matches", [])
             
-            # 3. Costruzione Smart dei Tag
             unique_tokens = set()
-            
             for m in matches:
-                # A. Valore Tecnico (es. "entry_point", "api_endpoint")
-                # Lo teniamo intatto perché è un identificatore forte
-                if 'value' in m:
-                    unique_tokens.add(m['value'].lower())
-                
-                # B. Label Umana (es. "Application Entry Point")
-                # La spezziamo in parole singole per permettere match parziali
-                if 'label' in m:
-                    # Rimuoviamo caratteri non alfanumerici base se necessario, 
-                    # ma lo split spazio è solitamente sufficiente
-                    words = m['label'].lower().split()
-                    unique_tokens.update(words)
-                
-                # C. Categoria: LA IGNORIAMO. 
-                # "role", "type" sono parole stop/inutili per la ricerca.
+                if 'value' in m: unique_tokens.add(m['value'].lower())
+                if 'label' in m: unique_tokens.update(m['label'].lower().split())
             
-            # 4. Creiamo la stringa pulita
-            # Es: "application entry point api_endpoint" (senza duplicati)
             tags_str = " ".join(sorted(unique_tokens))
             
             search_batch.append({
@@ -69,50 +52,53 @@ class KnowledgeGraphBuilder:
             
         if hasattr(self.storage, 'add_search_index'):
             self.storage.add_search_index(search_batch)
-    def add_relations(self, relations: List[CodeRelation], repo_id: str = None):
+
+    def add_relations(self, relations: List[CodeRelation], snapshot_id: str = None):
         """
         Aggiunge le relazioni al grafo.
+        
+        Args:
+            relations: Lista di oggetti CodeRelation.
+            snapshot_id: FONDAMENTALE per risolvere le relazioni SCIP (byte-range -> node_id).
+                         Se le relazioni hanno già source_id/target_id (interne), questo parametro è ignorato.
         """
-        # (Logica invariata rispetto alle versioni precedenti)
-        # Ottimizzazione lookup cache per evitare query ripetute su find_chunk_id
-        logger.info(f"Elaborazione di {len(relations)} relazioni...")
+        if not relations: return
+        
+        logger.info(f"Elaborazione di {len(relations)} relazioni (Context Snap: {snapshot_id})...")
         lookup_cache = {}
         
-        if hasattr(self.storage, 'commit'): self.storage.commit()
+        # Helper per risolvere ID da range
+        def resolve_id(file_path, byte_range):
+            if not snapshot_id: return None
+            key = (file_path, tuple(byte_range))
+            if key in lookup_cache: return lookup_cache[key]
+            
+            # Chiamata allo storage con snapshot_id
+            nid = self.storage.find_chunk_id(file_path, byte_range, snapshot_id)
+            if nid: lookup_cache[key] = nid
+            return nid
 
         for rel in relations:
             # 1. Source Resolution
-            source_id = rel.source_id
-            if not source_id:
-                if not rel.source_byte_range or len(rel.source_byte_range) != 2: continue
-                src_key = (rel.source_file, tuple(rel.source_byte_range))
-                source_id = lookup_cache.get(src_key)
-                if not source_id:
-                    source_id = self.storage.find_chunk_id(rel.source_file, rel.source_byte_range, repo_id=repo_id)
-                    if source_id: lookup_cache[src_key] = source_id
+            if not rel.source_id:
+                if rel.source_byte_range and len(rel.source_byte_range) == 2:
+                    rel.source_id = resolve_id(rel.source_file, rel.source_byte_range)
             
-            if not source_id: continue 
+            if not rel.source_id: continue 
 
             # 2. Target Resolution
-            target_id = rel.target_id
-            if not target_id:
+            if not rel.target_id:
                 if rel.metadata.get("is_external"):
-                    target_id = rel.target_file
-                    self.storage.ensure_external_node(target_id)
-                else:
-                    if not rel.target_byte_range or len(rel.target_byte_range) != 2: continue
-                    tgt_key = (rel.target_file, tuple(rel.target_byte_range))
-                    target_id = lookup_cache.get(tgt_key)
-                    if not target_id:
-                        target_id = self.storage.find_chunk_id(rel.target_file, rel.target_byte_range, repo_id=repo_id)
-                        if target_id: lookup_cache[tgt_key] = target_id
+                    # Gestione nodi esterni (es. librerie std) - Placeholder
+                    # self.storage.ensure_external_node(rel.target_file) 
+                    rel.target_id = rel.target_file # Semplificazione per nodi fantasma
+                elif rel.target_byte_range and len(rel.target_byte_range) == 2:
+                    rel.target_id = resolve_id(rel.target_file, rel.target_byte_range)
 
-            if target_id and source_id != target_id:
-                self.storage.add_edge(source_id, target_id, rel.relation_type, rel.metadata)
+            # 3. Scrittura Edge
+            if rel.target_id and rel.source_id != rel.target_id:
+                self.storage.add_edge(rel.source_id, rel.target_id, rel.relation_type, rel.metadata)
 
             if len(lookup_cache) > 20000: lookup_cache.clear()
         
-        if hasattr(self.storage, 'commit'): self.storage.commit()
-
-
     def get_stats(self): return self.storage.get_stats()
