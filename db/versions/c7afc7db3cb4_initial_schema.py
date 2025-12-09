@@ -36,13 +36,21 @@ def upgrade() -> None:
         sa.Column('url', sa.String(), nullable=False),
         sa.Column('branch', sa.String(), nullable=False),
         sa.Column('name', sa.String(), nullable=False),
+        
         sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
         sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
         # Questo campo verrà collegato via FK alla fine dello script
         sa.Column('current_snapshot_id', sa.String(), nullable=True),
+        # Se valorizzato, significa "qualcuno ha chiesto un update mentre eri occupato"
+        sa.Column('reindex_requested_at', sa.DateTime(), nullable=True),
+
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('url', 'branch', name='uq_repo_url_branch')
+        # Impedisce fisicamente di avere due snapshot 'indexing' contemporaneamente per la stessa repo.
+
     )
+
+
 
     # SNAPSHOTS: Lo stato immutabile (Versioni)
     op.create_table(
@@ -69,6 +77,15 @@ def upgrade() -> None:
         ['current_snapshot_id'], ['id'], 
         ondelete='SET NULL',  # Se cancello lo snapshot, la repo torna "vergine"
         use_alter=True
+    )
+
+    # Questo delega la gestione della concorrenza a Postgres (molto robusto).
+    op.create_index(
+        'ix_one_active_indexing', 
+        'snapshots', 
+        ['repository_id'], 
+        unique=True, 
+        postgresql_where=sa.text("status = 'indexing'") # Partial Index
     )
 
     # =================================================================

@@ -8,6 +8,7 @@ const API_BASE = 'http://localhost:8019/api';
 export default function RepoList() {
     const [repos, setRepos] = useState([]);
     const [newRepoUrl, setNewRepoUrl] = useState('');
+    const [newRepoBranch, setNewRepoBranch] = useState('main');
     const [loading, setLoading] = useState(false);
 
     useEffect(() => {
@@ -27,8 +28,12 @@ export default function RepoList() {
         e.preventDefault();
         setLoading(true);
         try {
-            await axios.post(`${API_BASE}/repos`, { path_or_url: newRepoUrl });
+            await axios.post(`${API_BASE}/repos`, {
+                path_or_url: newRepoUrl,
+                branch: newRepoBranch
+            });
             setNewRepoUrl('');
+            setNewRepoBranch('main');
             fetchRepos();
         } catch (err) {
             alert('Failed to add repo');
@@ -84,6 +89,13 @@ export default function RepoList() {
                     onChange={(e) => setNewRepoUrl(e.target.value)}
                     placeholder="Git URL or Local Path"
                     className="flex-1 p-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500"
+                />
+                <input
+                    type="text"
+                    value={newRepoBranch}
+                    onChange={(e) => setNewRepoBranch(e.target.value)}
+                    placeholder="Branch (default: main)"
+                    className="w-48 p-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500"
                 />
                 <button
                     type="submit"

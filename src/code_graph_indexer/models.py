@@ -16,7 +16,8 @@ class Repository:
     # Puntatore allo snapshot attualmente "LIVE" (Ready to serve)
     # Se None, la repo è registrata ma non ha ancora dati pronti.
     current_snapshot_id: Optional[str] = None
-    
+    reindex_requested_at: Optional[datetime.datetime] = None #Dirty Flag
+
     created_at: Optional[datetime.datetime] = None
     updated_at: Optional[datetime.datetime] = None
     

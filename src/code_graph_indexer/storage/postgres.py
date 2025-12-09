@@ -10,6 +10,7 @@ import psycopg
 from psycopg.rows import dict_row
 from pgvector.psycopg import register_vector
 from psycopg_pool import ConnectionPool
+from psycopg.errors import UniqueViolation
 
 from .base import GraphStorage
 
@@ -70,51 +71,84 @@ class PostgresGraphStorage(GraphStorage):
         with self.pool.connection() as conn:
             res = conn.execute(sql, (repo_id, url, branch, name)).fetchone()
             return str(res['id'])
-        
-    # --- HELPER LOCKING ---
-    def _generate_lock_id(self, repo_id: str, commit_hash: str) -> int:
-        """Genera un int64 deterministico per l'Advisory Lock di Postgres."""
-        # Uniamo gli ID e facciamo hash
-        raw_str = f"{repo_id}:{commit_hash}"
-        sha_sig = hashlib.sha256(raw_str.encode('utf-8')).digest()
-        # Prendiamo i primi 8 byte per fare un int64 (signed)
-        return struct.unpack("q", sha_sig[:8])[0]
-
-    def create_snapshot(self, repository_id: str, commit_hash: str, force_new: bool = False) -> Tuple[str, bool]:
+            
+    def create_snapshot(self, repository_id: str, commit_hash: str, force_new: bool = False) -> Tuple[Optional[str], bool]:
         """
-        Crea uno snapshot gestendo la concorrenza con Advisory Locks.
+        Crea uno snapshot o recupera quello esistente.
+        Returns:
+            (snapshot_id, is_new_work)
+            - (uuid, True): Nuovo lavoro avviato (Lock acquisito).
+            - (uuid, False): Lavoro già completato (Idempotenza).
+            - (None, False): Repo occupata, richiesta accodata.
         """
         new_id = str(uuid.uuid4())
-        lock_id = self._generate_lock_id(repository_id, commit_hash)
         
-        with self.pool.connection() as conn:
-            # [CRITICAL] Avviamo una transazione esplicita per il lock
-            with conn.transaction():
-                # 1. Acquisisci Lock Applicativo (blocca solo chi lavora su QUESTO commit)
-                # pg_advisory_xact_lock viene rilasciato automaticamente alla fine del blocco transaction
-                conn.execute("SELECT pg_advisory_xact_lock(%s)", (lock_id,))
-                
-                # 2. Se NON forziamo, ora possiamo cercare con sicurezza (siamo serializzati)
+        try:
+            with self.pool.connection() as conn:
+                # -------------------------------------------------------
+                # 1. IDEMPOTENZA (Check Existing)
+                # -------------------------------------------------------
+                # Se non forziamo il re-index, controlliamo se il lavoro è già fatto.
                 if not force_new:
+                    # Cerchiamo l'ultimo snapshot COMPLETATO per questo commit
                     row = conn.execute("""
                         SELECT id, status FROM snapshots 
-                        WHERE repository_id = %s AND commit_hash = %s AND status != 'failed'
+                        WHERE repository_id = %s AND commit_hash = %s AND status = 'completed'
                         ORDER BY created_at DESC LIMIT 1
                     """, (repository_id, commit_hash)).fetchone()
                     
                     if row:
-                        # Un altro thread ha appena finito di crearlo mentre aspettavamo il lock
-                        logger.info(f"🔄 Snapshot esistente trovato (Race Winner): {row['id']} (Status: {row['status']}).")
+                        logger.info(f"✅ Snapshot esistente trovato: {row['id']}")
+                        # Ritorniamo l'ID esistente e False (non è un nuovo lavoro)
                         return str(row['id']), False
 
-                # 3. Creazione NUOVO Snapshot
+                # -------------------------------------------------------
+                # 2. TRY LOCK (New Indexing)
+                # -------------------------------------------------------
+                # Tentiamo di inserire. Grazie all'indice parziale UNIQUE, 
+                # fallirà se c'è già un worker attivo (status='indexing').
                 conn.execute("""
                     INSERT INTO snapshots (id, repository_id, commit_hash, status, created_at)
                     VALUES (%s, %s, %s, 'indexing', NOW())
                 """, (new_id, repository_id, commit_hash))
                 
-                logger.info(f"📸 Snapshot CREATO (New): {new_id} (Commit: {commit_hash[:8]})")
+                logger.info(f"🔒 Lock acquisito: Inizio indicizzazione snapshot {new_id}")
                 return new_id, True
+
+        except psycopg.errors.UniqueViolation:
+            # -------------------------------------------------------
+            # 3. FALLBACK (Queueing)
+            # -------------------------------------------------------
+            # Caso "Busy": Qualcuno sta già lavorando (status='indexing').
+            # Impostiamo il Dirty Flag sulla repo.
+            logger.info(f"⏳ Repo occupata. Imposto dirty flag per {repository_id}")
+            
+            # Riapriamo una connessione veloce per aggiornare il flag 
+            # (la precedente ha fatto rollback automatico per l'errore)
+            with self.pool.connection() as conn:
+                conn.execute("""
+                    UPDATE repositories 
+                    SET reindex_requested_at = NOW() 
+                    WHERE id = %s
+                """, (repository_id,))
+            
+            return None, False
+        
+    def check_and_reset_reindex_flag(self, repository_id: str) -> bool:
+        """
+        Controlla se qualcuno ha richiesto un re-index mentre lavoravamo.
+        Se sì, resetta il flag e restituisce True (il worker deve ripartire).
+        """
+        with self.pool.connection() as conn:
+            # Facciamo una UPDATE ... RETURNING per un'operazione atomica check-and-set
+            row = conn.execute("""
+                UPDATE repositories 
+                SET reindex_requested_at = NULL
+                WHERE id = %s AND reindex_requested_at IS NOT NULL
+                RETURNING id
+            """, (repository_id,)).fetchone()
+            
+            return row is not None
     
     def activate_snapshot(self, repository_id: str, snapshot_id: str, stats: Dict[str, Any] = None, manifest: Dict[str, Any] = None):
         with self.pool.connection() as conn:

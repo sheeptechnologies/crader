@@ -27,6 +27,11 @@ logging.getLogger("src.code_graph_indexer").setLevel(logging.INFO)
 from dotenv import load_dotenv
 load_dotenv()
 
+# --- CONFIGURATION ---
+# Set REPO_VOLUME to 'repos' directory in debugger folder
+# This must be set BEFORE importing CodebaseIndexer (which imports config)
+os.environ["REPO_VOLUME"] = os.path.join(os.path.dirname(__file__), "repos")
+
 app = FastAPI(title="Sheep Debugger API")
 
 # CORS
@@ -100,43 +105,19 @@ def list_repos():
 
 @app.post("/api/repos")
 def add_repo(req: RepoRequest):
-    # Determine if it's a local path or a git URL
-    is_url = req.path_or_url.startswith("http") or req.path_or_url.startswith("git@")
+    # We no longer clone manually. GitVolumeManager handles it during indexing.
+    # We just register the repo intent.
     
-    repo_name = req.name or os.path.basename(req.path_or_url).replace(".git", "")
-    local_path = req.path_or_url
+    repo_name = req.name or req.path_or_url.rstrip('/').split('/')[-1].replace(".git", "")
     
-    if is_url:
-        # Clone to a temporary or specific directory
-        # For this debugger, let's clone into a 'repos' subdirectory in debugger
-        base_dir = os.path.join(os.path.dirname(__file__), "repos")
-        os.makedirs(base_dir, exist_ok=True)
-        local_path = os.path.join(base_dir, repo_name)
-        try:
-            clone_repo(req.path_or_url, local_path, req.branch)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Failed to clone: {e}")
-
     # Register in DB
     storage = get_storage()
     
-    # Get commit hash
-    try:
-        repo = git.Repo(local_path)
-        commit_hash = repo.head.commit.hexsha
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid git repo at {local_path}: {e}")
-
     # Use ensure_repository to register/get ID
-    url = req.path_or_url if is_url else f"file://{local_path}"
-    repo_id = storage.ensure_repository(url, req.branch, repo_name)
+    # Note: ensure_repository takes (url, branch, name)
+    repo_id = storage.ensure_repository(req.path_or_url, req.branch, repo_name)
     
-    # Update local_path manually as ensure_repository doesn't take it
-    # We can do this via direct SQL since we are in the debugger
-    with storage.pool.connection() as conn:
-        conn.execute("UPDATE repositories SET local_path = %s, last_commit = %s WHERE id = %s", (local_path, commit_hash, repo_id))
-    
-    return {"id": repo_id, "status": "registered", "local_path": local_path}
+    return {"id": repo_id, "status": "registered", "url": req.path_or_url, "branch": req.branch}
 
 @app.delete("/api/repos/{repo_id}")
 def delete_repo(repo_id: str):
@@ -171,21 +152,18 @@ def index_repo(repo_id: str, req: IndexRequest, background_tasks: BackgroundTask
     if not repo:
         raise HTTPException(status_code=404, detail="Repo not found")
     
-    local_path = repo['local_path']
-    if not local_path or not os.path.exists(local_path):
-        raise HTTPException(status_code=400, detail="Local path not found. Cannot index.")
+    # New Indexer takes url and branch, not local path
+    repo_url = repo['url']
+    branch = repo['branch']
 
     def _run_index():
         try:
-            indexer = CodebaseIndexer(local_path, storage)
-            snapshot_id = indexer.index(force=req.force)
+            indexer = CodebaseIndexer(repo_url, branch, storage)
+            snapshot_id = indexer.index(force=False)
             logger.info(f"Indexing completed. Snapshot ID: {snapshot_id}")
-            # We don't need to update status manually as indexer handles activation
         except Exception as e:
             logger.error(f"Indexing failed: {e}")
-            # storage.update_repository_status(repo_id, "failed") # Optional, indexer might have marked snapshot as failed
 
-    # storage.update_repository_status(repo_id, "queued") # Legacy
     background_tasks.add_task(_run_index)
     return {"status": "indexing_started"}
 
@@ -196,7 +174,8 @@ def embed_repo(repo_id: str, req: EmbedRequest, background_tasks: BackgroundTask
     if not repo:
         raise HTTPException(status_code=404, detail="Repo not found")
         
-    local_path = repo['local_path']
+    repo_url = repo['url']
+    branch = repo['branch']
     
     provider = None
     try:
@@ -214,7 +193,7 @@ def embed_repo(repo_id: str, req: EmbedRequest, background_tasks: BackgroundTask
 
     def _run_embed():
         try:
-            indexer = CodebaseIndexer(local_path, storage)
+            indexer = CodebaseIndexer(repo_url, branch, storage)
             # Consume generator
             count = 0
             # Resolve active snapshot automatically inside embed if not passed
@@ -224,12 +203,9 @@ def embed_repo(repo_id: str, req: EmbedRequest, background_tasks: BackgroundTask
                     logger.info(f"🤖 Embedding progress: {count} items processed...")
             
             logger.info(f"✅ Embedding finished. Total items: {count}")
-            # storage.update_repository_status(repo_id, "embedded")
         except Exception as e:
             logger.error(f"Embedding failed: {e}")
-            # storage.update_repository_status(repo_id, "embedding_failed")
 
-    # storage.update_repository_status(repo_id, "embedding")
     background_tasks.add_task(_run_embed)
     return {"status": "embedding_started"}
 
