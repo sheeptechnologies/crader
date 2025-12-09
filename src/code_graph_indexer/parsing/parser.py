@@ -13,9 +13,7 @@ from ..providers.metadata import MetadataProvider, GitMetadataProvider, LocalMet
 class TreeSitterRepoParser:
     """
     Parser semantico per RAG Enterprise.
-    - Resiliente: Gestisce errori di I/O, encoding e parsing.
-    - Semantico: Usa query Tree-sitter (.scm) per l'arricchimento dei metadati.
-    - Strutturale: Preserva la gerarchia del codice durante il chunking.
+    Adattato per Immutable Infrastructure: ogni file è legato a uno SnapshotID.
     """
     
     LANGUAGE_MAP = {
@@ -41,14 +39,12 @@ class TreeSitterRepoParser:
     CHUNK_TOLERANCE = 400
     MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10MB Limit
 
-    # Tipi che agiscono da barriera semantica (creano un nuovo chunk)
     CONTAINER_TYPES = {
         "class_definition", "class_declaration", "function_definition", "method_definition", 
         "function_declaration", "arrow_function", "interface_declaration", "impl_item", "mod_item",
         "async_function_definition", "decorated_definition", "export_statement"
     }
 
-    # Tipi che vengono incollati al chunk successivo (commenti, decoratori)
     GLUE_TYPES = {"comment", "decorator", "line_comment", "block_comment", "string_literal"}
 
     def __init__(self, repo_path: str, metadata_provider: Optional[MetadataProvider] = None):
@@ -60,7 +56,10 @@ class TreeSitterRepoParser:
             GitMetadataProvider(self.repo_path) if is_git_repo else LocalMetadataProvider(self.repo_path)
         )
         self.repo_info = self.metadata_provider.get_repo_info()
-        self.repo_id = self.repo_info.get('repo_id', str(uuid.uuid4()))
+        
+        # [CHANGE] Il parser ora deve conoscere lo snapshot corrente per taggare i file.
+        # Viene settato dall'Indexer prima dell'avvio.
+        self.snapshot_id: Optional[str] = None 
         
         # Caricamento Lingue (Cache)
         self.languages: Dict[str, Any] = {}
@@ -73,7 +72,9 @@ class TreeSitterRepoParser:
                 lang_obj = get_language(lang_name)
                 lang_cache[lang_name] = lang_obj
                 self.languages[ext] = lang_obj
-            except Exception: continue
+            except Exception as e:
+                print(f"[ERROR] Failed to load language {lang_name}: {e}")
+                continue
 
         self.parser = Parser()
 
@@ -86,16 +87,13 @@ class TreeSitterRepoParser:
     # ==============================================================================
 
     def _is_binary(self, content_sample: bytes) -> bool:
-        """Rileva file binari controllando la presenza di byte nulli."""
         return b'\0' in content_sample
 
     def _is_minified_or_generated(self, content: bytes, file_path: str) -> bool:
-        """Euristiche per scartare file minificati o generati automaticamente."""
         path_lower = file_path.lower()
         if any(path_lower.endswith(suffix) for suffix in self.IGNORE_FILE_SUFFIXES): return True
         try:
             sample = content[:4096]
-            # Se non ci sono newline in 1000 char o righe > 2500 char
             if b'\n' not in sample and len(sample) > 1000: return True
             for line in sample.split(b'\n'):
                 if len(line) > 2500: return True
@@ -103,7 +101,6 @@ class TreeSitterRepoParser:
         return False
 
     def _safe_read_file(self, full_path: str) -> Tuple[Optional[bytes], Optional[str]]:
-        """Legge il file dal disco in modo sicuro."""
         try:
             size = os.path.getsize(full_path)
             if size > self.MAX_FILE_SIZE_BYTES:
@@ -136,7 +133,6 @@ class TreeSitterRepoParser:
         return None
 
     def _generate_label(self, category: str, value: str) -> str:
-        """Etichette umane per embedding e UI."""
         labels = {
             ("role", "entry_point"): "Application Entry Point",
             ("role", "test_suite"): "Test Suite Class",
@@ -149,7 +145,6 @@ class TreeSitterRepoParser:
         return labels.get((category, value), f"{value.replace('_', ' ').title()}")
 
     def _get_semantic_captures(self, tree, language_name: str) -> List[Dict[str, Any]]:
-        """Esegue le query Tree-sitter e ritorna una lista di catture filtrate."""
         query_scm = self._load_query_for_language(language_name)
         if not query_scm: return []
         
@@ -163,7 +158,6 @@ class TreeSitterRepoParser:
             results = []
             for node, capture_name in captures:
                 parts = capture_name.split('.')
-                # [FIX] Ignora le catture interne senza punto (es. @name)
                 if len(parts) < 2: continue
                 
                 category, value = parts[0], parts[1]
@@ -186,7 +180,11 @@ class TreeSitterRepoParser:
     # ==============================================================================
 
     def stream_semantic_chunks(self, file_list: Optional[List[str]] = None) -> Generator[Tuple[FileRecord, List[ChunkNode], List[ChunkContent], List[CodeRelation]], None, None]:
+        if not self.snapshot_id:
+            raise ValueError("Parser: snapshot_id not set. Cannot process files without a version context.")
+
         files_to_process = set(file_list) if file_list else None
+        commit_hash = self.repo_info.get('commit_hash', 'HEAD')
         
         for root, dirs, files in os.walk(self.repo_path, topdown=True):
             dirs[:] = [d for d in dirs if d.lower() not in self.IGNORE_DIRS]
@@ -200,13 +198,14 @@ class TreeSitterRepoParser:
                 rel_path = os.path.relpath(full_path, self.repo_path)
                 if files_to_process and rel_path not in files_to_process: continue
 
-                # [RESILIENCE] Try/Except per file
                 try:
                     content, error_msg = self._safe_read_file(full_path)
                     
+                    # [CHANGE] snapshot_id invece di repo_id
                     file_rec = FileRecord(
-                        id=str(uuid.uuid4()), repo_id=self.repo_id, 
-                        commit_hash=self.repo_info.get('commit_hash', 'HEAD'),
+                        id=str(uuid.uuid4()), 
+                        snapshot_id=self.snapshot_id, 
+                        commit_hash=commit_hash,
                         file_hash="", path=rel_path,
                         language=self.LANGUAGE_MAP[ext], size_bytes=0,
                         category=self.metadata_provider.get_file_category(rel_path),
@@ -251,11 +250,11 @@ class TreeSitterRepoParser:
 
                 except Exception as e: 
                     print(f"[ERROR] Processing {rel_path}: {e}")
-                    # Salviamo record di errore
                     try:
                         err_rec = FileRecord(
-                            id=str(uuid.uuid4()), repo_id=self.repo_id,
-                            commit_hash=self.repo_info.get('commit_hash', 'HEAD'),
+                            id=str(uuid.uuid4()), 
+                            snapshot_id=self.snapshot_id,
+                            commit_hash=commit_hash,
                             file_hash="error", path=rel_path, language=self.LANGUAGE_MAP.get(ext, "unknown"),
                             size_bytes=0, category="unknown",
                             indexed_at=datetime.datetime.utcnow().isoformat() + "Z",
@@ -272,9 +271,9 @@ class TreeSitterRepoParser:
         return ParsingResult(files, nodes, contents, all_rels)
 
     # ==============================================================================
-    #  LOGICA CHUNKING
+    #  LOGICA CHUNKING 
     # ==============================================================================
-
+    
     def _process_scope(self, parent_node: Node, content: bytes, file_path: str, file_id: str, parent_chunk_id: Optional[str],
                        nodes: List, contents: Dict, relations: List, 
                        initial_glue: bytes = b"", initial_glue_start: Optional[int] = None,
@@ -485,7 +484,6 @@ class TreeSitterRepoParser:
         return cid
 
     def _extract_tags(self, child: Node) -> List[str]:
-        """Helper per tag sintattici (async, static, ecc.)"""
         tags: List[str] = []
         if child.type.startswith("async_") or any(c.type == "async" for c in child.children): tags.append("async")
         if child.type == "decorated_definition" or any(c.type == "decorator" for c in child.children): tags.append("decorated")

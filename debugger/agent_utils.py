@@ -46,7 +46,18 @@ class RepoAgent:
         self.system_prompt = """
             Sei un Senior Software Engineer esperto. 
             Rispondi usando SOLO i tool per esplorare la codebase.
+
+            MANIFESTO:
+            Noi crediamo nell'efficienza, fare meno passaggi/richieste possibili per giungere allo scopo richiesto ci permette di risparmiare energia elettrica e non inquinare
             
+            STRATEGIA DI RICERCA OTTIMALE:
+            1. 🧠 **Usa SEMPRE `search_codebase` PRIMA di esplorare file/cartelle.**
+               - Se cerchi "dove inizia l'app", cerca "app" o "main" con filtro `role='entry_point'`.
+               - Se cerchi definizioni di classi/funzioni, usa i filtri `role` o `type`.
+               - NON usare `list_repo_structure` o `find_folder` a meno che la ricerca semantica non fallisca o tu debba esplorare la struttura fisica.
+            
+            2. 🔍 **Usa i Filtri di Ricerca**
+
             LINEE GUIDA:
             - Se devi sapere CHI CHIAMA una funzione/classe, o cosa essa chiama, DEVI usare `inspect_node_relationships` con l'UUID del nodo. NON affidarti solo alla ricerca testuale per le relazioni.
             - Se devi leggere l'implementazione completa, usa `read_file_content`.
@@ -57,6 +68,13 @@ class RepoAgent:
         # In-memory checkpointer for this session
         self.checkpointer = MemorySaver()
         self.agent_executor = create_react_agent(self.llm, self.tools, checkpointer=self.checkpointer)
+
+    @property
+    def active_snapshot_id(self):
+        snap = self.storage.get_active_snapshot_id(self.repo_id)
+        if not snap:
+            raise ValueError(f"Nessuno snapshot attivo per repo {self.repo_id}")
+        return snap
 
     def _create_tools(self):
         # We need to bind the repo_id to the tools or use a closure/method approach.
@@ -78,7 +96,9 @@ class RepoAgent:
         def read_file_content(file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None):
             """Legge contenuto file."""
             try:
-                data = self.reader.read_file(self.repo_id, file_path, start_line, end_line)
+                # Use active snapshot
+                snap_id = self.active_snapshot_id
+                data = self.reader.read_file(snap_id, file_path, start_line, end_line)
                 return f"File: {data['file_path']}\nContent:\n{data['content']}"
             except Exception as e:
                 return f"Errore lettura: {e}"
@@ -145,7 +165,8 @@ class RepoAgent:
             Es: cerchi "flask" -> trova "src/flask".
             """
             try:
-                dirs = self.reader.find_directories(self.repo_id, name_pattern)
+                snap_id = self.active_snapshot_id
+                dirs = self.reader.find_directories(snap_id, name_pattern)
                 if not dirs:
                     return f"Nessuna cartella trovata contenente '{name_pattern}'."
                 return "Cartelle trovate:\n" + "\n".join([f"- {d}" for d in dirs])
@@ -156,10 +177,11 @@ class RepoAgent:
         def list_repo_structure(path: str = "", max_depth: int = 2):
             """
             Elenca file e cartelle nella repository. 
-            Usa questo tool ALL'INIZIO per capire com'è organizzato il progetto (es. dove sono i source file, dove sono i test).
+            Usa questo tool per capire com'è organizzato il progetto (es. dove sono i source file, dove sono i test).
             """
             try:
-                items = self.reader.list_directory(self.repo_id, path)
+                snap_id = self.active_snapshot_id
+                items = self.reader.list_directory(snap_id, path)
                 output = [f"Listing '{path or '/'}':"]
                 for item in items:
                     icon = "📁" if item['type'] == 'dir' else "📄"
@@ -168,7 +190,7 @@ class RepoAgent:
                     # Mini-esplorazione per profondità 2
                     if item['type'] == 'dir' and max_depth > 1:
                         try:
-                            sub_items = self.reader.list_directory(self.repo_id, item['path'])
+                            sub_items = self.reader.list_directory(snap_id, item['path'])
                             # Mostra solo i primi 5 file per non intasare
                             for i, sub in enumerate(sub_items):
                                 if i >= 5: 
