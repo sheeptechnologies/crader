@@ -18,6 +18,13 @@ class GraphStorage(ABC):
     def activate_snapshot(self, repository_id: str, snapshot_id: str, stats: Dict[str, Any] = None): pass
     
     @abstractmethod
+    def get_snapshot_manifest(self, snapshot_id: str) -> Dict[str, Any]: pass
+       
+
+    @abstractmethod
+    def get_file_content_range(self, snapshot_id: str, file_path: str, start_line: int = None, end_line: int = None) -> Optional[str]:pass
+    
+    @abstractmethod
     def fail_snapshot(self, snapshot_id: str, error: str): pass
     
     @abstractmethod

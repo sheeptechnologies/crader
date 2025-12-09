@@ -1,7 +1,9 @@
+import hashlib
 import os
 import json
 import logging
 import datetime
+import struct
 import uuid
 from typing import List, Dict, Any, Optional, Generator, Tuple
 import psycopg
@@ -14,12 +16,13 @@ from .base import GraphStorage
 logger = logging.getLogger(__name__)
 
 class PostgresGraphStorage(GraphStorage):
-    def __init__(self, db_url: str, min_size: int = 4, max_size: int = 20, vector_dim: int = 1536):
+    def __init__(self, db_url: str, min_size: int = 4, max_size: int = 20, vector_dim: int = 1536,timeout: float = 60.0):
         self._db_url = db_url
         self.vector_dim = vector_dim
         
         self._min_size = min_size
         self._max_size = max_size
+        self._timeout = timeout
         self._pool_kwargs = {
             "row_factory": dict_row,
             "autocommit": True 
@@ -35,6 +38,7 @@ class PostgresGraphStorage(GraphStorage):
             conninfo=self._db_url,
             min_size=self._min_size,
             max_size=self._max_size,
+            timeout=self._timeout,
             kwargs=self._pool_kwargs,
             configure=self._configure_connection
         )
@@ -66,57 +70,75 @@ class PostgresGraphStorage(GraphStorage):
         with self.pool.connection() as conn:
             res = conn.execute(sql, (repo_id, url, branch, name)).fetchone()
             return str(res['id'])
+        
+    # --- HELPER LOCKING ---
+    def _generate_lock_id(self, repo_id: str, commit_hash: str) -> int:
+        """Genera un int64 deterministico per l'Advisory Lock di Postgres."""
+        # Uniamo gli ID e facciamo hash
+        raw_str = f"{repo_id}:{commit_hash}"
+        sha_sig = hashlib.sha256(raw_str.encode('utf-8')).digest()
+        # Prendiamo i primi 8 byte per fare un int64 (signed)
+        return struct.unpack("q", sha_sig[:8])[0]
 
-    def create_snapshot(self, repository_id: str, commit_hash: str) -> Tuple[str, bool]:
+    def create_snapshot(self, repository_id: str, commit_hash: str, force_new: bool = False) -> Tuple[str, bool]:
+        """
+        Crea uno snapshot gestendo la concorrenza con Advisory Locks.
+        """
         new_id = str(uuid.uuid4())
+        lock_id = self._generate_lock_id(repository_id, commit_hash)
+        
         with self.pool.connection() as conn:
-            try:
-                res = conn.execute("""
+            # [CRITICAL] Avviamo una transazione esplicita per il lock
+            with conn.transaction():
+                # 1. Acquisisci Lock Applicativo (blocca solo chi lavora su QUESTO commit)
+                # pg_advisory_xact_lock viene rilasciato automaticamente alla fine del blocco transaction
+                conn.execute("SELECT pg_advisory_xact_lock(%s)", (lock_id,))
+                
+                # 2. Se NON forziamo, ora possiamo cercare con sicurezza (siamo serializzati)
+                if not force_new:
+                    row = conn.execute("""
+                        SELECT id, status FROM snapshots 
+                        WHERE repository_id = %s AND commit_hash = %s AND status != 'failed'
+                        ORDER BY created_at DESC LIMIT 1
+                    """, (repository_id, commit_hash)).fetchone()
+                    
+                    if row:
+                        # Un altro thread ha appena finito di crearlo mentre aspettavamo il lock
+                        logger.info(f"🔄 Snapshot esistente trovato (Race Winner): {row['id']} (Status: {row['status']}).")
+                        return str(row['id']), False
+
+                # 3. Creazione NUOVO Snapshot
+                conn.execute("""
                     INSERT INTO snapshots (id, repository_id, commit_hash, status, created_at)
                     VALUES (%s, %s, %s, 'indexing', NOW())
-                    ON CONFLICT (repository_id, commit_hash) DO NOTHING
-                    RETURNING id
-                """, (new_id, repository_id, commit_hash)).fetchone()
-                if res:
-                    logger.info(f"📸 Snapshot CREATO: {new_id} (Commit: {commit_hash[:8]})")
-                    return str(res['id']), True
-            except psycopg.errors.UniqueViolation:
-                pass 
-
-            row = conn.execute("SELECT id, status FROM snapshots WHERE repository_id = %s AND commit_hash = %s", (repository_id, commit_hash)).fetchone()
-            if not row:
-                raise Exception(f"Critical: Snapshot consistency error for repo {repository_id}")
-            
-            existing_id = str(row['id'])
-            if row['status'] == 'failed':
-                logger.warning(f"♻️ Snapshot {existing_id} was 'failed'. Purging data & Resetting.")
-                # [FIX] Pulizia dati orfani per evitare collisioni di ID
-                conn.execute("DELETE FROM files WHERE snapshot_id = %s", (existing_id,))
-                conn.execute("UPDATE snapshots SET status='indexing', created_at=NOW() WHERE id=%s", (existing_id,))
-                return existing_id, True 
+                """, (new_id, repository_id, commit_hash))
                 
-            return existing_id, False
-
-    def activate_snapshot(self, repository_id: str, snapshot_id: str, stats: Dict[str, Any] = None):
+                logger.info(f"📸 Snapshot CREATO (New): {new_id} (Commit: {commit_hash[:8]})")
+                return new_id, True
+    
+    def activate_snapshot(self, repository_id: str, snapshot_id: str, stats: Dict[str, Any] = None, manifest: Dict[str, Any] = None):
         with self.pool.connection() as conn:
             with conn.transaction():
-                conn.execute("UPDATE snapshots SET status='completed', completed_at=NOW(), stats=%s WHERE id=%s", (json.dumps(stats or {}), snapshot_id))
-                conn.execute("UPDATE repositories SET current_snapshot_id=%s, updated_at=NOW() WHERE id=%s", (snapshot_id, repository_id))
+                conn.execute("""
+                    UPDATE snapshots 
+                    SET status='completed', completed_at=NOW(), stats=%s, file_manifest=%s 
+                    WHERE id=%s
+                """, (json.dumps(stats or {}), json.dumps(manifest or {}), snapshot_id))
+                
+                conn.execute("""
+                    UPDATE repositories 
+                    SET current_snapshot_id=%s, updated_at=NOW()
+                    WHERE id=%s
+                """, (snapshot_id, repository_id))
         logger.info(f"🚀 SNAPSHOT ACTIVATED: {snapshot_id}")
 
     def fail_snapshot(self, snapshot_id: str, error: str):
         with self.pool.connection() as conn:
-            # [FIX] Casting ::text per evitare IndeterminateDatatype
             conn.execute("UPDATE snapshots SET status='failed', stats=jsonb_build_object('error', %s::text) WHERE id=%s", (error, snapshot_id))
 
     def prune_snapshot(self, snapshot_id: str):
-        """
-        Rimuove file e nodi di uno snapshot.
-        Essenziale per 'force=True' o retry.
-        """
         logger.info(f"🧹 Pruning snapshot data: {snapshot_id}")
         with self.pool.connection() as conn:
-            # ON DELETE CASCADE sulle FK farà il resto per nodi ed edges
             conn.execute("DELETE FROM files WHERE snapshot_id = %s", (snapshot_id,))
 
     def get_active_snapshot_id(self, repository_id: str) -> Optional[str]:
@@ -127,6 +149,12 @@ class PostgresGraphStorage(GraphStorage):
     def get_repository(self, repo_id: str) -> Optional[Dict[str, Any]]:
         with self.pool.connection() as conn:
             return conn.execute("SELECT * FROM repositories WHERE id=%s", (repo_id,)).fetchone()
+            
+    def get_snapshot_manifest(self, snapshot_id: str) -> Dict[str, Any]:
+        sql = "SELECT file_manifest FROM snapshots WHERE id = %s"
+        with self.pool.connection() as conn:
+            row = conn.execute(sql, (snapshot_id,)).fetchone()
+            return row['file_manifest'] if row and row['file_manifest'] else {}
 
     # ==========================================
     # 2. WRITE OPERATIONS
@@ -204,7 +232,174 @@ class PostgresGraphStorage(GraphStorage):
                 """, search_docs)
 
     # ==========================================
-    # 3. READ OPERATIONS
+    # 3. READ OPERATIONS (Search & Filter Logic)
+    # ==========================================
+
+    def _build_filter_clause(self, filters: Dict[str, Any], col_map: Dict[str, str]) -> Tuple[str, List[Any]]:
+        """
+        Costruisce la clausola WHERE dinamica.
+        Args:
+            col_map: Mappa alias logici -> colonne fisiche (es. {'path': 'ne.file_path'})
+        """
+        if not filters: return "", []
+        
+        clauses = []
+        params = []
+        
+        def as_list(val): return val if isinstance(val, list) else [val]
+
+        # 1. Path
+        if filters.get("path_prefix"):
+            col = col_map.get('path')
+            if col:
+                paths = as_list(filters["path_prefix"])
+                if paths:
+                    or_clauses = []
+                    for p in paths:
+                        or_clauses.append(f"{col} LIKE %s")
+                        params.append(p.rstrip('/') + '%')
+                    clauses.append(f"({' OR '.join(or_clauses)})")
+
+        # 2. Language
+        if filters.get("language"):
+            col = col_map.get('lang')
+            if col:
+                langs = as_list(filters["language"])
+                if langs:
+                    clauses.append(f"{col} = ANY(%s)")
+                    params.append(langs)
+            
+        if filters.get("exclude_language"):
+            col = col_map.get('lang')
+            if col:
+                ex_langs = as_list(filters["exclude_language"])
+                if ex_langs:
+                    clauses.append(f"{col} != ALL(%s)")
+                    params.append(ex_langs)
+
+        # 3. Semantic Filters (Role) via JSON Metadata
+        col_meta = col_map.get('meta')
+        if col_meta:
+            if filters.get("role"): 
+                roles = as_list(filters["role"])
+                role_clauses = []
+                for r in roles:
+                    # JSON pattern: metadata @> '{"semantic_matches": [{"category": "role", "value": "..."}]}'
+                    role_clauses.append(f"{col_meta} @> %s::jsonb")
+                    params.append(json.dumps({"semantic_matches": [{"category": "role", "value": r}]}))
+                if role_clauses:
+                    clauses.append(f"({' OR '.join(role_clauses)})")
+            
+            if filters.get("exclude_role"): 
+                ex_roles = as_list(filters["exclude_role"])
+                ex_clauses = []
+                for r in ex_roles:
+                    ex_clauses.append(f"{col_meta} @> %s::jsonb")
+                    params.append(json.dumps({"semantic_matches": [{"category": "role", "value": r}]}))
+                if ex_clauses:
+                    clauses.append(f"NOT ({' OR '.join(ex_clauses)})")
+
+        # 4. Category
+        col_cat = col_map.get('cat')
+        if col_cat:
+            if filters.get("category"):
+                cats = as_list(filters["category"])
+                clauses.append(f"{col_cat} = ANY(%s)")
+                params.append(cats)
+            
+            if filters.get("exclude_category"):
+                ex_cats = as_list(filters["exclude_category"])
+                clauses.append(f"{col_cat} != ALL(%s)")
+                params.append(ex_cats)
+
+        if not clauses: return "", []
+        return " AND " + " AND ".join(clauses), params
+
+    def search_vectors(self, query_vector: List[float], limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        if not snapshot_id: raise ValueError("snapshot_id mandatory.")
+        
+        sql = """
+            SELECT ne.chunk_id, ne.file_path, ne.start_line, ne.end_line, ne.snapshot_id, n.metadata, c.content, ne.language, 
+                   (ne.embedding <=> %s::vector) as distance
+            FROM node_embeddings ne 
+            JOIN nodes n ON ne.chunk_id = n.id 
+            JOIN contents c ON n.chunk_hash = c.chunk_hash
+            WHERE ne.snapshot_id = %s
+        """
+        params = [query_vector, snapshot_id]
+        
+        # Mappa per node_embeddings
+        col_map = {
+            'path': 'ne.file_path',
+            'lang': 'ne.language',
+            'cat':  'ne.category',
+            'meta': 'n.metadata'
+        }
+        
+        filter_sql, filter_params = self._build_filter_clause(filters, col_map)
+        sql += filter_sql
+        params.extend(filter_params)
+        
+        sql += " ORDER BY distance ASC LIMIT %s"
+        params.append(limit)
+
+        with self.pool.connection() as conn:
+            results = []
+            for row in conn.execute(sql, params).fetchall():
+                results.append({
+                    "id": str(row['chunk_id']), "file_path": row['file_path'], 
+                    "start_line": row['start_line'], "end_line": row['end_line'],
+                    "snapshot_id": str(row['snapshot_id']), "metadata": row['metadata'], 
+                    "content": row['content'], "language": row['language'], "score": 1 - row['distance']
+                })
+            return results
+
+    def search_fts(self, query: str, limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        if not snapshot_id: raise ValueError("snapshot_id mandatory.")
+        
+        sql = """
+            SELECT fts.node_id, fts.file_path, n.start_line, n.end_line, fts.content, f.snapshot_id, n.metadata, f.language,
+                   ts_rank(fts.search_vector, websearch_to_tsquery('english', %s)) as rank
+            FROM nodes_fts fts 
+            JOIN nodes n ON fts.node_id = n.id 
+            JOIN files f ON n.file_id = f.id
+            WHERE fts.search_vector @@ websearch_to_tsquery('english', %s) 
+            AND f.snapshot_id = %s
+        """
+        params = [query, query, snapshot_id]
+        
+        # Mappa per FTS (via files)
+        col_map = {
+            'path': 'f.path', # o fts.file_path
+            'lang': 'f.language',
+            'cat':  'f.category',
+            'meta': 'n.metadata'
+        }
+        
+        filter_sql, filter_params = self._build_filter_clause(filters, col_map)
+        sql += filter_sql
+        params.extend(filter_params)
+        
+        sql += " ORDER BY rank DESC LIMIT %s"
+        params.append(limit)
+
+        try:
+            with self.pool.connection() as conn:
+                results = []
+                for row in conn.execute(sql, params).fetchall():
+                    results.append({
+                        "id": str(row['node_id']), "file_path": row['file_path'], 
+                        "start_line": row['start_line'], "end_line": row['end_line'],
+                        "score": row['rank'], "content": row['content'], 
+                        "snapshot_id": str(row['snapshot_id']), "metadata": row['metadata'], "language": row['language']
+                    })
+                return results
+        except Exception as e:
+            logger.error(f"Postgres FTS Error: {e}")
+            return []
+
+    # ==========================================
+    # 4. UTILS & NAVIGATION
     # ==========================================
 
     def find_chunk_id(self, file_path: str, byte_range: List[int], snapshot_id: str) -> Optional[str]:
@@ -219,75 +414,71 @@ class PostgresGraphStorage(GraphStorage):
             row = conn.execute(sql, (file_path, snapshot_id, byte_range[0], byte_range[1])).fetchone()
             return str(row['id']) if row else None
 
-    def search_vectors(self, query_vector: List[float], limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        if not snapshot_id: raise ValueError("snapshot_id is mandatory.")
-        sql = """
-            SELECT ne.chunk_id, ne.file_path, ne.start_line, ne.end_line, ne.snapshot_id, n.metadata, c.content, ne.language, (ne.embedding <=> %s::vector) as distance
-            FROM node_embeddings ne JOIN nodes n ON ne.chunk_id = n.id JOIN contents c ON n.chunk_hash = c.chunk_hash
-            WHERE ne.snapshot_id = %s
-        """
-        params = [query_vector, snapshot_id]
-        filter_sql, filter_params = self._build_filter_clause(filters)
-        sql += filter_sql + " ORDER BY distance ASC LIMIT %s"
-        params.extend(filter_params)
-        params.append(limit)
-
+    def get_incoming_references(self, target_node_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         with self.pool.connection() as conn:
-            results = []
-            for row in conn.execute(sql, params).fetchall():
-                results.append({
-                    "id": str(row['chunk_id']), "file_path": row['file_path'], "start_line": row['start_line'], "end_line": row['end_line'],
-                    "snapshot_id": str(row['snapshot_id']), "metadata": row['metadata'], "content": row['content'], "language": row['language'], "score": 1 - row['distance']
-                })
-            return results
+            res = []
+            for r in conn.execute("SELECT s.id, s.file_path, s.start_line, e.relation_type, e.metadata FROM edges e JOIN nodes s ON e.source_id=s.id WHERE e.target_id=%s AND e.relation_type IN ('calls', 'references', 'imports', 'instantiates') ORDER BY s.file_path, s.start_line LIMIT %s", (target_node_id, limit)).fetchall():
+                res.append({"source_id": str(r['id']), "file": r['file_path'], "line": r['start_line'], "relation": r['relation_type'], "context_snippet": r['metadata'].get("description", "")})
+            return res
 
-    def search_fts(self, query: str, limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
-        if not snapshot_id: raise ValueError("snapshot_id is mandatory.")
-        sql = """
-            SELECT fts.node_id, fts.file_path, n.start_line, n.end_line, fts.content, f.snapshot_id, n.metadata, f.language, ts_rank(fts.search_vector, websearch_to_tsquery('english', %s)) as rank
-            FROM nodes_fts fts JOIN nodes n ON fts.node_id = n.id JOIN files f ON n.file_id = f.id
-            WHERE fts.search_vector @@ websearch_to_tsquery('english', %s) AND f.snapshot_id = %s
-        """
-        params = [query, query, snapshot_id]
-        filter_sql, filter_params = self._build_filter_clause(filters)
-        sql += filter_sql + " ORDER BY rank DESC LIMIT %s"
-        params.extend(filter_params)
-        params.append(limit)
-
-        try:
-            with self.pool.connection() as conn:
-                results = []
-                for row in conn.execute(sql, params).fetchall():
-                    results.append({
-                        "id": str(row['node_id']), "file_path": row['file_path'], "start_line": row['start_line'], "end_line": row['end_line'],
-                        "score": row['rank'], "content": row['content'], "snapshot_id": str(row['snapshot_id']), "metadata": row['metadata'], "language": row['language']
-                    })
-                return results
-        except Exception as e:
-            logger.error(f"Postgres FTS Error: {e}")
-            return []
-
-    def _build_filter_clause(self, filters: Dict[str, Any]) -> Tuple[str, List[Any]]:
-        if not filters: return "", []
-        return "", []
-
-    # ==========================================
-    # 4. UTILS, BATCHING & NAVIGATION
-    # ==========================================
-
-    def get_incoming_definitions_bulk(self, node_ids: List[str]) -> Dict[str, List[str]]:
-        if not node_ids: return {}
-        res = {}
+    def get_outgoing_calls(self, source_node_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         with self.pool.connection() as conn:
-            for i in range(0, len(node_ids), 500):
-                batch = node_ids[i:i+500]
-                for r in conn.execute("SELECT target_id, metadata FROM edges WHERE target_id = ANY(%s) AND relation_type='calls'", (batch,)).fetchall():
-                    sym = r['metadata'].get("symbol")
-                    if sym:
-                        tid = str(r['target_id'])
-                        if tid not in res: res[tid] = set()
-                        res[tid].add(sym)
-        return {k: list(v) for k, v in res.items()}
+            res = []
+            for r in conn.execute("SELECT t.id, t.file_path, t.start_line, e.relation_type, e.metadata FROM edges e JOIN nodes t ON e.target_id=t.id WHERE e.source_id=%s AND e.relation_type IN ('calls', 'instantiates', 'imports') ORDER BY t.file_path, t.start_line LIMIT %s", (source_node_id, limit)).fetchall():
+                res.append({"target_id": str(r['id']), "file": r['file_path'], "line": r['start_line'], "relation": r['relation_type'], "symbol": r['metadata'].get("symbol", "")})
+            return res
+
+    def get_context_neighbors(self, node_id: str):
+        res = {"parents": [], "calls": []}
+        with self.pool.connection() as conn:
+            for r in conn.execute("SELECT t.id, t.file_path, t.start_line, e.metadata, t.metadata FROM edges e JOIN nodes t ON e.target_id=t.id WHERE e.source_id=%s AND e.relation_type='child_of'", (node_id,)).fetchall():
+                res["parents"].append({"id": str(r['id']), "file_path": r['file_path'], "start_line": r['start_line'], "edge_meta": r['metadata'], "metadata": r['metadata']})
+            for r in conn.execute("SELECT t.id, t.file_path, e.metadata FROM edges e JOIN nodes t ON e.target_id=t.id WHERE e.source_id=%s AND e.relation_type IN ('calls','references') LIMIT 15", (node_id,)).fetchall():
+                res["calls"].append({"id": str(r['id']), "symbol": r['metadata'].get("symbol", "unknown")})
+        return res
+
+    def get_neighbor_chunk(self, node_id: str, direction: str = "next") -> Optional[Dict[str, Any]]:
+        with self.pool.connection() as conn:
+            curr = conn.execute("SELECT file_id, start_line, end_line FROM nodes WHERE id=%s", (node_id,)).fetchone()
+            if not curr: return None
+            fid, s, e = curr['file_id'], curr['start_line'], curr['end_line']
+            
+            if direction == "next":
+                sql = "SELECT n.id, n.start_line, n.end_line, n.chunk_hash, c.content, n.metadata, n.file_path FROM nodes n JOIN contents c ON n.chunk_hash=c.chunk_hash WHERE n.file_id=%s AND n.start_line >= %s AND n.id!=%s ORDER BY n.start_line ASC LIMIT 1"
+                p = (fid, e, node_id)
+            else:
+                sql = "SELECT n.id, n.start_line, n.end_line, n.chunk_hash, c.content, n.metadata, n.file_path FROM nodes n JOIN contents c ON n.chunk_hash=c.chunk_hash WHERE n.file_id=%s AND n.end_line <= %s AND n.id!=%s ORDER BY n.end_line DESC LIMIT 1"
+                p = (fid, s, node_id)
+                
+            row = conn.execute(sql, p).fetchone()
+            if row: return {"id": str(row['id']), "start_line": row['start_line'], "end_line": row['end_line'], "chunk_hash": row['chunk_hash'], "content": row['content'], "metadata": row['metadata'], "file_path": row['file_path']}
+            return None
+
+    def get_neighbor_metadata(self, node_id: str) -> Dict[str, Any]:
+        info = {"next": None, "prev": None, "parent": None}
+        with self.pool.connection() as conn:
+            curr = conn.execute("SELECT file_id, start_line, end_line FROM nodes WHERE id=%s", (node_id,)).fetchone()
+            if not curr: return info
+            fid, s, e = curr['file_id'], curr['start_line'], curr['end_line']
+            rn = conn.execute("SELECT id, metadata FROM nodes WHERE file_id=%s AND start_line >= %s AND id!=%s ORDER BY start_line ASC LIMIT 1", (fid, e, node_id)).fetchone()
+            if rn: info["next"] = self._format_nav_node(rn)
+            rp = conn.execute("SELECT id, metadata FROM nodes WHERE file_id=%s AND end_line <= %s AND id!=%s ORDER BY end_line DESC LIMIT 1", (fid, s, node_id)).fetchone()
+            if rp: info["prev"] = self._format_nav_node(rp)
+            rpar = conn.execute("SELECT t.id, t.metadata FROM edges e JOIN nodes t ON e.target_id=t.id WHERE e.source_id=%s AND e.relation_type='child_of' LIMIT 1", (node_id,)).fetchone()
+            if rpar: info["parent"] = self._format_nav_node(rpar)
+        return info
+
+    def _format_nav_node(self, row):
+        meta = row['metadata']
+        if isinstance(meta, str): meta = json.loads(meta)
+        matches = meta.get('semantic_matches', [])
+        label = "Code Block"
+        for m in matches:
+            if m.get('category') == 'role':
+                label = m.get('label') or m.get('value'); break 
+            if m.get('category') == 'type':
+                label = m.get('label') or m.get('value')
+        return {"id": str(row['id']), "label": label}
 
     def get_nodes_to_embed(self, snapshot_id: str, model_name: str, batch_size: int = 2000):
         sql = """
@@ -319,15 +510,20 @@ class PostgresGraphStorage(GraphStorage):
                 if r['embedding'] is not None: res[r['vector_hash']] = r['embedding']
         return res
 
-    def get_context_neighbors(self, node_id: str):
-        res = {"parents": [], "calls": []}
+    def get_incoming_definitions_bulk(self, node_ids: List[str]) -> Dict[str, List[str]]:
+        if not node_ids: return {}
+        res = {}
         with self.pool.connection() as conn:
-            for r in conn.execute("SELECT t.id, t.file_path, t.start_line, e.metadata, t.metadata FROM edges e JOIN nodes t ON e.target_id=t.id WHERE e.source_id=%s AND e.relation_type='child_of'", (node_id,)).fetchall():
-                res["parents"].append({"id": str(r['id']), "file_path": r['file_path'], "start_line": r['start_line'], "edge_meta": r['metadata'], "metadata": r['metadata']})
-            for r in conn.execute("SELECT t.id, t.file_path, e.metadata FROM edges e JOIN nodes t ON e.target_id=t.id WHERE e.source_id=%s AND e.relation_type IN ('calls','references') LIMIT 15", (node_id,)).fetchall():
-                res["calls"].append({"id": str(r['id']), "symbol": r['metadata'].get("symbol", "unknown")})
-        return res
-    
+            for i in range(0, len(node_ids), 500):
+                batch = node_ids[i:i+500]
+                for r in conn.execute("SELECT target_id, metadata FROM edges WHERE target_id = ANY(%s) AND relation_type='calls'", (batch,)).fetchall():
+                    sym = r['metadata'].get("symbol")
+                    if sym:
+                        tid = str(r['target_id'])
+                        if tid not in res: res[tid] = set()
+                        res[tid].add(sym)
+        return {k: list(v) for k, v in res.items()}
+
     def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]:
         if not chunk_hashes: return {}
         res = {}
@@ -338,62 +534,35 @@ class PostgresGraphStorage(GraphStorage):
                     res[r['chunk_hash']] = r['content']
         return res
 
-    def get_neighbor_metadata(self, node_id: str) -> Dict[str, Any]:
-        info = {"next": None, "prev": None, "parent": None}
+    def list_file_paths(self, snapshot_id: str) -> List[str]:
+        sql = "SELECT path FROM files WHERE snapshot_id = %s ORDER BY path"
         with self.pool.connection() as conn:
-            curr = conn.execute("SELECT file_id, start_line, end_line FROM nodes WHERE id=%s", (node_id,)).fetchone()
-            if not curr: return info
-            fid, s, e = curr['file_id'], curr['start_line'], curr['end_line']
-            rn = conn.execute("SELECT id, metadata FROM nodes WHERE file_id=%s AND start_line >= %s AND id!=%s ORDER BY start_line ASC LIMIT 1", (fid, e, node_id)).fetchone()
-            if rn: info["next"] = self._format_nav_node(rn)
-            rp = conn.execute("SELECT id, metadata FROM nodes WHERE file_id=%s AND end_line <= %s AND id!=%s ORDER BY end_line DESC LIMIT 1", (fid, s, node_id)).fetchone()
-            if rp: info["prev"] = self._format_nav_node(rp)
-            rpar = conn.execute("SELECT t.id, t.metadata FROM edges e JOIN nodes t ON e.target_id=t.id WHERE e.source_id=%s AND e.relation_type='child_of' LIMIT 1", (node_id,)).fetchone()
-            if rpar: info["parent"] = self._format_nav_node(rpar)
-        return info
+            return [r['path'] for r in conn.execute(sql, (snapshot_id,)).fetchall()]
 
-    def get_neighbor_chunk(self, node_id: str, direction: str = "next") -> Optional[Dict[str, Any]]:
+    def get_file_content_range(self, snapshot_id: str, file_path: str, start_line: int = None, end_line: int = None) -> Optional[str]:
+        sl = start_line if start_line is not None else 0
+        el = end_line if end_line is not None else 999999
+        sql = """
+            SELECT c.content, n.start_line
+            FROM nodes n JOIN files f ON n.file_id = f.id JOIN contents c ON n.chunk_hash = c.chunk_hash
+            WHERE f.snapshot_id = %s AND f.path = %s AND n.end_line >= %s AND n.start_line <= %s
+            ORDER BY n.byte_start ASC
+        """
         with self.pool.connection() as conn:
-            curr = conn.execute("SELECT file_id, start_line, end_line FROM nodes WHERE id=%s", (node_id,)).fetchone()
-            if not curr: return None
-            fid, s, e = curr['file_id'], curr['start_line'], curr['end_line']
-            
-            if direction == "next":
-                sql = "SELECT n.id, n.start_line, n.end_line, n.chunk_hash, c.content, n.metadata, n.file_path FROM nodes n JOIN contents c ON n.chunk_hash=c.chunk_hash WHERE n.file_id=%s AND n.start_line >= %s AND n.id!=%s ORDER BY n.start_line ASC LIMIT 1"
-                p = (fid, e, node_id)
-            else:
-                sql = "SELECT n.id, n.start_line, n.end_line, n.chunk_hash, c.content, n.metadata, n.file_path FROM nodes n JOIN contents c ON n.chunk_hash=c.chunk_hash WHERE n.file_id=%s AND n.end_line <= %s AND n.id!=%s ORDER BY n.end_line DESC LIMIT 1"
-                p = (fid, s, node_id)
-                
-            row = conn.execute(sql, p).fetchone()
-            if row: return {"id": str(row['id']), "start_line": row['start_line'], "end_line": row['end_line'], "chunk_hash": row['chunk_hash'], "content": row['content'], "metadata": row['metadata'], "file_path": row['file_path']}
-            return None
+            rows = conn.execute(sql, (snapshot_id, file_path, sl, el)).fetchall()
+        if not rows:
+            with self.pool.connection() as conn:
+                exists = conn.execute("SELECT 1 FROM files WHERE snapshot_id=%s AND path=%s", (snapshot_id, file_path)).fetchone()
+            if exists: return "" 
+            return None 
+        full_blob = "".join([r['content'] for r in rows])
+        first_chunk_start = rows[0]['start_line']
+        lines = full_blob.splitlines(keepends=True)
+        rel_start = max(0, sl - first_chunk_start) if start_line else 0
+        if end_line: rel_end = min(len(lines), el - first_chunk_start + 1)
+        else: rel_end = len(lines)
+        return "".join(lines[rel_start:rel_end])
 
-    def get_incoming_references(self, target_node_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-        with self.pool.connection() as conn:
-            res = []
-            for r in conn.execute("SELECT s.id, s.file_path, s.start_line, e.relation_type, e.metadata FROM edges e JOIN nodes s ON e.source_id=s.id WHERE e.target_id=%s AND e.relation_type IN ('calls', 'references', 'imports', 'instantiates') ORDER BY s.file_path, s.start_line LIMIT %s", (target_node_id, limit)).fetchall():
-                res.append({"source_id": str(r['id']), "file": r['file_path'], "line": r['start_line'], "relation": r['relation_type'], "context_snippet": r['metadata'].get("description", "")})
-            return res
-
-    def get_outgoing_calls(self, source_node_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-        with self.pool.connection() as conn:
-            res = []
-            for r in conn.execute("SELECT t.id, t.file_path, t.start_line, e.relation_type, e.metadata FROM edges e JOIN nodes t ON e.target_id=t.id WHERE e.source_id=%s AND e.relation_type IN ('calls', 'instantiates', 'imports') ORDER BY t.file_path, t.start_line LIMIT %s", (source_node_id, limit)).fetchall():
-                res.append({"target_id": str(r['id']), "file": r['file_path'], "line": r['start_line'], "relation": r['relation_type'], "symbol": r['metadata'].get("symbol", "")})
-            return res
-
-    def _format_nav_node(self, row):
-        meta = row['metadata']
-        matches = meta.get('semantic_matches', [])
-        label = "Code Block"
-        for m in matches:
-            if m.get('category') == 'role':
-                label = m.get('label') or m.get('value'); break 
-            if m.get('category') == 'type':
-                label = m.get('label') or m.get('value')
-        return {"id": str(row['id']), "label": label}
-        
     def get_stats(self):
         with self.pool.connection() as conn:
             return {

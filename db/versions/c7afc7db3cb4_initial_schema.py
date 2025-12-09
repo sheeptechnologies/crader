@@ -54,10 +54,12 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
         sa.Column('completed_at', sa.DateTime(), nullable=True),
         sa.Column('stats', postgresql.JSONB(astext_type=sa.Text()), server_default='{}', nullable=True),
+        sa.Column('file_manifest', postgresql.JSONB(astext_type=sa.Text()), server_default='{}', nullable=True),
+        
         sa.PrimaryKeyConstraint('id'),
         sa.ForeignKeyConstraint(['repository_id'], ['repositories.id'], ondelete='CASCADE'),
         # Garantisce Idempotenza: Non possono esistere due snapshot per lo stesso commit
-        sa.UniqueConstraint('repository_id', 'commit_hash', name='uq_snapshot_repo_commit')
+        # sa.UniqueConstraint('repository_id', 'commit_hash', name='uq_snapshot_repo_commit') #rimosso per dinamiche di reindex force=True
     )
 
     # Ora possiamo aggiungere la FK circolare su repositories

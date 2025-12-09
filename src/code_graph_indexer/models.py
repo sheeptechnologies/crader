@@ -41,6 +41,8 @@ class Snapshot:
     
     # Metadati opzionali per statistiche (es. {"files_count": 50, "nodes_count": 2000})
     stats: Dict[str, Any] = field(default_factory=dict)
+
+    file_manifest: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

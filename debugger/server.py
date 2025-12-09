@@ -127,27 +127,14 @@ def add_repo(req: RepoRequest):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid git repo at {local_path}: {e}")
 
-    # PostgresGraphStorage.register_repository is a no-op, so we insert manually
-    import uuid
-    import datetime
-    
-    repo_id = str(uuid.uuid4())
+    # Use ensure_repository to register/get ID
     url = req.path_or_url if is_url else f"file://{local_path}"
-    now = datetime.datetime.utcnow()
+    repo_id = storage.ensure_repository(url, req.branch, repo_name)
     
-    # Check if exists first
-    existing = storage.get_repository_by_context(url, req.branch)
-    if existing:
-        repo_id = str(existing['id'])
-        # Update path if needed
-        with storage.pool.connection() as conn:
-            conn.execute("UPDATE repositories SET local_path = %s WHERE id = %s", (local_path, repo_id))
-    else:
-        with storage.pool.connection() as conn:
-            conn.execute("""
-                INSERT INTO repositories (id, url, branch, name, last_commit, status, updated_at, local_path)
-                VALUES (%s, %s, %s, %s, %s, 'registered', %s, %s)
-            """, (repo_id, url, req.branch, repo_name, commit_hash, now, local_path))
+    # Update local_path manually as ensure_repository doesn't take it
+    # We can do this via direct SQL since we are in the debugger
+    with storage.pool.connection() as conn:
+        conn.execute("UPDATE repositories SET local_path = %s, last_commit = %s WHERE id = %s", (local_path, commit_hash, repo_id))
     
     return {"id": repo_id, "status": "registered", "local_path": local_path}
 
@@ -191,13 +178,14 @@ def index_repo(repo_id: str, req: IndexRequest, background_tasks: BackgroundTask
     def _run_index():
         try:
             indexer = CodebaseIndexer(local_path, storage)
-            indexer.index(force=req.force)
-            storage.update_repository_status(repo_id, "indexed")
+            snapshot_id = indexer.index(force=req.force)
+            logger.info(f"Indexing completed. Snapshot ID: {snapshot_id}")
+            # We don't need to update status manually as indexer handles activation
         except Exception as e:
             logger.error(f"Indexing failed: {e}")
-            storage.update_repository_status(repo_id, "failed")
+            # storage.update_repository_status(repo_id, "failed") # Optional, indexer might have marked snapshot as failed
 
-    storage.update_repository_status(repo_id, "queued")
+    # storage.update_repository_status(repo_id, "queued") # Legacy
     background_tasks.add_task(_run_index)
     return {"status": "indexing_started"}
 
@@ -229,98 +217,95 @@ def embed_repo(repo_id: str, req: EmbedRequest, background_tasks: BackgroundTask
             indexer = CodebaseIndexer(local_path, storage)
             # Consume generator
             count = 0
+            # Resolve active snapshot automatically inside embed if not passed
             for item in indexer.embed(provider, batch_size=req.batch_size, debug=True):
                 count += 1
                 if count % 10 == 0:
                     logger.info(f"🤖 Embedding progress: {count} items processed...")
             
             logger.info(f"✅ Embedding finished. Total items: {count}")
-            storage.update_repository_status(repo_id, "embedded")
+            # storage.update_repository_status(repo_id, "embedded")
         except Exception as e:
             logger.error(f"Embedding failed: {e}")
-            storage.update_repository_status(repo_id, "embedding_failed")
+            # storage.update_repository_status(repo_id, "embedding_failed")
 
-    storage.update_repository_status(repo_id, "embedding")
+    # storage.update_repository_status(repo_id, "embedding")
     background_tasks.add_task(_run_embed)
     return {"status": "embedding_started"}
 
 @app.get("/api/repos/{repo_id}/files")
 def get_file_tree(repo_id: str):
     storage = get_storage()
-    # Get all files for this repo
-    # Get all files for this repo
-    with storage.pool.connection() as conn:
-        files = conn.execute("SELECT path, category, language, parsing_status FROM files WHERE repo_id = %s", (repo_id,)).fetchall()
     
-    # Build tree
-    tree = []
-    for row in files:
-        path = row['path']
-        cat = row['category']
-        lang = row['language']
-        parts = path.split('/')
-        current_level = tree
-        for i, part in enumerate(parts):
-            # Check if existing
-            found = next((item for item in current_level if item["name"] == part), None)
-            if not found:
-                is_file = (i == len(parts) - 1)
-                new_node = {
-                    "name": part,
-                    "path": "/".join(parts[:i+1]),
-                    "type": "file" if is_file else "directory",
-                    "children": [] if not is_file else None,
-                    "category": cat if is_file else None,
-                    "language": lang if is_file else None,
-                    "status": row['parsing_status'] if is_file else None
-                }
-                current_level.append(new_node)
-                current_level = new_node["children"]
-            else:
-                if found["type"] == "directory":
-                    current_level = found["children"]
+    # Get active snapshot
+    snapshot_id = storage.get_active_snapshot_id(repo_id)
+    if not snapshot_id:
+        return [] # Or raise error
+        
+    # Use manifest
+    manifest = storage.get_snapshot_manifest(snapshot_id)
     
-    return tree
+    # Convert manifest (nested dict) to list of nodes for the frontend tree component
+    # Frontend expects: [{name, path, type, children: [...]}, ...]
+    
+    def convert_manifest(node_name, node_data, parent_path=""):
+        current_path = f"{parent_path}/{node_name}" if parent_path else node_name
+        
+        children = []
+        if node_data.get("children"):
+            for child_name, child_data in node_data["children"].items():
+                children.append(convert_manifest(child_name, child_data, current_path))
+        
+        # Sort children: directories first, then files
+        children.sort(key=lambda x: (x["type"] != "directory", x["name"]))
+
+        return {
+            "name": node_name,
+            "path": current_path,
+            "type": "directory" if node_data["type"] == "dir" else "file",
+            "children": children if node_data["type"] == "dir" else None,
+            # Manifest might not have category/language/status, but that's fine for now
+            "category": None,
+            "language": None,
+            "status": "success"
+        }
+
+    # Manifest root is a dict {"type": "dir", "children": {...}} representing the root
+    # We want to return the list of children of the root
+    root_children = []
+    if manifest and manifest.get("children"):
+        for name, data in manifest["children"].items():
+             root_children.append(convert_manifest(name, data, ""))
+             
+    root_children.sort(key=lambda x: (x["type"] != "directory", x["name"]))
+    return root_children
 
 @app.get("/api/repos/{repo_id}/file_content")
 def get_file_content(repo_id: str, path: str):
     storage = get_storage()
     
-    # Get file content (read from disk for simplicity, or from DB if we stored it? 
-    # The library stores chunks, but maybe not full file content in 'files' table.
-    # Let's check 'files' table schema... it doesn't have content.
-    # So we must read from disk.
-    repo = storage.get_repository(repo_id)
-    if not repo:
-        raise HTTPException(status_code=404, detail="Repo not found")
-    
-    full_path = os.path.join(repo['local_path'], path)
-    if not os.path.exists(full_path):
-        raise HTTPException(status_code=404, detail="File not found on disk")
-        
-    with open(full_path, 'r', errors='ignore') as f:
-        content = f.read()
-        
-    # Get chunks for this file
+    snapshot_id = storage.get_active_snapshot_id(repo_id)
+    if not snapshot_id:
+        raise HTTPException(status_code=404, detail="No active snapshot for this repo")
+
+    # Use get_file_content_range to fetch full content from DB
+    content = storage.get_file_content_range(snapshot_id, path)
+    if content is None:
+         raise HTTPException(status_code=404, detail="File not found in snapshot")
+         
     # Get chunks for this file
     with storage.pool.connection() as conn:
-        # Join with files to filter by path and repo
+        # Join with files to filter by path and snapshot
         rows = conn.execute("""
             SELECT n.id, n.start_line, n.end_line, n.byte_start, n.byte_end, n.metadata, n.chunk_hash
             FROM nodes n
             JOIN files f ON n.file_id = f.id
-            WHERE f.repo_id = %s AND f.path = %s
-        """, (repo_id, path)).fetchall()
+            WHERE f.snapshot_id = %s AND f.path = %s
+        """, (snapshot_id, path)).fetchall()
     
     chunks = []
     for row in rows:
         d = dict(row)
-        # metadata is already a dict in Postgres (JSONB)
-        # But wait, in PostgresGraphStorage schema: metadata JSONB
-        # psycopg returns it as dict automatically if configured?
-        # Let's check PostgresGraphStorage._pool_kwargs: "row_factory": dict_row.
-        # But JSONB columns are returned as dicts by psycopg 3 by default?
-        # Let's assume it is. If it's a string, we load it.
         if isinstance(d.get("metadata"), str):
             import json
             try:

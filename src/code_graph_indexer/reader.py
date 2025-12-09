@@ -1,5 +1,5 @@
-import os
 import logging
+import os
 from typing import List, Dict, Optional, Any
 from .storage.base import GraphStorage
 
@@ -7,128 +7,95 @@ logger = logging.getLogger(__name__)
 
 class CodeReader:
     """
-    Facade per l'accesso diretto al filesystem della repository.
-    Restituisce dati strutturati (Dict/List) per consumo programmatico.
+    Virtual Filesystem Reader (Manifest-Based).
+    O(1) listing, Lazy Loading reading.
     """
     
     def __init__(self, storage: GraphStorage):
         self.storage = storage
+        # Cache locale del manifest per sessione (opzionale, ma utile se l'oggetto Reader vive a lungo)
+        self._manifest_cache = {}
 
-    def _resolve_physical_path(self, repo_id: str, relative_path: str = "") -> str:
+    def _get_manifest(self, snapshot_id: str) -> Dict:
+        if snapshot_id not in self._manifest_cache:
+            self._manifest_cache[snapshot_id] = self.storage.get_snapshot_manifest(snapshot_id)
+        return self._manifest_cache[snapshot_id]
+
+    def read_file(self, snapshot_id: str, file_path: str, start_line: int = None, end_line: int = None) -> Dict[str, Any]:
         """
-        Risolve il path fisico sicuro partendo dal repo_id.
-        Lancia eccezione se il repo non esiste o se si tenta path traversal.
+        Smart Read: Scarica solo i chunk necessari dal DB.
         """
-        repo_record = self.storage.get_repository(repo_id)
-        if not repo_record or not repo_record.get('local_path'):
-            raise ValueError(f"Repository {repo_id} non trovata o path fisico non disponibile.")
-            
-        repo_root = os.path.abspath(repo_record['local_path'])
-        clean_rel_path = relative_path.lstrip(os.sep)
-        target_path = os.path.abspath(os.path.join(repo_root, clean_rel_path))
+        # Nota: Qui potremmo anche validare l'esistenza del file guardando il manifest prima di chiamare il DB
+        content = self.storage.get_file_content_range(snapshot_id, file_path, start_line, end_line)
         
-        if not target_path.startswith(repo_root):
-            raise PermissionError(f"Accesso negato: {relative_path} è fuori dalla repository.")
-            
-        return target_path, repo_root
+        if content is None:
+            raise FileNotFoundError(f"File '{file_path}' non trovato nello snapshot {snapshot_id[:8]}")
 
-    def read_file(self, repo_id: str, file_path: str, start_line: int = None, end_line: int = None) -> Dict[str, Any]:
+        return {
+            "file_path": file_path,
+            "content": content,
+            "start_line": start_line or 1,
+            "end_line": end_line or "EOF"
+        }
+
+    def list_directory(self, snapshot_id: str, path: str = "") -> List[Dict[str, Any]]:
         """
-        Legge il contenuto di un file fisico.
-        Returns:
-            Dict con keys: 'file_path', 'content', 'start_line', 'end_line', 'size_bytes'.
+        O(1) Listing usando il Manifest JSON pre-calcolato.
         """
-        target_path, _ = self._resolve_physical_path(repo_id, file_path)
+        manifest = self._get_manifest(snapshot_id)
         
-        if not os.path.isfile(target_path):
-            raise FileNotFoundError(f"File non trovato: {file_path}")
-
-        file_size = os.path.getsize(target_path)
-        if file_size > 10 * 1024 * 1024: 
-            raise ValueError(f"File troppo grande ({file_size} bytes).")
-
+        # Navigazione nell'albero JSON
+        current = manifest
+        # Rimuoviamo slash iniziali/finali
+        target_parts = [p for p in path.split('/') if p]
+        
         try:
-            with open(target_path, 'r', encoding='utf-8', errors='replace') as f:
-                content = ""
-                actual_start = 0
-                actual_end = 0
-                
-                if start_line is not None or end_line is not None:
-                    lines = f.readlines()
-                    actual_start = max(0, start_line - 1) if start_line else 0
-                    actual_end = end_line if end_line else len(lines)
-                    
-                    if actual_start < len(lines):
-                        content = "".join(lines[actual_start:actual_end])
-                else:
-                    content = f.read()
-                    actual_end = content.count('\n') + 1
+            # Scendiamo nell'albero
+            for part in target_parts:
+                current = current["children"][part]
+                if current["type"] != "dir":
+                    raise NotADirectoryError(f"{path} non è una directory.")
+        except KeyError:
+            # Se un pezzo del path non esiste
+            return [] # O raise FileNotFoundError, ma [] è più sicuro per l'agente
 
-                return {
-                    "file_path": file_path,
-                    "content": content,
-                    "start_line": actual_start + 1,
-                    "end_line": actual_end,
-                    "size_bytes": len(content.encode('utf-8'))
-                }
-
-        except Exception as e:
-            logger.error(f"Read error {file_path}: {e}")
-            raise IOError(f"Errore lettura file: {str(e)}")
-        
-    def find_directories(self, repo_id: str, name_pattern: str, limit: int = 10) -> List[str]:
-        """
-        Cerca cartelle che contengono 'name_pattern' nel nome.
-        Utile quando l'agente non sa il path esatto (es. 'flask' è in 'src/flask'?).
-        """
-        _, repo_root = self._resolve_physical_path(repo_id, "")
-        
-        matches = []
-        term = name_pattern.lower()
-        
-        # Walk veloce
-        for root, dirs, _ in os.walk(repo_root):
-            # Rimuoviamo cartelle ignorate per velocità
-            dirs[:] = [d for d in dirs if d not in {'.git', '__pycache__', 'node_modules', 'venv', '.venv'}]
-            
-            for d in dirs:
-                if term in d.lower():
-                    rel_path = os.path.relpath(os.path.join(root, d), repo_root)
-                    matches.append(rel_path)
-                    if len(matches) >= limit:
-                        return matches
-        
-        return matches
-
-    def list_directory(self, repo_id: str, path: str = "") -> List[Dict[str, Any]]:
-        """
-        Elenca file e cartelle.
-        Returns:
-            List[Dict] con keys: 'name', 'type' ('file'|'dir'), 'path'.
-        """
-        target_path, repo_root = self._resolve_physical_path(repo_id, path)
-        
-        if not os.path.isdir(target_path):
-            raise NotADirectoryError(f"Non è una directory: {path}")
-
+        # Formattazione output (figli diretti)
         results = []
-        try:
-            with os.scandir(target_path) as it:
-                # Ordiniamo per tipo (dir prima) e poi nome
-                entries = sorted(list(it), key=lambda e: (not e.is_dir(), e.name.lower()))
-                
-                for entry in entries:
-                    if entry.name == ".git": continue
-                    
-                    entry_type = "dir" if entry.is_dir() else "file"
-                    rel_path = os.path.relpath(entry.path, repo_root)
-                    
-                    results.append({
-                        "name": entry.name,
-                        "type": entry_type,
-                        "path": rel_path
-                    })
-        except PermissionError:
-            raise PermissionError(f"Permesso negato per: {path}")
+        children = current.get("children", {})
+        
+        for name, meta in children.items():
+            results.append({
+                "name": name,
+                "type": meta["type"],
+                "path": f"{path}/{name}".strip("/")
+            })
+            
+        # Sort: Directory prima
+        return sorted(results, key=lambda x: (x['type'] != 'dir', x['name']))
 
-        return results
+    def find_directories(self, snapshot_id: str, name_pattern: str, limit: int = 10) -> List[str]:
+        """
+        Ricerca ricorsiva nel Manifest (In-Memory).
+        Molto più veloce che scaricare tutti i path e splittare stringhe.
+        """
+        manifest = self._get_manifest(snapshot_id)
+        found = []
+        pattern = name_pattern.lower()
+
+        def _recurse(node, current_path):
+            if len(found) >= limit: return
+
+            children = node.get("children", {})
+            for name, meta in children.items():
+                full_path = f"{current_path}/{name}".strip("/")
+                
+                # Se è una directory
+                if meta["type"] == "dir":
+                    # Check match
+                    if pattern in name.lower():
+                        found.append(full_path)
+                    # Continua a scendere
+                    _recurse(meta, full_path)
+
+        _recurse(manifest, "")
+        return sorted(found)
