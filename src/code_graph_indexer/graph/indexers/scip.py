@@ -6,31 +6,21 @@ import subprocess
 import tempfile
 import sqlite3
 import logging
+import concurrent.futures
 from functools import lru_cache
 from typing import List, Dict, Any, Set, Tuple, Optional, Generator
-from collections import defaultdict
 
 from ..base import BaseGraphIndexer, CodeRelation
 
 logger = logging.getLogger(__name__)
 
-# --- 1. SCIP CONSTANTS & UTILS ---
+# --- SCIP CONSTANTS & UTILS ---
 SCIP_ROLE_DEFINITION = 1
 SCIP_ROLE_REFERENCE = 8
 SCIP_ROLE_READ = 16
 SCIP_ROLE_WRITE = 32
 SCIP_ROLE_OVERRIDE = 64
 SCIP_ROLE_IMPLEMENTATION = 128
-
-def decode_scip_role(role_mask: int) -> str:
-    roles = []
-    if role_mask & SCIP_ROLE_DEFINITION: roles.append("definition")
-    if role_mask & SCIP_ROLE_OVERRIDE: roles.append("override")
-    if role_mask & SCIP_ROLE_IMPLEMENTATION: roles.append("implementation")
-    if role_mask & SCIP_ROLE_WRITE: roles.append("write")
-    if role_mask & SCIP_ROLE_READ: roles.append("read")
-    if not roles or (role_mask & SCIP_ROLE_REFERENCE): roles.append("reference")
-    return ",".join(roles)
 
 def get_relation_verb(role_mask: int) -> str:
     if role_mask & SCIP_ROLE_DEFINITION: return "defines"
@@ -40,7 +30,7 @@ def get_relation_verb(role_mask: int) -> str:
     if role_mask & SCIP_ROLE_READ: return "reads_from"
     return "calls"
 
-# --- 2. DISK SYMBOL TABLE ---
+# --- 2. DISK SYMBOL TABLE (Invariata) ---
 class DiskSymbolTable:
     def __init__(self):
         self.db_path = tempfile.NamedTemporaryFile(delete=False, suffix=".db").name
@@ -48,14 +38,7 @@ class DiskSymbolTable:
         self.cursor = self.conn.cursor()
         self.cursor.execute("PRAGMA synchronous = OFF")
         self.cursor.execute("PRAGMA journal_mode = MEMORY")
-        self.cursor.execute("PRAGMA cache_size = 10000")
-        self.cursor.execute("""
-            CREATE TABLE defs (
-                symbol TEXT, scope_file TEXT, file_path TEXT,
-                start_line INTEGER, start_char INTEGER, end_line INTEGER, end_char INTEGER,
-                PRIMARY KEY (symbol, scope_file)
-            )
-        """)
+        self.cursor.execute("CREATE TABLE defs (symbol TEXT, scope_file TEXT, file_path TEXT, start_line INTEGER, start_char INTEGER, end_line INTEGER, end_char INTEGER, PRIMARY KEY (symbol, scope_file))")
         self.buffer = []
 
     def add(self, symbol: str, file_path: str, scip_range: List[int], is_local: bool):
@@ -88,7 +71,7 @@ class DiskSymbolTable:
             try: os.remove(self.db_path)
             except OSError: pass
 
-# --- 3. SCIP RUNNER ---
+# --- 3. SCIP RUNNER (STREAMING) ---
 class SCIPRunner:
     PROJECT_MARKERS = {
         "pyproject.toml": "scip-python", "requirements.txt": "scip-python", "setup.py": "scip-python",
@@ -107,27 +90,70 @@ class SCIPRunner:
 
     def __init__(self, repo_path: str):
         self.repo_path = os.path.abspath(repo_path)
+        self._active_indices = []
 
-    def run_to_disk(self) -> Optional[str]:
+    def prepare_indices(self) -> List[Tuple[str, str]]:
         if not shutil.which(self.SCIP_CLI):
             logger.error(f"[SCIP] CLI '{self.SCIP_CLI}' non trovato.")
-            return None
-        
-        installed = self._find_installed_indexers()
-        if not installed: 
-            logger.error("[SCIP] Nessun indexer installato.")
-            return None
+            return []
         
         tasks = self._discover_tasks()
-        if not tasks: 
-            logger.warning("[SCIP] Nessun progetto rilevato.")
-            return None
+        if not tasks: return []
         
-        return self._execute_indexing_stream(tasks)
+        results = []
+        env = os.environ.copy()
+        env["PYTHONPATH"] = self.repo_path + os.pathsep + env.get("PYTHONPATH", "")
 
-    def _find_installed_indexers(self) -> Set[str]:
-        known = set(self.PROJECT_MARKERS.values()) | set(self.EXTENSION_MAP.values())
-        return {idx for idx in known if shutil.which(idx)}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(tasks), 4)) as executor:
+            future_to_task = {
+                executor.submit(self._run_single_index, t, env): t for t in tasks
+            }
+            for future in concurrent.futures.as_completed(future_to_task):
+                res = future.result()
+                if res:
+                    results.append(res)
+                    self._active_indices.append(res[1])
+        return results
+
+    def _run_single_index(self, task, env) -> Optional[Tuple[str, str]]:
+        indexer, project_root = task
+        tmp_idx = tempfile.NamedTemporaryFile(delete=False, suffix=".scip").name
+        try:
+            logger.info(f"[SCIP] Indexing {project_root} with {indexer}...")
+            subprocess.run(
+                [indexer, "index", ".", "--output", tmp_idx],
+                cwd=project_root, check=False, capture_output=True, env=env
+            )
+            if os.path.exists(tmp_idx) and os.path.getsize(tmp_idx) > 10:
+                return (project_root, tmp_idx)
+        except Exception as e:
+            logger.error(f"[SCIP] Error {indexer}: {e}")
+        return None
+
+    def stream_documents(self, indices: List[Tuple[str, str]]) -> Generator[Dict, None, None]:
+        for project_root, index_path in indices:
+            try:
+                proc = subprocess.Popen(
+                    [self.SCIP_CLI, "print", "--json", index_path],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+                )
+                for line in proc.stdout:
+                    if not line.strip(): continue
+                    try:
+                        payload = json.loads(line)
+                        docs = payload if isinstance(payload, list) else payload.get("documents", [payload])
+                        for doc in docs:
+                            yield {"project_root": project_root, "document": doc}
+                    except ValueError: pass
+                proc.wait()
+            except Exception as e:
+                logger.error(f"[SCIP] Stream error for {project_root}: {e}")
+
+    def cleanup(self):
+        for p in self._active_indices:
+            try: os.remove(p)
+            except: pass
+        self._active_indices = []
 
     def _discover_tasks(self) -> List[Tuple[str, str]]:
         tasks = []
@@ -139,7 +165,7 @@ class SCIPRunner:
                 if marker in files and shutil.which(indexer):
                     tasks.append((indexer, root))
                     found_roots.add(root)
-                    dirs[:] = []
+                    dirs[:] = [] 
                     break
         if not tasks:
             detected = set()
@@ -152,267 +178,131 @@ class SCIPRunner:
             for idx in detected: tasks.append((idx, self.repo_path))
         return tasks
 
-    def _execute_indexing_stream(self, tasks: List[Tuple[str, str]]) -> Optional[str]:
-        output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jsonl").name
-        env = os.environ.copy()
-        env["PYTHONPATH"] = self.repo_path + os.pathsep + env.get("PYTHONPATH", "")
+    def _find_installed_indexers(self): return {} 
 
-        try:
-            with open(output_file, 'w', encoding='utf-8') as f_out:
-                for indexer, project_root in tasks:
-                    # Usiamo suffix .scip per obbligare il CLI a riconoscerlo
-                    tmp_idx = tempfile.NamedTemporaryFile(delete=False, suffix=".scip").name
-                    try:
-                        logger.info(f"[SCIP] Esecuzione {indexer} in {project_root}")
-                        
-                        res = subprocess.run(
-                            [indexer, "index", ".", "--output", tmp_idx],
-                            cwd=project_root, check=False, capture_output=True, env=env
-                        )
-                        
-                        if res.returncode != 0:
-                            logger.error(f"[SCIP FAIL] {indexer} failed (code {res.returncode}):")
-                            logger.error(res.stderr.decode('utf-8', errors='replace'))
-                        
-                        if not os.path.exists(tmp_idx) or os.path.getsize(tmp_idx) < 10:
-                            logger.warning(f"[SCIP WARN] Indice vuoto o mancante per {project_root}")
-                            continue
-
-                        # Conversione a JSON
-                        proc = subprocess.Popen(
-                            [self.SCIP_CLI, "print", "--json", tmp_idx],
-                            stdout=subprocess.PIPE, text=True
-                        )
-                        
-                        count = 0
-                        for line in proc.stdout:
-                            if line.strip():
-                                try:
-                                    payload = json.loads(line)
-                                    docs = []
-                                    if isinstance(payload, list): docs = payload
-                                    elif "documents" in payload: docs = payload["documents"]
-                                    else: docs = [payload]
-                                    
-                                    for doc in docs:
-                                        wrapper = {"project_root": project_root, "document": doc}
-                                        f_out.write(json.dumps(wrapper) + "\n")
-                                        count += 1
-                                except json.JSONDecodeError: pass
-                        
-                        logger.info(f"[SCIP] Estratti {count} documenti da {project_root}")
-
-                    except Exception as e:
-                         logger.error(f"[SCIP] Errore durante processing {project_root}: {e}")
-                    finally:
-                        if os.path.exists(tmp_idx): os.remove(tmp_idx)
-            return output_file
-        except Exception as e:
-            logger.error(f"[SCIP] Errore critico runner: {e}")
-            if os.path.exists(output_file): os.remove(output_file)
-            return None
-
-# --- 4. INDEXER ---
+# --- 4. INDEXER (PIPELINED & FILTERED) ---
 class SCIPIndexer(BaseGraphIndexer):
     INDEXER_NAME = "scip"
 
     def __init__(self, repo_path: str):
         super().__init__(repo_path)
         self.repo_path = os.path.abspath(repo_path)
+        self.runner = SCIPRunner(repo_path)
 
     def extract_relations(self, chunk_map: Dict) -> List[CodeRelation]:
         return list(self.stream_relations())
 
-    def stream_relations(self, exclude_definitions=True, exclude_externals=True):
-        runner = SCIPRunner(self.repo_path)
-        json_path = runner.run_to_disk()
-        if json_path:
-            yield from self.stream_relations_from_file(json_path, exclude_definitions, exclude_externals)
-            try: os.remove(json_path)
-            except OSError: pass
+    def stream_relations(self, exclude_definitions: bool = True, exclude_externals: bool = True) -> Generator[CodeRelation, None, None]:
+        """
+        Generatore principale con filtraggio.
+        """
+        indices = self.runner.prepare_indices()
+        if not indices: return
 
-    def stream_relations_from_file(self, json_path: str, exclude_definitions: bool = True, exclude_externals: bool = True) -> Generator[CodeRelation, None, None]:
         symbol_table = DiskSymbolTable()
         try:
-            # FASE 1: Popolamento definizioni (Invariata)
-            with open(json_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if not line.strip(): continue
-                    try:
-                        w = json.loads(line); root, doc = w['project_root'], w['document']
-                        if "relative_path" in doc and root:
-                            abs_p = os.path.join(root, doc["relative_path"])
-                            norm_p = sys.intern(os.path.relpath(abs_p, self.repo_path))
-                            if not norm_p.startswith(".."):
-                                for o in doc.get("occurrences", []):
-                                    if o.get("symbol_roles", 0) & SCIP_ROLE_DEFINITION:
-                                        is_local = o["symbol"].startswith("local")
-                                        symbol_table.add(o["symbol"], norm_p, o["range"], is_local)
-                    except ValueError: pass
+            # PASS 1: Popola Symbol Table
+            for wrapper in self.runner.stream_documents(indices):
+                self._process_definitions(wrapper, symbol_table)
+            
             symbol_table.flush()
 
-            # FASE 2: Generazione Relazioni (Arricchita)
-            with open(json_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    if not line.strip(): continue
-                    try:
-                        w = json.loads(line); root, doc = w['project_root'], w['document']
-                        if "relative_path" in doc and root:
-                            abs_p = os.path.join(root, doc["relative_path"])
-                            norm_p = sys.intern(os.path.relpath(abs_p, self.repo_path))
-                            
-                            if norm_p.startswith(".."): continue
+            # PASS 2: Genera Relazioni con Filtri
+            for wrapper in self.runner.stream_documents(indices):
+                yield from self._process_occurrences(wrapper, symbol_table, exclude_definitions, exclude_externals)
+                
+        finally:
+            symbol_table.close()
+            self.runner.cleanup()
 
-                            for o in doc.get("occurrences", []):
-                                roles = o.get("symbol_roles", 0)
-                                if exclude_definitions and (roles & SCIP_ROLE_DEFINITION): continue
-                                
-                                raw_sym = o["symbol"]
-                                is_local_id = raw_sym.startswith("local")
-                                
-                                tgt_info = symbol_table.get(raw_sym, norm_p)
-                                
-                                ext = False
-                                if tgt_info: 
-                                    tgt, tgt_rng = tgt_info
-                                elif not is_local_id:
-                                    ext = True
-                                    parts = raw_sym.split()
-                                    tgt = sys.intern(f"EXTERNAL::{parts[2]}::{parts[3]}") if len(parts)>=4 else "EXTERNAL::UNKNOWN"
-                                    tgt_rng = []
-                                else: 
-                                    continue 
+    def _process_definitions(self, wrapper: Dict, table: DiskSymbolTable):
+        root, doc = wrapper['project_root'], wrapper['document']
+        if "relative_path" in doc and root:
+            abs_p = os.path.join(root, doc["relative_path"])
+            norm_p = sys.intern(os.path.relpath(abs_p, self.repo_path))
+            if not norm_p.startswith(".."):
+                for o in doc.get("occurrences", []):
+                    if o.get("symbol_roles", 0) & SCIP_ROLE_DEFINITION:
+                        is_local = o["symbol"].startswith("local")
+                        table.add(o["symbol"], norm_p, o["range"], is_local)
 
-                                if exclude_externals and ext: continue
+    def _process_occurrences(self, wrapper: Dict, table: DiskSymbolTable, exclude_definitions: bool, exclude_externals: bool) -> Generator[CodeRelation, None, None]:
+        root, doc = wrapper['project_root'], wrapper['document']
+        if "relative_path" not in doc or not root: return
+        
+        abs_p = os.path.join(root, doc["relative_path"])
+        norm_p = sys.intern(os.path.relpath(abs_p, self.repo_path))
+        if norm_p.startswith(".."): return
 
-                                verb = get_relation_verb(roles)
-                                s_bytes = self._bytes(norm_p, o["range"])
-                                t_bytes = None if ext else self._bytes(tgt, tgt_rng)
-                                
-                                # --- FIX NOME SIMBOLO ---
-                                if is_local_id:
-                                    # Simbolo locale: leggiamo il nome vero dal codice
-                                    real_name = self._extract_symbol_name(norm_p, o["range"])
-                                    clean_sym = sys.intern(real_name)
-                                    sym_type = "variable" 
-                                else:
-                                    # Simbolo globale: pulizia intelligente
-                                    clean_sym = self._clean_symbol(raw_sym)
-                                    sym_type = self._infer_symbol_type(raw_sym)
+        for o in doc.get("occurrences", []):
+            roles = o.get("symbol_roles", 0)
+            
+            # [FILTER] Exclude Definitions (Auto-reference nodes)
+            if exclude_definitions and (roles & SCIP_ROLE_DEFINITION): 
+                continue 
+            
+            raw_sym = o["symbol"]
+            is_local = raw_sym.startswith("local")
+            tgt_info = table.get(raw_sym, norm_p)
+            
+            ext = False
+            if tgt_info: 
+                tgt, tgt_rng = tgt_info
+            elif not is_local:
+                ext = True
+                parts = raw_sym.split()
+                # Creiamo un ID fittizio per l'esterno, ma non lo useremo se filtriamo
+                tgt = sys.intern(f"EXTERNAL::{parts[2]}::{parts[3]}") if len(parts)>=4 else "EXTERNAL::UNKNOWN"
+                tgt_rng = []
+            else: continue 
 
-                                if not clean_sym or clean_sym == "unknown": continue
+            # [FILTER] Exclude Externals (Prevention of FK Error)
+            if exclude_externals and ext:
+                continue
 
-                                yield CodeRelation(
-                                    norm_p, tgt, verb,
-                                    source_line=o["range"][0]+1, target_line=tgt_rng[0]+1 if not ext else 1,
-                                    source_byte_range=s_bytes, target_byte_range=t_bytes,
-                                    metadata={
-                                        "tool": self.INDEXER_NAME,
-                                        "description": self._make_desc(norm_p, tgt, verb, clean_sym, ext),
-                                        "is_external": ext,
-                                        "symbol": clean_sym,
-                                        "symbol_type": sym_type,
-                                        "edge_category": "semantic"
-                                    }
-                                )
-                    except ValueError: pass
-        finally: symbol_table.close()
+            verb = get_relation_verb(roles)
+            clean_sym = self._extract_symbol_name(norm_p, o["range"]) if is_local else self._clean_symbol(raw_sym)
+            if not clean_sym or clean_sym == "unknown": continue
 
+            yield CodeRelation(
+                norm_p, tgt, verb,
+                source_line=o["range"][0]+1, target_line=tgt_rng[0]+1 if not ext else 1,
+                source_byte_range=self._bytes(norm_p, o["range"]),
+                target_byte_range=None if ext else self._bytes(tgt, tgt_rng),
+                metadata={
+                    "tool": self.INDEXER_NAME,
+                    "symbol": clean_sym,
+                    "is_external": ext
+                }
+            )
+
+    # --- Helpers ---
     @lru_cache(maxsize=128)
     def _get_file_content_cached(self, rel_path: str) -> Optional[List[str]]:
-        """Cache per lettura file sorgenti (necessaria per simboli locali)."""
         abs_path = os.path.join(self.repo_path, rel_path)
         if not os.path.exists(abs_path): return None
         try:
-            # Skip file enormi per performance
             if os.path.getsize(abs_path) > 1024 * 1024: return None 
-            with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
-                return f.readlines()
+            with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f: return f.readlines()
         except: return None
 
     def _extract_symbol_name(self, rel_path: str, rng: List[int]) -> str:
-        """Estrae il nome variabile dal codice sorgente dato il range."""
         lines = self._get_file_content_cached(rel_path)
         if not lines: return "unknown"
         try:
             sl, sc = rng[0], rng[1]
             el, ec = (sl, rng[2]) if len(rng) == 3 else (rng[2], rng[3])
-            
             if sl >= len(lines): return "unknown"
-            if sl == el:
-                line = lines[sl]
-                if sc >= len(line) or ec > len(line): return "unknown"
-                return line[sc:ec]
-            return "unknown" 
+            return lines[sl][sc:ec] if sl == el else "unknown"
         except: return "unknown"
 
     def _clean_symbol(self, raw: str) -> str:
-        """
-        Pulisce il simbolo rimuovendo path file e path modulo (package).
-        Input:  '.../server.py/debug_tool.server.DbAdapter#NodeView.'
-        Output: 'DbAdapter.NodeView'
-        """
         parts = raw.split()
         if not parts: return sys.intern(raw)
-        
-        descriptor = parts[-1]
-        
-        # 1. Strip File Extension Prefix (es. .../server.py/)
-        common_extensions = ['.py', '.ts', '.js', '.jsx', '.tsx', '.java', '.go', '.rs', '.php', '.c', '.cpp', '.h']
-        for ext in common_extensions:
-            token = ext + "/"
-            if token in descriptor:
-                split_idx = descriptor.rfind(token)
-                if split_idx != -1:
-                    descriptor = descriptor[split_idx + len(token):]
-                    break
-        
-        # 2. Normalizzazione caratteri
-        clean = descriptor.replace('`', '').replace('/', '.').replace('#', '.')
-        clean = clean.replace('().', '.').replace('()', '').rstrip('.')
-        while '..' in clean: clean = clean.replace('..', '.')
-
-        # 3. Strip Module Path (Heuristic: drop leading lowercase parts)
-        # Es: code_graph_indexer.graph.base.BaseGraphIndexer -> BaseGraphIndexer
-        if '.' in clean:
-            parts = clean.split('.')
-            start_idx = 0
-            for i, p in enumerate(parts):
-                # Se è l'ultimo, lo teniamo (es. funzione top-level 'my_func')
-                if i == len(parts) - 1: 
-                    start_idx = i
-                    break
-                # Se inizia con Maiuscola, è una Classe/Tipo -> Inizio parte rilevante
-                if p and p[0].isupper():
-                    start_idx = i
-                    break
-                # Se è minuscolo, assumiamo sia un package/modulo -> Drop
-            
-            clean = ".".join(parts[start_idx:])
-
-        return sys.intern(clean)
-
-    def _infer_symbol_type(self, raw: str) -> str:
-        """Deduce il tipo dal descrittore SCIP grezzo."""
-        parts = raw.split()
-        if not parts: return "unknown"
         desc = parts[-1]
-        
-        if desc.endswith(").") or desc.endswith(")"): return "method"
-        if "(__init__)" in desc or "constructor" in desc.lower(): return "constructor"
-        if desc.endswith("."): return "variable" # SCIP terms
-        if "$" in desc: return "parameter"
-        if desc.endswith("#"): return "class" # SCIP types
-            
-        return "symbol"
-    
-    # ... _make_desc, _lines, _bytes rimangono uguali ...
-    def _make_desc(self, src, tgt, verb, lbl, ext) -> str:
-        src_n = os.path.basename(src)
-        if ext:
-            pkg = tgt.split("::")[-1] if "::" in tgt else tgt
-            return f"Code in '{src_n}' {verb} external symbol '{lbl}' from '{pkg}'."
-        return f"Code in '{src_n}' {verb} symbol '{lbl}' defined in '{os.path.basename(tgt)}'."
+        for ext in ['.py/', '.ts/', '.js/', '.java/', '.go/']:
+            if ext in desc: desc = desc.split(ext)[-1]; break
+        return sys.intern(desc.replace('/', '.').replace('#', '.').rstrip('.'))
 
     @lru_cache(maxsize=64)
     def _lines(self, p):
@@ -426,8 +316,7 @@ class SCIPIndexer(BaseGraphIndexer):
         l = self._lines(p)
         if not l: return None
         try:
-            sl, sc = rng[0], rng[1]
-            el, ec = (sl, rng[2]) if len(rng)==3 else (rng[2], rng[3])
-            if sl >= len(l) or el >= len(l): return None
-            return [l[sl]+sc, l[el]+ec]
+            sl = rng[0]; el = rng[2] if len(rng)>3 else rng[0]
+            if sl >= len(l): return None
+            return [l[sl]+rng[1], l[el]+(rng[3] if len(rng)>3 else rng[2])]
         except: return None

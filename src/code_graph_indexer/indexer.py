@@ -34,7 +34,6 @@ def _init_worker_process(worktree_path: str, snapshot_id: str, commit_hash: str,
     global _worker_parser, _worker_storage
     
     # 1. Init Parser (Cpu Bound)
-    # Import locale per evitare circular imports nel parent process se necessario
     from .parsing.parser import TreeSitterRepoParser
     _worker_parser = TreeSitterRepoParser(repo_path=worktree_path)
     _worker_parser.snapshot_id = snapshot_id
@@ -46,7 +45,7 @@ def _init_worker_process(worktree_path: str, snapshot_id: str, commit_hash: str,
     }
 
     # 2. Init Storage (I/O Bound - Direct Connection)
-    # Il worker usa una connessione dedicata "usa e getta"
+    # Il worker usa una connessione dedicata "usa e getta" per massimizzare la velocità di COPY
     from .storage.postgres import PostgresGraphStorage
     from .storage.connector import SingleConnector
     
@@ -117,7 +116,6 @@ def _process_and_insert_chunk(file_paths: List[str]) -> int:
             continue
 
     # SCRITTURA DIRETTA SU DB
-    # _worker_storage usa il suo SingleConnector interno -> Socket diretto a PgBouncer
     try:
         if t_files: _worker_storage.add_files_raw(t_files)
         if t_contents: _worker_storage.add_contents_raw(t_contents)
@@ -144,12 +142,7 @@ class CodebaseIndexer:
     def __init__(self, repo_url: str, branch: str, db_url: Optional[str] = None):
         """
         Inizializza l'indexer.
-        
-        Args:
-            repo_url: URL della repository Git.
-            branch: Branch da indicizzare.
-            db_url: (Opzionale) Connection string Postgres. 
-                    Se None, la cerca in os.environ["DB_URL"].
+        Si auto-configura usando db_url o la variabile d'ambiente DB_URL.
         """
         self.repo_url = repo_url
         self.branch = branch
@@ -160,7 +153,10 @@ class CodebaseIndexer:
             raise ValueError("DB_URL non fornito e non trovato nelle variabili d'ambiente.")
 
         # Auto-Configurazione Storage (Main Process uses Pooled Connector)
-        logger.info(f"🔌 Connecting to DB (Pool): {self.db_url.split('@')[-1]}")
+        # Il Main Thread usa un Pool per gestire le operazioni di coordinamento in modo thread-safe
+        safe_log_url = self.db_url.split('@')[-1] if '@' in self.db_url else "..."
+        logger.info(f"🔌 Connecting to DB (Pool): {safe_log_url}")
+        
         self.connector = PooledConnector(dsn=self.db_url)
         self.storage = PostgresGraphStorage(connector=self.connector)
         
@@ -171,10 +167,10 @@ class CodebaseIndexer:
     def index(self, force: bool = False) -> str:
         """
         Esegue l'indicizzazione completa.
+        Gestisce il ciclo di vita dello snapshot e il lock distribuito.
         """
         logger.info(f"🚀 Indexing Request Start: {self.repo_url} ({self.branch})")
         
-        # 1. Identity Resolution
         repo_name = self.repo_url.rstrip('/').split('/')[-1].replace('.git', '')
         repo_id = self.storage.ensure_repository(self.repo_url, self.branch, repo_name)
         
@@ -230,9 +226,10 @@ class CodebaseIndexer:
 
     def _run_indexing_pipeline(self, repo_id: str, snapshot_id: str, commit: str, worktree_path: str):
         """
-        Coordina il lavoro parallelo.
+        Orchestra il parsing parallelo e l'analisi SCIP.
         """
-        scip_runner = SCIPRunner(repo_path=worktree_path)
+        # Inizializzazione Componenti
+        # Nota: SCIPRunner e Indexer lavorano sul path locale
         scip_indexer = SCIPIndexer(repo_path=worktree_path)
         previous_live_snapshot = self.storage.get_active_snapshot_id(repo_id)
 
@@ -245,7 +242,6 @@ class CodebaseIndexer:
             dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
             for file in files:
                 _, ext = os.path.splitext(file)
-                # Filtro base estensioni
                 if ext in {'.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rs', '.c', '.cpp', '.php', '.html', '.css'}: 
                     rel_path = os.path.relpath(os.path.join(root, file), worktree_path)
                     all_files.append(rel_path)
@@ -255,17 +251,26 @@ class CodebaseIndexer:
         TASK_CHUNK_SIZE = 50 
         file_chunks = list(_chunked_iterable(all_files, TASK_CHUNK_SIZE))
         
-        logger.info(f"🔨 Parsing & Writing with {num_workers} workers (Direct DB Mode)...")
+        logger.info(f"🔨 Parsing & SCIP with {num_workers} workers (Direct DB Mode)...")
+
+        # Funzione helper per SCIP in thread
+        def _run_scip_buffered():
+            # Esegue prepare_indices + stream_relations e ritorna la lista completa
+            # Questo corre in parallelo al parsing CPU-bound
+            try:
+                return list(scip_indexer.stream_relations())
+            except Exception as e:
+                logger.error(f"SCIP Extraction Failed: {e}")
+                return []
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as scip_executor:
-            # SCIP in background
-            future_scip = scip_executor.submit(scip_runner.run_to_disk)
+            # 1. Avvio SCIP in background (Heavy Process + Streaming)
+            future_scip = scip_executor.submit(_run_scip_buffered)
 
-            # Workers in parallelo
+            # 2. Avvio Parsing Workers (Heavy CPU + DB Write)
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=num_workers, 
                 initializer=_init_worker_process,
-                # Passiamo self.db_url esplicito ai worker
                 initargs=(worktree_path, snapshot_id, commit, self.repo_url, self.branch, self.db_url)
             ) as executor:
                 
@@ -284,38 +289,35 @@ class CodebaseIndexer:
                         completed_chunks += 1
                         
                         if completed_chunks % 10 == 0:
-                            logger.info(f"⏳ Processed {total_processed}/{len(all_files)} files...")
+                            logger.info(f"⏳ Parsed {total_processed}/{len(all_files)} files...")
                             
                     except Exception as e:
                         logger.error(f"❌ Worker Error: {e}")
 
-            # --- Integrazione SCIP (Main Thread) ---
-            scip_json_path = future_scip.result()
-            if scip_json_path and os.path.exists(scip_json_path):
-                logger.info("🔗 Ingesting SCIP relations...")
-                rel_gen = scip_indexer.stream_relations_from_file(scip_json_path)
-                batch = []
-                for rel in rel_gen:
-                    batch.append(rel)
-                    if len(batch) >= 5000:
-                        self.builder.add_relations(batch, snapshot_id=snapshot_id)
-                        batch = []
-                if batch: 
+            # 3. Integrazione SCIP (Post-Parsing)
+            # Attendiamo che SCIP abbia finito (se non ha già finito) e scriviamo le relazioni.
+            # È fondamentale farlo DOPO il parsing per garantire che i nodi (target_id) esistano nel DB.
+            logger.info("🔗 Waiting for SCIP relations...")
+            scip_relations = future_scip.result()
+            
+            if scip_relations:
+                logger.info(f"🔗 Ingesting {len(scip_relations)} SCIP relations...")
+                # Scrittura in batch usando il builder (che risolve gli ID)
+                BATCH_SIZE = 5000
+                for i in range(0, len(scip_relations), BATCH_SIZE):
+                    batch = scip_relations[i:i+BATCH_SIZE]
                     self.builder.add_relations(batch, snapshot_id=snapshot_id)
-                try:
-                    os.remove(scip_json_path)
-                except OSError: pass
+            else:
+                logger.info("ℹ️ No SCIP relations found (or SCIP failed).")
 
         # Attivazione Finale
-        # Nota: per le stats usiamo il main storage che è pooled e thread-safe
         current_stats = self.storage.get_stats()
         stats = {
             "files": total_processed, 
             "nodes": current_stats.get("total_nodes", 0),
-            "engine": "v8_auto_config"
+            "engine": "v9_enterprise_streaming"
         }
         
-        # Manifest (Placeholder per ora, o ricostruito se necessario)
         manifest_tree = {"type": "dir", "children": {}} 
         
         self.storage.activate_snapshot(repo_id, snapshot_id, stats, manifest=manifest_tree)
@@ -327,7 +329,8 @@ class CodebaseIndexer:
 
     def embed(self, provider: EmbeddingProvider, batch_size: int = 32, debug: bool = False, force_snapshot_id: str = None):
         """
-        Genera embeddings. Usa lo storage interno (Pooled).
+        Genera embeddings.
+        NOTA: In architettura Enterprise, questo metodo dovrebbe essere chiamato da un worker separato.
         """
         logger.info(f"🤖 Embedding Start: {provider.model_name}")
         repo_name = self.repo_url.rstrip('/').split('/')[-1].replace('.git', '')
