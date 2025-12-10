@@ -2,7 +2,7 @@ import os
 import uuid
 import hashlib
 import datetime
-from typing import List, Dict, Optional, Generator, Tuple, Any
+from typing import List, Dict, Optional, Generator, Tuple, Any, Union
 
 from tree_sitter import Parser, Node
 from tree_sitter_languages import get_language
@@ -12,8 +12,8 @@ from ..providers.metadata import MetadataProvider, GitMetadataProvider, LocalMet
 
 class TreeSitterRepoParser:
     """
-    Parser semantico per RAG Enterprise.
-    Adattato per Immutable Infrastructure: ogni file è legato a uno SnapshotID.
+    Parser semantico ottimizzato per High-Performance Indexing.
+    Utilizza MemoryView e Bytearray per ridurre allocazioni e copie (Zero-Copy Slicing).
     """
     
     LANGUAGE_MAP = {
@@ -57,8 +57,6 @@ class TreeSitterRepoParser:
         )
         self.repo_info = self.metadata_provider.get_repo_info()
         
-        # [CHANGE] Il parser ora deve conoscere lo snapshot corrente per taggare i file.
-        # Viene settato dall'Indexer prima dell'avvio.
         self.snapshot_id: Optional[str] = None 
         
         # Caricamento Lingue (Cache)
@@ -129,7 +127,8 @@ class TreeSitterRepoParser:
                 with open(query_path, "r", encoding="utf-8") as f:
                     return f.read()
         except Exception as e:
-            print(f"[WARN] Error loading query {language_name}: {e}")
+            # Silenzioso se manca il file query per lingue meno comuni
+            pass
         return None
 
     def _generate_label(self, category: str, value: str) -> str:
@@ -172,11 +171,11 @@ class TreeSitterRepoParser:
                 })
             return results
         except Exception as e:
-            print(f"[WARN] Semantic Query Error ({language_name}): {e}")
+            # Warning leggero, non blocca il parsing
             return []
 
     # ==============================================================================
-    #  MAIN PIPELINE
+    #  MAIN PIPELINE (OPTIMIZED)
     # ==============================================================================
 
     def stream_semantic_chunks(self, file_list: Optional[List[str]] = None) -> Generator[Tuple[FileRecord, List[ChunkNode], List[ChunkContent], List[CodeRelation]], None, None]:
@@ -201,7 +200,6 @@ class TreeSitterRepoParser:
                 try:
                     content, error_msg = self._safe_read_file(full_path)
                     
-                    # [CHANGE] snapshot_id invece di repo_id
                     file_rec = FileRecord(
                         id=str(uuid.uuid4()), 
                         snapshot_id=self.snapshot_id, 
@@ -236,8 +234,11 @@ class TreeSitterRepoParser:
                     
                     nodes = []; contents = {}; relations = []
                     
+                    # [OPTIMIZATION] Uso memoryview per zero-copy slicing
+                    mv_content = memoryview(content)
+                    
                     self._process_scope(
-                        tree.root_node, content, rel_path, file_rec.id, None, 
+                        tree.root_node, mv_content, content, rel_path, file_rec.id, None, 
                         nodes, contents, relations,
                         semantic_captures=semantic_captures
                     )
@@ -249,6 +250,7 @@ class TreeSitterRepoParser:
                         yield (file_rec, [], [], [])
 
                 except Exception as e: 
+                    # Logghiamo ma non fermiamo il processo
                     print(f"[ERROR] Processing {rel_path}: {e}")
                     try:
                         err_rec = FileRecord(
@@ -271,12 +273,13 @@ class TreeSitterRepoParser:
         return ParsingResult(files, nodes, contents, all_rels)
 
     # ==============================================================================
-    #  LOGICA CHUNKING 
+    #  LOGICA CHUNKING (OPTIMIZED - ZERO COPY & BYTEARRAY)
     # ==============================================================================
     
-    def _process_scope(self, parent_node: Node, content: bytes, file_path: str, file_id: str, parent_chunk_id: Optional[str],
+    def _process_scope(self, parent_node: Node, content_mv: memoryview, full_content_bytes: bytes, 
+                       file_path: str, file_id: str, parent_chunk_id: Optional[str],
                        nodes: List, contents: Dict, relations: List, 
-                       initial_glue: bytes = b"", initial_glue_start: Optional[int] = None,
+                       initial_glue: Union[bytes, bytearray] = b"", initial_glue_start: Optional[int] = None,
                        is_breakdown_mode: bool = False,
                        semantic_captures: List[Dict] = None):
         
@@ -285,12 +288,15 @@ class TreeSitterRepoParser:
         iterator_node = body_node if body_node else parent_node
         
         cursor = iterator_node.start_byte
-        glue_buffer_bytes = initial_glue 
+        
+        # [OPTIMIZATION] bytearray è mutabile: append veloce senza reallocazione stringa
+        glue_buffer = bytearray(initial_glue)
         glue_start_byte = initial_glue_start 
         if initial_glue and glue_start_byte is None:
             glue_start_byte = iterator_node.start_byte 
 
-        group_buffer_bytes = b""; group_start_byte = None; group_end_byte = None
+        group_buffer = bytearray()
+        group_start_byte = None; group_end_byte = None
         current_active_parent = parent_chunk_id
         first_chunk_created_in_scope = False
 
@@ -301,63 +307,80 @@ class TreeSitterRepoParser:
                 first_chunk_created_in_scope = True
 
         def flush_group():
-            nonlocal group_buffer_bytes, group_start_byte, group_end_byte
-            if group_buffer_bytes:
+            nonlocal group_buffer, group_start_byte, group_end_byte
+            if group_buffer:
                 cid = self._create_chunk(
-                    group_buffer_bytes, group_start_byte, group_end_byte, content,
+                    group_buffer, group_start_byte, group_end_byte, full_content_bytes,
                     file_path, file_id, current_active_parent,
                     nodes, contents, relations, semantic_captures=semantic_captures
                 )
                 register_chunk_creation(cid)
-                group_buffer_bytes = b""; group_start_byte = None; group_end_byte = None
+                # Reset buffer veloce
+                group_buffer = bytearray(); group_start_byte = None; group_end_byte = None
 
         for child in iterator_node.children:
             if child.start_byte > cursor:
-                gap = content[cursor : child.start_byte]
-                glue_buffer_bytes += gap
+                # [OPTIMIZATION] Zero-copy slice
+                gap = content_mv[cursor : child.start_byte]
+                glue_buffer.extend(gap)
                 if glue_start_byte is None: glue_start_byte = cursor
 
             is_glue = (child.type in self.GLUE_TYPES or child.type.startswith('comment'))
             is_barrier = (child.type in self.CONTAINER_TYPES)
             
-            child_bytes = content[child.start_byte : child.end_byte]
+            # [OPTIMIZATION] Zero-copy slice
+            child_mv = content_mv[child.start_byte : child.end_byte]
             
             if is_glue:
-                glue_buffer_bytes += child_bytes
+                glue_buffer.extend(child_mv)
                 if glue_start_byte is None: glue_start_byte = child.start_byte
             
             elif is_barrier:
                 flush_group()
-                full_barrier_text = glue_buffer_bytes + child_bytes
+                
                 barrier_start = glue_start_byte if glue_start_byte is not None else child.start_byte
                 barrier_end = child.end_byte
                 
-                if len(full_barrier_text) > self.MAX_CHUNK_SIZE:
+                # Check dimensione approssimativa (somma lunghezze)
+                full_len = len(glue_buffer) + len(child_mv)
+                
+                if full_len > self.MAX_CHUNK_SIZE:
+                    # Necessario convertire in bytes immutabili solo per breakdown ricorsivo
+                    prefix_bytes = bytes(glue_buffer)
                     self._handle_large_node(
-                        child, content, glue_buffer_bytes, barrier_start, file_path, file_id, current_active_parent,
+                        child, content_mv, full_content_bytes, prefix_bytes, barrier_start, 
+                        file_path, file_id, current_active_parent,
                         nodes, contents, relations, semantic_captures=semantic_captures
                     )
                     if is_breakdown_mode and not first_chunk_created_in_scope:
                          first_chunk_created_in_scope = True
                 else:
+                    # Fast path: uniamo nel bytearray
+                    combined = bytearray(glue_buffer)
+                    combined.extend(child_mv)
+                    
                     cid = self._create_chunk(
-                        full_barrier_text, barrier_start, barrier_end, content,
+                        combined, barrier_start, barrier_end, full_content_bytes,
                         file_path, file_id, current_active_parent,
                         nodes, contents, relations, tags=self._extract_tags(child),
                         semantic_captures=semantic_captures
                     )
                     register_chunk_creation(cid)
-                glue_buffer_bytes = b""; glue_start_byte = None
+                
+                glue_buffer = bytearray(); glue_start_byte = None
 
             else:
-                if group_buffer_bytes == b"":
+                if not group_buffer:
                     group_start_byte = glue_start_byte if glue_start_byte is not None else child.start_byte
-                group_buffer_bytes += glue_buffer_bytes
-                glue_buffer_bytes = b""; glue_start_byte = None
-                group_buffer_bytes += child_bytes
+                
+                if glue_buffer:
+                    group_buffer.extend(glue_buffer)
+                    glue_buffer = bytearray(); glue_start_byte = None
+                
+                group_buffer.extend(child_mv)
                 group_end_byte = child.end_byte
                 
-                if len(group_buffer_bytes) > self.MAX_CHUNK_SIZE:
+                if len(group_buffer) > self.MAX_CHUNK_SIZE:
                     remaining = iterator_node.end_byte - child.end_byte
                     if remaining > self.CHUNK_TOLERANCE: flush_group()
 
@@ -366,17 +389,21 @@ class TreeSitterRepoParser:
         flush_group()
         
         if cursor < iterator_node.end_byte:
-            glue_buffer_bytes += content[cursor : iterator_node.end_byte]
+            glue_buffer.extend(content_mv[cursor : iterator_node.end_byte])
             
-        if glue_buffer_bytes.strip():
+        if glue_buffer:
+             # Check veloce su bytearray
+             if not bytes(glue_buffer).strip(): return
+
              start = glue_start_byte if glue_start_byte is not None else cursor
              self._create_chunk(
-                glue_buffer_bytes, start, iterator_node.end_byte, content,
+                glue_buffer, start, iterator_node.end_byte, full_content_bytes,
                 file_path, file_id, current_active_parent,
                 nodes, contents, relations, tags=[], semantic_captures=semantic_captures
             )
 
-    def _handle_large_node(self, node: Node, content: bytes, prefix: bytes, prefix_start: int, 
+    def _handle_large_node(self, node: Node, content_mv: memoryview, full_content_bytes: bytes, 
+                           prefix: bytes, prefix_start: int, 
                            file_path: str, file_id: str, parent_chunk_id: Optional[str],
                            nodes: List, contents: Dict, relations: List,
                            semantic_captures: List[Dict] = None):
@@ -392,30 +419,38 @@ class TreeSitterRepoParser:
         body_node = target_node.child_by_field_name("body") or target_node.child_by_field_name("block")
         
         if not body_node:
+            # Fallback: Hard split su bytes
+            full_text_bytes = prefix + bytes(content_mv[node.start_byte:node.end_byte])
             self._create_hard_split(
-                prefix + content[node.start_byte:node.end_byte], prefix_start, content,
+                full_text_bytes, prefix_start, full_content_bytes,
                 file_path, file_id, parent_chunk_id, nodes, contents, relations, semantic_captures
             )
             return
 
-        header_node_text = content[node.start_byte : body_node.start_byte]
-        full_header = prefix + header_node_text
+        header_node_mv = content_mv[node.start_byte : body_node.start_byte]
+        full_header_len = len(prefix) + len(header_node_mv)
         
-        if len(full_header) > self.MAX_CHUNK_SIZE * 0.6:
+        if full_header_len > self.MAX_CHUNK_SIZE * 0.6:
             # Header Chunk separato
+            header_buffer = bytearray(prefix)
+            header_buffer.extend(header_node_mv)
+            
             header_id = self._create_chunk(
-                full_header, prefix_start, body_node.start_byte, content,
+                header_buffer, prefix_start, body_node.start_byte, full_content_bytes,
                 file_path, file_id, parent_chunk_id,
                 nodes, contents, relations, tags=self._extract_tags(node),
                 semantic_captures=semantic_captures
             )
-            self._process_scope(target_node, content, file_path, file_id, header_id, nodes, contents, relations, semantic_captures=semantic_captures)
+            self._process_scope(target_node, content_mv, full_content_bytes, file_path, file_id, header_id, nodes, contents, relations, semantic_captures=semantic_captures)
         else:
-            # Flow-Down
+            # Flow-Down: Uniamo prefisso e header per il prossimo scope
+            new_glue = bytearray(prefix)
+            new_glue.extend(header_node_mv)
+            
             self._process_scope(
-                target_node, content, file_path, file_id, parent_chunk_id, 
+                target_node, content_mv, full_content_bytes, file_path, file_id, parent_chunk_id, 
                 nodes, contents, relations, 
-                initial_glue=full_header, initial_glue_start=prefix_start,
+                initial_glue=new_glue, initial_glue_start=prefix_start,
                 is_breakdown_mode=True,
                 semantic_captures=semantic_captures
             )
@@ -439,28 +474,39 @@ class TreeSitterRepoParser:
             if not first_fragment_id: first_fragment_id = cid
             cursor = end
 
-    def _create_chunk(self, text_bytes: bytes, s_byte: int, e_byte: int, full_content: bytes,
+    def _create_chunk(self, text_obj: Union[bytes, bytearray, memoryview], s_byte: int, e_byte: int, full_content_bytes: bytes,
                       fpath: str, fid: str, pid: Optional[str], 
                       nodes: List, contents: Dict, relations: List,
                       tags: List[str] = None,
                       semantic_captures: List[Dict] = None) -> Optional[str]:
         
+        # Conversione finale solo quando serve
+        if isinstance(text_obj, memoryview):
+            text_bytes = text_obj.tobytes()
+        elif isinstance(text_obj, bytearray):
+            text_bytes = bytes(text_obj)
+        else:
+            text_bytes = text_obj
+
         text = text_bytes.decode('utf-8', 'ignore')
         if not text.strip(): return None
         
+        # Hashing
         h = hashlib.sha256(text.encode('utf-8')).hexdigest()
         if h not in contents: contents[h] = ChunkContent(h, text)
         cid = str(uuid.uuid4())
+        
         if s_byte < 0: s_byte = 0
-        s_line = full_content[:s_byte].count(b'\n') + 1
+        
+        # Calcolo righe ottimizzato (uso full_content_bytes originale)
+        s_line = full_content_bytes[:s_byte].count(b'\n') + 1
         e_line = s_line + text.count('\n')
         
-        # Semantic Enrichment (Intersezione Range)
+        # Semantic Enrichment
         matches = []
         if semantic_captures:
             for cap in semantic_captures:
                 cap_start, cap_end = cap['start'], cap['end']
-                # Contenimento o Intersezione
                 if (s_byte >= cap_start and e_byte <= cap_end) or \
                    (cap_start >= s_byte and cap_end <= e_byte):
                     matches.append(cap['metadata'])

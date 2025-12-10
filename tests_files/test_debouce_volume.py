@@ -26,7 +26,7 @@ logger = logging.getLogger("TEST_MULTI_BRANCH")
 DB_PORT = "5433"  # Verifica la tua porta (es. 5432 o 5433)
 DB_URL = f"postgresql://sheep_user:sheep_password@localhost:{DB_PORT}/sheep_index"
 
-REPO_URL = "https://github.com/pallets/flask.git"
+REPO_URL = "https://github.com/django/django.git"
 STORE_PATH = "/tmp/sheep_test_store"  # Usiamo un path temporaneo per il test
 
 # Definiamo i branch da testare (Simuliamo Main vs Stable)

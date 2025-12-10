@@ -1,59 +1,29 @@
-import hashlib
-import os
 import json
 import logging
-import datetime
-import struct
 import uuid
-from typing import List, Dict, Any, Optional, Generator, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 import psycopg
-from psycopg.rows import dict_row
-from pgvector.psycopg import register_vector
-from psycopg_pool import ConnectionPool
 from psycopg.errors import UniqueViolation
 
 from .base import GraphStorage
+from .connector import DatabaseConnector  # Importiamo l'interfaccia
 
 logger = logging.getLogger(__name__)
 
 class PostgresGraphStorage(GraphStorage):
-    def __init__(self, db_url: str, min_size: int = 4, max_size: int = 20, vector_dim: int = 1536,timeout: float = 60.0):
-        self._db_url = db_url
+    def __init__(self, connector: DatabaseConnector, vector_dim: int = 1536):
+        """
+        Dependency Injection: Il connettore decide la strategia (Pool vs Single).
+        """
+        self.connector = connector
         self.vector_dim = vector_dim
         
-        self._min_size = min_size
-        self._max_size = max_size
-        self._timeout = timeout
-        self._pool_kwargs = {
-            "row_factory": dict_row,
-            "autocommit": True 
-        }
-        
-        safe_url = db_url.split('@')[-1] if '@' in db_url else "..."
-        logger.info(f"🐘 Connecting to Postgres (Pool): {safe_url} | Vector Dim: {vector_dim}")
-        
-        self._create_pool()
-
-    def _create_pool(self):
-        self.pool = ConnectionPool(
-            conninfo=self._db_url,
-            min_size=self._min_size,
-            max_size=self._max_size,
-            timeout=self._timeout,
-            kwargs=self._pool_kwargs,
-            configure=self._configure_connection
-        )
-        self.pool.wait()
-
-    def _configure_connection(self, conn: psycopg.Connection):
-        try:
-            register_vector(conn)
-        except psycopg.ProgrammingError:
-            pass 
+        # Logghiamo solo il fatto che siamo pronti, non i dettagli del pool
+        logger.info(f"🐘 PostgresStorage initialized (Vector Dim: {vector_dim})")
 
     def close(self):
-        if hasattr(self, 'pool') and self.pool:
-            self.pool.close()
+        self.connector.close()
+
 
     # ==========================================
     # 1. IDENTITY & LIFECYCLE
@@ -68,29 +38,16 @@ class PostgresGraphStorage(GraphStorage):
             RETURNING id
         """
         repo_id = str(uuid.uuid4())
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             res = conn.execute(sql, (repo_id, url, branch, name)).fetchone()
             return str(res['id'])
             
     def create_snapshot(self, repository_id: str, commit_hash: str, force_new: bool = False) -> Tuple[Optional[str], bool]:
-        """
-        Crea uno snapshot o recupera quello esistente.
-        Returns:
-            (snapshot_id, is_new_work)
-            - (uuid, True): Nuovo lavoro avviato (Lock acquisito).
-            - (uuid, False): Lavoro già completato (Idempotenza).
-            - (None, False): Repo occupata, richiesta accodata.
-        """
         new_id = str(uuid.uuid4())
         
         try:
-            with self.pool.connection() as conn:
-                # -------------------------------------------------------
-                # 1. IDEMPOTENZA (Check Existing)
-                # -------------------------------------------------------
-                # Se non forziamo il re-index, controlliamo se il lavoro è già fatto.
+            with self.connector.get_connection() as conn:
                 if not force_new:
-                    # Cerchiamo l'ultimo snapshot COMPLETATO per questo commit
                     row = conn.execute("""
                         SELECT id, status FROM snapshots 
                         WHERE repository_id = %s AND commit_hash = %s AND status = 'completed'
@@ -99,14 +56,8 @@ class PostgresGraphStorage(GraphStorage):
                     
                     if row:
                         logger.info(f"✅ Snapshot esistente trovato: {row['id']}")
-                        # Ritorniamo l'ID esistente e False (non è un nuovo lavoro)
                         return str(row['id']), False
 
-                # -------------------------------------------------------
-                # 2. TRY LOCK (New Indexing)
-                # -------------------------------------------------------
-                # Tentiamo di inserire. Grazie all'indice parziale UNIQUE, 
-                # fallirà se c'è già un worker attivo (status='indexing').
                 conn.execute("""
                     INSERT INTO snapshots (id, repository_id, commit_hash, status, created_at)
                     VALUES (%s, %s, %s, 'indexing', NOW())
@@ -116,42 +67,27 @@ class PostgresGraphStorage(GraphStorage):
                 return new_id, True
 
         except psycopg.errors.UniqueViolation:
-            # -------------------------------------------------------
-            # 3. FALLBACK (Queueing)
-            # -------------------------------------------------------
-            # Caso "Busy": Qualcuno sta già lavorando (status='indexing').
-            # Impostiamo il Dirty Flag sulla repo.
             logger.info(f"⏳ Repo occupata. Imposto dirty flag per {repository_id}")
-            
-            # Riapriamo una connessione veloce per aggiornare il flag 
-            # (la precedente ha fatto rollback automatico per l'errore)
-            with self.pool.connection() as conn:
+            with self.connector.get_connection() as conn:
                 conn.execute("""
                     UPDATE repositories 
                     SET reindex_requested_at = NOW() 
                     WHERE id = %s
                 """, (repository_id,))
-            
             return None, False
         
     def check_and_reset_reindex_flag(self, repository_id: str) -> bool:
-        """
-        Controlla se qualcuno ha richiesto un re-index mentre lavoravamo.
-        Se sì, resetta il flag e restituisce True (il worker deve ripartire).
-        """
-        with self.pool.connection() as conn:
-            # Facciamo una UPDATE ... RETURNING per un'operazione atomica check-and-set
+        with self.connector.get_connection() as conn:
             row = conn.execute("""
                 UPDATE repositories 
                 SET reindex_requested_at = NULL
                 WHERE id = %s AND reindex_requested_at IS NOT NULL
                 RETURNING id
             """, (repository_id,)).fetchone()
-            
             return row is not None
     
     def activate_snapshot(self, repository_id: str, snapshot_id: str, stats: Dict[str, Any] = None, manifest: Dict[str, Any] = None):
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             with conn.transaction():
                 conn.execute("""
                     UPDATE snapshots 
@@ -167,36 +103,36 @@ class PostgresGraphStorage(GraphStorage):
         logger.info(f"🚀 SNAPSHOT ACTIVATED: {snapshot_id}")
 
     def fail_snapshot(self, snapshot_id: str, error: str):
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             conn.execute("UPDATE snapshots SET status='failed', stats=jsonb_build_object('error', %s::text) WHERE id=%s", (error, snapshot_id))
 
     def prune_snapshot(self, snapshot_id: str):
         logger.info(f"🧹 Pruning snapshot data: {snapshot_id}")
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             conn.execute("DELETE FROM files WHERE snapshot_id = %s", (snapshot_id,))
 
     def get_active_snapshot_id(self, repository_id: str) -> Optional[str]:
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             row = conn.execute("SELECT current_snapshot_id FROM repositories WHERE id=%s", (repository_id,)).fetchone()
             return str(row['current_snapshot_id']) if row and row['current_snapshot_id'] else None
 
     def get_repository(self, repo_id: str) -> Optional[Dict[str, Any]]:
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             return conn.execute("SELECT * FROM repositories WHERE id=%s", (repo_id,)).fetchone()
             
     def get_snapshot_manifest(self, snapshot_id: str) -> Dict[str, Any]:
         sql = "SELECT file_manifest FROM snapshots WHERE id = %s"
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             row = conn.execute(sql, (snapshot_id,)).fetchone()
             return row['file_manifest'] if row and row['file_manifest'] else {}
 
     # ==========================================
-    # 2. WRITE OPERATIONS
+    # 2. WRITE OPERATIONS (OPTIMIZED)
     # ==========================================
 
     def add_files(self, files: List[Any]):
         if not files: return
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             with conn.cursor() as cur:
                 data = [f.to_dict() for f in files]
                 cur.executemany("""
@@ -207,8 +143,11 @@ class PostgresGraphStorage(GraphStorage):
                 """, data)
 
     def add_nodes(self, nodes: List[Any]):
+        """
+        Metodo standard per inserire nodi con gestione conflitti (sicuro per retries).
+        """
         if not nodes: return
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             with conn.cursor() as cur:
                 data = []
                 for n in nodes:
@@ -224,20 +163,55 @@ class PostgresGraphStorage(GraphStorage):
                     ON CONFLICT (id) DO NOTHING
                 """, data)
 
+    def add_nodes_fast(self, nodes: List[Any]):
+        """
+        [NEW] Versione ottimizzata usando il protocollo COPY.
+        Estremamente veloce per bulk inserts (nuovi snapshot).
+        ATTENZIONE: Fallisce se ci sono duplicati (non supporta ON CONFLICT).
+        """
+        if not nodes: return
+        
+        def data_generator():
+            for n in nodes:
+                d = n.to_dict()
+                meta = json.dumps(d.get('metadata', {}))
+                bs, be = d['byte_range']
+                # Deve rispettare l'ordine delle colonne nel comando COPY sotto
+                yield (
+                    d['id'], d.get('file_id'), d['file_path'], 
+                    d['start_line'], d['end_line'], bs, be, 
+                    d.get('chunk_hash', ''), be - bs, meta
+                )
+
+        sql = """
+            COPY nodes (id, file_id, file_path, start_line, end_line, byte_start, byte_end, chunk_hash, size, metadata)
+            FROM STDIN
+        """
+        
+        try:
+            with self.connector.get_connection() as conn:
+                with conn.cursor() as cur:
+                    with cur.copy(sql) as copy:
+                        for row in data_generator():
+                            copy.write_row(row)
+        except Exception as e:
+            logger.error(f"❌ COPY failed in add_nodes_fast: {e}")
+            raise e
+
     def add_contents(self, contents: List[Any]):
         if not contents: return
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             with conn.cursor() as cur:
                 data = [c.to_dict() for c in contents]
                 cur.executemany("INSERT INTO contents (chunk_hash, content) VALUES (%(chunk_hash)s, %(content)s) ON CONFLICT (chunk_hash) DO NOTHING", data)
 
     def add_edge(self, source_id, target_id, relation_type, metadata):
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             conn.execute("INSERT INTO edges (source_id, target_id, relation_type, metadata) VALUES (%s, %s, %s, %s)", (source_id, target_id, relation_type, json.dumps(metadata)))
 
     def save_embeddings(self, vector_documents: List[Dict[str, Any]]):
         if not vector_documents: return
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.executemany("""
                     INSERT INTO node_embeddings (
@@ -252,7 +226,7 @@ class PostgresGraphStorage(GraphStorage):
 
     def add_search_index(self, search_docs: List[Dict[str, Any]]):
         if not search_docs: return
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.executemany("""
                     INSERT INTO nodes_fts (node_id, file_path, semantic_tags, content, search_vector)
@@ -266,23 +240,15 @@ class PostgresGraphStorage(GraphStorage):
                 """, search_docs)
 
     # ==========================================
-    # 3. READ OPERATIONS (Search & Filter Logic)
+    # 3. READ OPERATIONS
     # ==========================================
 
     def _build_filter_clause(self, filters: Dict[str, Any], col_map: Dict[str, str]) -> Tuple[str, List[Any]]:
-        """
-        Costruisce la clausola WHERE dinamica.
-        Args:
-            col_map: Mappa alias logici -> colonne fisiche (es. {'path': 'ne.file_path'})
-        """
         if not filters: return "", []
-        
         clauses = []
         params = []
-        
         def as_list(val): return val if isinstance(val, list) else [val]
 
-        # 1. Path
         if filters.get("path_prefix"):
             col = col_map.get('path')
             if col:
@@ -294,7 +260,6 @@ class PostgresGraphStorage(GraphStorage):
                         params.append(p.rstrip('/') + '%')
                     clauses.append(f"({' OR '.join(or_clauses)})")
 
-        # 2. Language
         if filters.get("language"):
             col = col_map.get('lang')
             if col:
@@ -311,14 +276,12 @@ class PostgresGraphStorage(GraphStorage):
                     clauses.append(f"{col} != ALL(%s)")
                     params.append(ex_langs)
 
-        # 3. Semantic Filters (Role) via JSON Metadata
         col_meta = col_map.get('meta')
         if col_meta:
             if filters.get("role"): 
                 roles = as_list(filters["role"])
                 role_clauses = []
                 for r in roles:
-                    # JSON pattern: metadata @> '{"semantic_matches": [{"category": "role", "value": "..."}]}'
                     role_clauses.append(f"{col_meta} @> %s::jsonb")
                     params.append(json.dumps({"semantic_matches": [{"category": "role", "value": r}]}))
                 if role_clauses:
@@ -333,7 +296,6 @@ class PostgresGraphStorage(GraphStorage):
                 if ex_clauses:
                     clauses.append(f"NOT ({' OR '.join(ex_clauses)})")
 
-        # 4. Category
         col_cat = col_map.get('cat')
         if col_cat:
             if filters.get("category"):
@@ -351,7 +313,6 @@ class PostgresGraphStorage(GraphStorage):
 
     def search_vectors(self, query_vector: List[float], limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         if not snapshot_id: raise ValueError("snapshot_id mandatory.")
-        
         sql = """
             SELECT ne.chunk_id, ne.file_path, ne.start_line, ne.end_line, ne.snapshot_id, n.metadata, c.content, ne.language, 
                    (ne.embedding <=> %s::vector) as distance
@@ -361,14 +322,7 @@ class PostgresGraphStorage(GraphStorage):
             WHERE ne.snapshot_id = %s
         """
         params = [query_vector, snapshot_id]
-        
-        # Mappa per node_embeddings
-        col_map = {
-            'path': 'ne.file_path',
-            'lang': 'ne.language',
-            'cat':  'ne.category',
-            'meta': 'n.metadata'
-        }
+        col_map = {'path': 'ne.file_path', 'lang': 'ne.language', 'cat': 'ne.category', 'meta': 'n.metadata'}
         
         filter_sql, filter_params = self._build_filter_clause(filters, col_map)
         sql += filter_sql
@@ -377,7 +331,7 @@ class PostgresGraphStorage(GraphStorage):
         sql += " ORDER BY distance ASC LIMIT %s"
         params.append(limit)
 
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             results = []
             for row in conn.execute(sql, params).fetchall():
                 results.append({
@@ -390,7 +344,6 @@ class PostgresGraphStorage(GraphStorage):
 
     def search_fts(self, query: str, limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         if not snapshot_id: raise ValueError("snapshot_id mandatory.")
-        
         sql = """
             SELECT fts.node_id, fts.file_path, n.start_line, n.end_line, fts.content, f.snapshot_id, n.metadata, f.language,
                    ts_rank(fts.search_vector, websearch_to_tsquery('english', %s)) as rank
@@ -401,14 +354,7 @@ class PostgresGraphStorage(GraphStorage):
             AND f.snapshot_id = %s
         """
         params = [query, query, snapshot_id]
-        
-        # Mappa per FTS (via files)
-        col_map = {
-            'path': 'f.path', # o fts.file_path
-            'lang': 'f.language',
-            'cat':  'f.category',
-            'meta': 'n.metadata'
-        }
+        col_map = {'path': 'f.path', 'lang': 'f.language', 'cat': 'f.category', 'meta': 'n.metadata'}
         
         filter_sql, filter_params = self._build_filter_clause(filters, col_map)
         sql += filter_sql
@@ -418,7 +364,7 @@ class PostgresGraphStorage(GraphStorage):
         params.append(limit)
 
         try:
-            with self.pool.connection() as conn:
+            with self.connector.get_connection() as conn:
                 results = []
                 for row in conn.execute(sql, params).fetchall():
                     results.append({
@@ -444,19 +390,19 @@ class PostgresGraphStorage(GraphStorage):
               AND n.byte_start <= %s + 1 AND n.byte_end >= %s - 1
             ORDER BY n.size ASC LIMIT 1
         """
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             row = conn.execute(sql, (file_path, snapshot_id, byte_range[0], byte_range[1])).fetchone()
             return str(row['id']) if row else None
 
     def get_incoming_references(self, target_node_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             res = []
             for r in conn.execute("SELECT s.id, s.file_path, s.start_line, e.relation_type, e.metadata FROM edges e JOIN nodes s ON e.source_id=s.id WHERE e.target_id=%s AND e.relation_type IN ('calls', 'references', 'imports', 'instantiates') ORDER BY s.file_path, s.start_line LIMIT %s", (target_node_id, limit)).fetchall():
                 res.append({"source_id": str(r['id']), "file": r['file_path'], "line": r['start_line'], "relation": r['relation_type'], "context_snippet": r['metadata'].get("description", "")})
             return res
 
     def get_outgoing_calls(self, source_node_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             res = []
             for r in conn.execute("SELECT t.id, t.file_path, t.start_line, e.relation_type, e.metadata FROM edges e JOIN nodes t ON e.target_id=t.id WHERE e.source_id=%s AND e.relation_type IN ('calls', 'instantiates', 'imports') ORDER BY t.file_path, t.start_line LIMIT %s", (source_node_id, limit)).fetchall():
                 res.append({"target_id": str(r['id']), "file": r['file_path'], "line": r['start_line'], "relation": r['relation_type'], "symbol": r['metadata'].get("symbol", "")})
@@ -464,7 +410,7 @@ class PostgresGraphStorage(GraphStorage):
 
     def get_context_neighbors(self, node_id: str):
         res = {"parents": [], "calls": []}
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             for r in conn.execute("SELECT t.id, t.file_path, t.start_line, e.metadata, t.metadata FROM edges e JOIN nodes t ON e.target_id=t.id WHERE e.source_id=%s AND e.relation_type='child_of'", (node_id,)).fetchall():
                 res["parents"].append({"id": str(r['id']), "file_path": r['file_path'], "start_line": r['start_line'], "edge_meta": r['metadata'], "metadata": r['metadata']})
             for r in conn.execute("SELECT t.id, t.file_path, e.metadata FROM edges e JOIN nodes t ON e.target_id=t.id WHERE e.source_id=%s AND e.relation_type IN ('calls','references') LIMIT 15", (node_id,)).fetchall():
@@ -472,7 +418,7 @@ class PostgresGraphStorage(GraphStorage):
         return res
 
     def get_neighbor_chunk(self, node_id: str, direction: str = "next") -> Optional[Dict[str, Any]]:
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             curr = conn.execute("SELECT file_id, start_line, end_line FROM nodes WHERE id=%s", (node_id,)).fetchone()
             if not curr: return None
             fid, s, e = curr['file_id'], curr['start_line'], curr['end_line']
@@ -483,14 +429,13 @@ class PostgresGraphStorage(GraphStorage):
             else:
                 sql = "SELECT n.id, n.start_line, n.end_line, n.chunk_hash, c.content, n.metadata, n.file_path FROM nodes n JOIN contents c ON n.chunk_hash=c.chunk_hash WHERE n.file_id=%s AND n.end_line <= %s AND n.id!=%s ORDER BY n.end_line DESC LIMIT 1"
                 p = (fid, s, node_id)
-                
             row = conn.execute(sql, p).fetchone()
             if row: return {"id": str(row['id']), "start_line": row['start_line'], "end_line": row['end_line'], "chunk_hash": row['chunk_hash'], "content": row['content'], "metadata": row['metadata'], "file_path": row['file_path']}
             return None
 
     def get_neighbor_metadata(self, node_id: str) -> Dict[str, Any]:
         info = {"next": None, "prev": None, "parent": None}
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             curr = conn.execute("SELECT file_id, start_line, end_line FROM nodes WHERE id=%s", (node_id,)).fetchone()
             if not curr: return info
             fid, s, e = curr['file_id'], curr['start_line'], curr['end_line']
@@ -523,7 +468,7 @@ class PostgresGraphStorage(GraphStorage):
             WHERE f.snapshot_id = %s AND ne.id IS NULL
         """
         cursor_name = f"embed_stream_{uuid.uuid4().hex}"
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             with conn.transaction():
                 with conn.cursor(name=cursor_name) as cur:
                     cur.itersize = batch_size
@@ -538,7 +483,7 @@ class PostgresGraphStorage(GraphStorage):
     def get_vectors_by_hashes(self, vector_hashes: List[str], model_name: str) -> Dict[str, List[float]]:
         if not vector_hashes: return {}
         res = {}
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             query = "SELECT DISTINCT ON (vector_hash) vector_hash, embedding FROM node_embeddings WHERE vector_hash = ANY(%s) AND model_name = %s"
             for r in conn.execute(query, (vector_hashes, model_name)).fetchall():
                 if r['embedding'] is not None: res[r['vector_hash']] = r['embedding']
@@ -547,7 +492,7 @@ class PostgresGraphStorage(GraphStorage):
     def get_incoming_definitions_bulk(self, node_ids: List[str]) -> Dict[str, List[str]]:
         if not node_ids: return {}
         res = {}
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             for i in range(0, len(node_ids), 500):
                 batch = node_ids[i:i+500]
                 for r in conn.execute("SELECT target_id, metadata FROM edges WHERE target_id = ANY(%s) AND relation_type='calls'", (batch,)).fetchall():
@@ -561,7 +506,7 @@ class PostgresGraphStorage(GraphStorage):
     def get_contents_bulk(self, chunk_hashes: List[str]) -> Dict[str, str]:
         if not chunk_hashes: return {}
         res = {}
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             for i in range(0, len(chunk_hashes), 500):
                 batch = chunk_hashes[i:i+500]
                 for r in conn.execute("SELECT chunk_hash, content FROM contents WHERE chunk_hash = ANY(%s)", (batch,)).fetchall():
@@ -570,7 +515,7 @@ class PostgresGraphStorage(GraphStorage):
 
     def list_file_paths(self, snapshot_id: str) -> List[str]:
         sql = "SELECT path FROM files WHERE snapshot_id = %s ORDER BY path"
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             return [r['path'] for r in conn.execute(sql, (snapshot_id,)).fetchall()]
 
     def get_file_content_range(self, snapshot_id: str, file_path: str, start_line: int = None, end_line: int = None) -> Optional[str]:
@@ -582,10 +527,10 @@ class PostgresGraphStorage(GraphStorage):
             WHERE f.snapshot_id = %s AND f.path = %s AND n.end_line >= %s AND n.start_line <= %s
             ORDER BY n.byte_start ASC
         """
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             rows = conn.execute(sql, (snapshot_id, file_path, sl, el)).fetchall()
         if not rows:
-            with self.pool.connection() as conn:
+            with self.connector.get_connection() as conn:
                 exists = conn.execute("SELECT 1 FROM files WHERE snapshot_id=%s AND path=%s", (snapshot_id, file_path)).fetchone()
             if exists: return "" 
             return None 
@@ -598,9 +543,58 @@ class PostgresGraphStorage(GraphStorage):
         return "".join(lines[rel_start:rel_end])
 
     def get_stats(self):
-        with self.pool.connection() as conn:
+        with self.connector.get_connection() as conn:
             return {
                 "files": conn.execute("SELECT COUNT(*) as c FROM files").fetchone()['c'],
+                "total_nodes": conn.execute("SELECT COUNT(*) as c FROM nodes").fetchone()['c'],
+                "embeddings": conn.execute("SELECT COUNT(*) as c FROM node_embeddings").fetchone()['c'],
                 "snapshots": conn.execute("SELECT COUNT(*) as c FROM snapshots").fetchone()['c'],
                 "repos": conn.execute("SELECT COUNT(*) as c FROM repositories").fetchone()['c']
             }
+        
+    # ==========================================
+    # 2. WRITE OPERATIONS (RAW TUPLES & COPY)
+    # ==========================================
+
+    def add_files_raw(self, files_tuples: List[Tuple]):
+        """Inserimento massivo files."""
+        if not files_tuples: return
+        with self.connector.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany("""
+                    INSERT INTO files (id, snapshot_id, commit_hash, file_hash, path, language, size_bytes, category, indexed_at, parsing_status, parsing_error)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (snapshot_id, path) DO UPDATE 
+                    SET file_hash=EXCLUDED.file_hash, parsing_status=EXCLUDED.parsing_status
+                """, files_tuples)
+
+    def add_nodes_raw(self, nodes_tuples: List[Tuple]):
+        """Inserimento massivo nodi via COPY (Velocissimo)."""
+        if not nodes_tuples: return
+        sql = """
+            COPY nodes (id, file_id, file_path, start_line, end_line, byte_start, byte_end, chunk_hash, size, metadata)
+            FROM STDIN
+        """
+        try:
+            with self.connector.get_connection() as conn:
+                with conn.cursor() as cur:
+                    with cur.copy(sql) as copy:
+                        for row in nodes_tuples:
+                            copy.write_row(row)
+        except Exception as e:
+            logger.error(f"❌ COPY failed in add_nodes_raw: {e}")
+            raise e
+
+    def add_contents_raw(self, contents_tuples: List[Tuple]):
+        """Inserimento massivo contenuti."""
+        if not contents_tuples: return
+        with self.connector.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany("INSERT INTO contents (chunk_hash, content) VALUES (%s, %s) ON CONFLICT (chunk_hash) DO NOTHING", contents_tuples)
+
+    def add_relations_raw(self, rels_tuples: List[Tuple]):
+        """Inserimento massivo relazioni."""
+        if not rels_tuples: return
+        with self.connector.get_connection() as conn:
+            with conn.cursor() as cur:
+                 cur.executemany("INSERT INTO edges (source_id, target_id, relation_type, metadata) VALUES (%s, %s, %s, %s)", rels_tuples)
