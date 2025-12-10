@@ -294,21 +294,43 @@ class CodebaseIndexer:
                     except Exception as e:
                         logger.error(f"❌ Worker Error: {e}")
 
-            # 3. Integrazione SCIP (Post-Parsing)
-            # Attendiamo che SCIP abbia finito (se non ha già finito) e scriviamo le relazioni.
-            # È fondamentale farlo DOPO il parsing per garantire che i nodi (target_id) esistano nel DB.
-            logger.info("🔗 Waiting for SCIP relations...")
-            scip_relations = future_scip.result()
+            # 3. Integrazione SCIP (SQL-Based Resolution)
+            logger.info("🔗 Waiting for SCIP relations extraction...")
+            scip_relations = future_scip.result() # Lista di oggetti CodeRelation
             
             if scip_relations:
-                logger.info(f"🔗 Ingesting {len(scip_relations)} SCIP relations...")
-                # Scrittura in batch usando il builder (che risolve gli ID)
-                BATCH_SIZE = 5000
-                for i in range(0, len(scip_relations), BATCH_SIZE):
-                    batch = scip_relations[i:i+BATCH_SIZE]
-                    self.builder.add_relations(batch, snapshot_id=snapshot_id)
+                logger.info(f"🔗 Processing {len(scip_relations)} SCIP relations (SQL Batch Mode)...")
+                
+                # Conversione in Tuple Raw per il DB
+                # Formato: (s_path, s_start, s_end, t_path, t_start, t_end, rel_type, meta_json)
+                raw_batch = []
+                BATCH_SIZE = 10000 # Possiamo osare batch più grandi con COPY
+                
+                for rel in scip_relations:
+                    # Skip se mancano range (es. nodi esterni non risolti/filtrati)
+                    if not rel.source_byte_range or not rel.target_byte_range:
+                        continue
+                        
+                    raw_batch.append((
+                        rel.source_file,
+                        rel.source_byte_range[0],
+                        rel.source_byte_range[1],
+                        rel.target_file,
+                        rel.target_byte_range[0],
+                        rel.target_byte_range[1],
+                        rel.relation_type,
+                        json.dumps(rel.metadata)
+                    ))
+                    
+                    if len(raw_batch) >= BATCH_SIZE:
+                        self.storage.ingest_scip_relations(raw_batch, snapshot_id)
+                        raw_batch = []
+                
+                # Flush finale
+                if raw_batch:
+                    self.storage.ingest_scip_relations(raw_batch, snapshot_id)
             else:
-                logger.info("ℹ️ No SCIP relations found (or SCIP failed).")
+                logger.info("ℹ️ No SCIP relations found.")
 
         # Attivazione Finale
         current_stats = self.storage.get_stats()

@@ -598,3 +598,70 @@ class PostgresGraphStorage(GraphStorage):
         with self.connector.get_connection() as conn:
             with conn.cursor() as cur:
                  cur.executemany("INSERT INTO edges (source_id, target_id, relation_type, metadata) VALUES (%s, %s, %s, %s)", rels_tuples)
+
+    def ingest_scip_relations(self, relations_tuples: List[Tuple], snapshot_id: str):
+        """
+        Ingestion ad alte prestazioni delle relazioni SCIP.
+        
+        Risolve gli ID dei nodi direttamente nel DB usando JOIN spaziali sui range di byte.
+        Trova automaticamente il nodo 'più specifico' (più piccolo) che contiene il range della relazione.
+        
+        Args:
+            relations_tuples: Lista di tuple nel formato:
+            (source_path, s_start, s_end, target_path, t_start, t_end, rel_type, meta_json)
+            snapshot_id: ID dello snapshot corrente per limitare i join.
+        """
+        if not relations_tuples: return
+
+        # Usiamo ON COMMIT DROP: la tabella vive solo finché la transazione è aperta.
+        ddl_temp = """
+            CREATE TEMP TABLE IF NOT EXISTS temp_scip_staging (
+                s_path TEXT, s_start INT, s_end INT,
+                t_path TEXT, t_start INT, t_end INT,
+                rel_type TEXT, meta JSONB
+            ) ON COMMIT DROP; 
+        """
+        
+        sql_resolve = """
+            INSERT INTO edges (source_id, target_id, relation_type, metadata)
+            SELECT DISTINCT ON (t.s_path, t.s_start, t.t_path, t.t_start, t.rel_type)
+                ns.id, nt.id, t.rel_type, t.meta
+            FROM temp_scip_staging t
+            JOIN files fs ON fs.snapshot_id = %s AND fs.path = t.s_path
+            JOIN nodes ns ON ns.file_id = fs.id 
+                AND ns.byte_start <= t.s_start AND ns.byte_end >= t.s_end
+            JOIN files ft ON ft.snapshot_id = %s AND ft.path = t.t_path
+            JOIN nodes nt ON nt.file_id = ft.id 
+                AND nt.byte_start <= t.t_start AND nt.byte_end >= t.t_end
+            
+            WHERE ns.id != nt.id -- <--- STOP SELF LOOPS
+            
+            ORDER BY t.s_path, t.s_start, t.t_path, t.t_start, t.rel_type, 
+                     ns.size ASC, nt.size ASC
+        """
+
+        # CRUCIALE: Usiamo conn.transaction()
+        # Questo disabilita temporaneamente l'autocommit per questo blocco.
+        # Garantisce che la TEMP table sopravviva tra il CREATE e il COPY,
+        # e venga eliminata automaticamente (ON COMMIT DROP) all'uscita del blocco.
+        try:
+            with self.connector.get_connection() as conn:
+                with conn.transaction(): 
+                    with conn.cursor() as cur:
+                        # 1. Crea Tabella (isolata per sessione)
+                        cur.execute(ddl_temp)
+                        
+                        # 2. Carica Dati Raw
+                        with cur.copy("COPY temp_scip_staging FROM STDIN") as copy:
+                            for row in relations_tuples:
+                                copy.write_row(row)
+                        
+                        # 3. Risolvi e Inserisci
+                        cur.execute(sql_resolve, (snapshot_id, snapshot_id))
+                        
+                        logger.info(f"🔗 SCIP Bulk Ingestion: {cur.rowcount} edges created.")
+                        
+        except Exception as e:
+            logger.error(f"❌ SCIP Ingestion Failed: {e}")
+            raise e
+        

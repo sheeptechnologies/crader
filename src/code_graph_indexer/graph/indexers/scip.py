@@ -12,6 +12,8 @@ from typing import List, Dict, Any, Set, Tuple, Optional, Generator
 
 from ..base import BaseGraphIndexer, CodeRelation
 
+from ...parsing.parsing_filters import GLOBAL_IGNORE_DIRS, SEMANTIC_NOISE_DIRS
+
 logger = logging.getLogger(__name__)
 
 # --- SCIP CONSTANTS & UTILS ---
@@ -85,12 +87,14 @@ class SCIPRunner:
         ".java": "scip-java", ".go": "scip-go", ".rs": "scip-rust",
         ".php": "scip-php", ".c": "scip-clang", ".cpp": "scip-clang",
     }
-    IGNORE_DIRS = {".git", "node_modules", "target", "build", "dist", ".venv", "venv", "__pycache__",".env", "env"}
+
     SCIP_CLI = "scip"
 
     def __init__(self, repo_path: str):
         self.repo_path = os.path.abspath(repo_path)
         self._active_indices = []
+        # SCIP deve essere più aggressivo del parser nell'ignorare cose.
+        self.ignore_dirs = GLOBAL_IGNORE_DIRS | SEMANTIC_NOISE_DIRS
 
     def prepare_indices(self) -> List[Tuple[str, str]]:
         if not shutil.which(self.SCIP_CLI):
@@ -116,6 +120,7 @@ class SCIPRunner:
         return results
 
     def _run_single_index(self, task, env) -> Optional[Tuple[str, str]]:
+
         indexer, project_root = task
         tmp_idx = tempfile.NamedTemporaryFile(delete=False, suffix=".scip").name
         try:
@@ -129,6 +134,7 @@ class SCIPRunner:
         except Exception as e:
             logger.error(f"[SCIP] Error {indexer}: {e}")
         return None
+    
 
     def stream_documents(self, indices: List[Tuple[str, str]]) -> Generator[Dict, None, None]:
         for project_root, index_path in indices:
@@ -143,11 +149,25 @@ class SCIPRunner:
                         payload = json.loads(line)
                         docs = payload if isinstance(payload, list) else payload.get("documents", [payload])
                         for doc in docs:
+                            # [NEW] Filtraggio Post-Processing per i documenti
+                            # Se l'indexer ha incluso file che volevamo ignorare (es. tests), li scartiamo qui.
+                            if self._should_skip_document(doc.get("relative_path", "")):
+                                continue
                             yield {"project_root": project_root, "document": doc}
                     except ValueError: pass
                 proc.wait()
             except Exception as e:
                 logger.error(f"[SCIP] Stream error for {project_root}: {e}")
+
+    def _should_skip_document(self, rel_path: str) -> bool:
+        """Controlla se il file restituito da SCIP è in una directory ignorata."""
+        if not rel_path: return True
+        parts = rel_path.split('/')
+        # Se una qualsiasi parte del path è nella blacklist, scarta
+        for part in parts:
+            if part in self.ignore_dirs or part.startswith('.'):
+                return True
+        return False
 
     def cleanup(self):
         for p in self._active_indices:
@@ -158,18 +178,25 @@ class SCIPRunner:
     def _discover_tasks(self) -> List[Tuple[str, str]]:
         tasks = []
         found_roots = set()
+        
+        # Usa self.ignore_dirs (che include SEMANTIC_NOISE) per potare l'albero
         for root, dirs, files in os.walk(self.repo_path, topdown=True):
-            dirs[:] = [d for d in dirs if d.lower() not in self.IGNORE_DIRS]
+            # Modifica in-place di dirs per non scendere in cartelle ignorate
+            dirs[:] = [d for d in dirs if d not in self.ignore_dirs and not d.startswith('.')]
+            
             if any(root.startswith(p) for p in found_roots): continue
+            
             for marker, indexer in self.PROJECT_MARKERS.items():
                 if marker in files and shutil.which(indexer):
                     tasks.append((indexer, root))
                     found_roots.add(root)
-                    dirs[:] = [] 
+                    dirs[:] = [] # Stop recursion in this project
                     break
+        
         if not tasks:
             detected = set()
             for root, _, files in os.walk(self.repo_path):
+                # Anche qui filtriamo implicitamente perché os.walk sopra ha già potato 'dirs'
                 for f in files:
                     ext = os.path.splitext(f)[1]
                     if ext in self.EXTENSION_MAP:
@@ -277,7 +304,7 @@ class SCIPIndexer(BaseGraphIndexer):
             )
 
     # --- Helpers ---
-    @lru_cache(maxsize=128)
+    @lru_cache(maxsize=1024)
     def _get_file_content_cached(self, rel_path: str) -> Optional[List[str]]:
         abs_path = os.path.join(self.repo_path, rel_path)
         if not os.path.exists(abs_path): return None

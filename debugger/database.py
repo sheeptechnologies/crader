@@ -4,7 +4,7 @@ from src.code_graph_indexer.storage.postgres import PostgresGraphStorage
 # Default to the one used in tests, but allow env override
 DB_URL = os.getenv("SHEEP_DB_URL", "postgresql://sheep_user:sheep_password@localhost:5433/sheep_index")
 
-import psycopg
+from src.code_graph_indexer.storage.connector import PooledConnector
 
 _storage_instance = None
 
@@ -14,5 +14,7 @@ def get_storage():
     """
     global _storage_instance
     if _storage_instance is None:
-        _storage_instance = PostgresGraphStorage(DB_URL, vector_dim=1536, timeout=60.0)
+        # Use PooledConnector as per new library API
+        connector = PooledConnector(dsn=DB_URL, min_size=4, max_size=20)
+        _storage_instance = PostgresGraphStorage(connector, vector_dim=1536)
     return _storage_instance

@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from src.code_graph_indexer.retriever import CodeRetriever
 from src.code_graph_indexer.navigator import CodeNavigator
 from debugger.agent_utils import get_agent
-from debugger.database import get_storage
+from debugger.database import get_storage, DB_URL
 
 # Setup Logging
 logging.basicConfig(
@@ -98,7 +98,7 @@ def list_repos():
     # Accessing private _cursor is not ideal but works for a debugger tool.
     
     # Use connection pool for Postgres
-    with storage.pool.connection() as conn:
+    with storage.connector.get_connection() as conn:
         rows = conn.execute("SELECT * FROM repositories").fetchall()
         # rows are dicts because of dict_row factory in PostgresGraphStorage
         return rows
@@ -134,7 +134,7 @@ def delete_repo(repo_id: str):
     # PostgresGraphStorage schema usually has FKs. Let's assume cascade or manual cleanup.
     # For now, let's try deleting from repositories.
     
-    with storage.pool.connection() as conn:
+    with storage.connector.get_connection() as conn:
         # Delete related data first to be safe if no cascade
         conn.execute("DELETE FROM node_embeddings WHERE repo_id = %s", (repo_id,))
         conn.execute("DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE file_id IN (SELECT id FROM files WHERE repo_id = %s))", (repo_id,))
@@ -158,9 +158,14 @@ def index_repo(repo_id: str, req: IndexRequest, background_tasks: BackgroundTask
 
     def _run_index():
         try:
-            indexer = CodebaseIndexer(repo_url, branch, storage)
-            snapshot_id = indexer.index(force=False)
-            logger.info(f"Indexing completed. Snapshot ID: {snapshot_id}")
+            # CodebaseIndexer now manages its own storage/connector
+            # We pass DB_URL to it so it can connect
+            indexer = CodebaseIndexer(repo_url, branch, db_url=DB_URL)
+            try:
+                snapshot_id = indexer.index(force=req.force)
+                logger.info(f"Indexing completed. Snapshot ID: {snapshot_id}")
+            finally:
+                indexer.close()
         except Exception as e:
             logger.error(f"Indexing failed: {e}")
 
@@ -193,16 +198,19 @@ def embed_repo(repo_id: str, req: EmbedRequest, background_tasks: BackgroundTask
 
     def _run_embed():
         try:
-            indexer = CodebaseIndexer(repo_url, branch, storage)
-            # Consume generator
-            count = 0
-            # Resolve active snapshot automatically inside embed if not passed
-            for item in indexer.embed(provider, batch_size=req.batch_size, debug=True):
-                count += 1
-                if count % 10 == 0:
-                    logger.info(f"🤖 Embedding progress: {count} items processed...")
-            
-            logger.info(f"✅ Embedding finished. Total items: {count}")
+            indexer = CodebaseIndexer(repo_url, branch, db_url=DB_URL)
+            try:
+                # Consume generator
+                count = 0
+                # Resolve active snapshot automatically inside embed if not passed
+                for item in indexer.embed(provider, batch_size=req.batch_size, debug=True):
+                    count += 1
+                    if count % 10 == 0:
+                        logger.info(f"🤖 Embedding progress: {count} items processed...")
+                
+                logger.info(f"✅ Embedding finished. Total items: {count}")
+            finally:
+                indexer.close()
         except Exception as e:
             logger.error(f"Embedding failed: {e}")
 
@@ -270,7 +278,7 @@ def get_file_content(repo_id: str, path: str):
          raise HTTPException(status_code=404, detail="File not found in snapshot")
          
     # Get chunks for this file
-    with storage.pool.connection() as conn:
+    with storage.connector.get_connection() as conn:
         # Join with files to filter by path and snapshot
         rows = conn.execute("""
             SELECT n.id, n.start_line, n.end_line, n.byte_start, n.byte_end, n.metadata, n.chunk_hash
@@ -298,7 +306,7 @@ def get_chunk_graph(chunk_id: str):
     storage = get_storage()
     
     # Get the node itself
-    with storage.pool.connection() as conn:
+    with storage.connector.get_connection() as conn:
         row = conn.execute("""
             SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
             FROM nodes n
@@ -339,7 +347,7 @@ def get_chunk_graph(chunk_id: str):
         
         # Fetch target node details
         # Fetch target node details
-        with storage.pool.connection() as conn:
+        with storage.connector.get_connection() as conn:
             t_row = conn.execute("""
                 SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
                 FROM nodes n
@@ -373,7 +381,7 @@ def get_chunk_graph(chunk_id: str):
         
         # Fetch source node details
         # Fetch source node details
-        with storage.pool.connection() as conn:
+        with storage.connector.get_connection() as conn:
             s_row = conn.execute("""
                 SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
                 FROM nodes n
@@ -402,7 +410,7 @@ def get_chunk_graph(chunk_id: str):
 
     # Explicitly fetch child_of relations (parent/child)
     # Check if this node is a child of another node
-    with storage.pool.connection() as conn:
+    with storage.connector.get_connection() as conn:
         # Parents (this node is source, relation is child_of)
         parents = conn.execute("""
             SELECT target_id FROM edges WHERE source_id = %s AND relation_type = 'child_of'
@@ -487,7 +495,7 @@ def get_chunk_impact(chunk_id: str):
         edges = []
         
         # Add center node
-        with storage.pool.connection() as conn:
+        with storage.connector.get_connection() as conn:
             row = conn.execute("""
                 SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
                 FROM nodes n
@@ -508,7 +516,7 @@ def get_chunk_impact(chunk_id: str):
         for ref in impact_data:
             # ref is {source_id, relation, file, line}
             # We need to fetch full node details for the source
-             with storage.pool.connection() as conn:
+             with storage.connector.get_connection() as conn:
                 s_row = conn.execute("""
                     SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
                     FROM nodes n
@@ -556,7 +564,7 @@ def get_chunk_pipeline(chunk_id: str):
                 if child_id not in visited:
                     visited.add(child_id)
                     # Fetch node details
-                    with storage.pool.connection() as conn:
+                    with storage.connector.get_connection() as conn:
                         c_row = conn.execute("""
                             SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
                             FROM nodes n
@@ -585,7 +593,7 @@ def get_chunk_pipeline(chunk_id: str):
                     _process_tree(child_id, child_data['children'])
 
         # Add root node
-        with storage.pool.connection() as conn:
+        with storage.connector.get_connection() as conn:
             row = conn.execute("""
                 SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
                 FROM nodes n
@@ -621,7 +629,7 @@ def get_chunk_neighbors(chunk_id: str):
         edges = []
         
         # Add center node
-        with storage.pool.connection() as conn:
+        with storage.connector.get_connection() as conn:
             row = conn.execute("""
                 SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
                 FROM nodes n
@@ -704,7 +712,7 @@ def get_chunk_parent(chunk_id: str):
         edges = []
         
         # Add center node
-        with storage.pool.connection() as conn:
+        with storage.connector.get_connection() as conn:
             row = conn.execute("""
                 SELECT n.id, n.file_path, n.start_line, n.end_line, c.content, n.metadata
                 FROM nodes n
