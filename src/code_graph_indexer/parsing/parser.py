@@ -8,6 +8,8 @@ from typing import List, Dict, Optional, Generator, Tuple, Any, Union
 from tree_sitter import Parser, Node
 from tree_sitter_languages import get_language
 
+from opentelemetry import trace
+
 from ..models import FileRecord, ChunkNode, ChunkContent, ParsingResult, CodeRelation
 from ..providers.metadata import MetadataProvider, GitMetadataProvider, LocalMetadataProvider
 from .parsing_filters import (
@@ -17,6 +19,8 @@ from .parsing_filters import (
     MAX_FILE_SIZE_BYTES,
     MAX_LINE_LENGTH
 )
+
+tracer = trace.get_tracer(__name__)
 
 class TreeSitterRepoParser:
     """
@@ -66,6 +70,7 @@ class TreeSitterRepoParser:
         # Caricamento Lingue (Cache)
         self.languages: Dict[str, Any] = {}
         lang_cache: Dict[str, Any] = {}
+        self._query_cache: Dict[str, Any] = {}
 
         for ext, lang_name in self.LANGUAGE_MAP.items():
             if lang_name in lang_cache:
@@ -85,7 +90,7 @@ class TreeSitterRepoParser:
         # Ma nel nostro design, il Parser ACCETTA semantic noise (test) ma SCIP no.
         # Quindi qui ignoriamo SOLO GLOBAL_IGNORE_DIRS (rumore tecnico).
         # Se vuoi che il parser ignori anche i test, aggiungi SEMANTIC_NOISE_DIRS qui.
-        self.all_ignore_dirs = GLOBAL_IGNORE_DIRS
+        self.all_ignore_dirs = GLOBAL_IGNORE_DIRS #| SEMANTIC_NOISE_DIRS
 
     def _set_parser_language(self, lang_object):
         if hasattr(self.parser, 'set_language'): self.parser.set_language(lang_object)
@@ -163,55 +168,79 @@ class TreeSitterRepoParser:
             ("type", "function"): "Function Definition",
         }
         return labels.get((category, value), f"{value.replace('_', ' ').title()}")
-
+    
     def _get_semantic_captures(self, tree, language_name: str) -> List[Dict[str, Any]]:
-        query_scm = self._load_query_for_language(language_name)
-        if not query_scm: return []
-        
-        target_ext = next((ext for ext, lang in self.LANGUAGE_MAP.items() if lang == language_name), None)
-        if not target_ext or target_ext not in self.languages: return []
-        lang_obj = self.languages[target_ext]
+        # 1. CHECK CACHE (Fast Path)
+        if language_name in self._query_cache:
+            query = self._query_cache[language_name]
+        else:
+            # 2. LOAD & COMPILE (Slow Path - Solo una volta per worker)
+            query_scm = self._load_query_for_language(language_name)
+            if not query_scm:
+                self._query_cache[language_name] = None
+                return []
+            
+            target_ext = next((ext for ext, lang in self.LANGUAGE_MAP.items() if lang == language_name), None)
+            if not target_ext or target_ext not in self.languages: 
+                self._query_cache[language_name] = None
+                return []
+            
+            lang_obj = self.languages[target_ext]
+            
+            try:
+                # La compilazione è costosa, la facciamo una volta sola
+                query = lang_obj.query(query_scm)
+                self._query_cache[language_name] = query
+            except Exception as e:
+                print(f"[ERROR] Invalid query for {language_name}: {e}")
+                self._query_cache[language_name] = None
+                return []
+
+        # Se la query non esiste o è fallita in precedenza, esci
+        if query is None: 
+            return []
         
         try:
-            query = lang_obj.query(query_scm)
+            # 3. EXECUTE (C-Speed)
+            # Ora misuriamo solo l'esecuzione pura, senza l'overhead di compilazione
             captures = query.captures(tree.root_node)
+            
             results = []
+            # Ottimizzazione Loop: riduciamo lookup e split
             for node, capture_name in captures:
-                parts = capture_name.split('.')
-                if len(parts) < 2: continue
+                # capture_name è es: "role.class"
+                if '.' not in capture_name: continue
                 
-                category, value = parts[0], parts[1]
+                category, value = capture_name.split('.', 1)
+                
                 results.append({
                     "start": node.start_byte,
                     "end": node.end_byte,
                     "metadata": {
                         "category": category,
                         "value": value,
+                        # Memo: _generate_label è veloce, ma potremmo cachare anche lui se servisse
                         "label": self._generate_label(category, value)
                     }
                 })
             return results
         except Exception as e:
-            # Warning leggero, non blocca il parsing
             return []
-
     # ==============================================================================
     #  MAIN PIPELINE (OPTIMIZED)
     # ==============================================================================
 
     def stream_semantic_chunks(self, file_list: Optional[List[str]] = None) -> Generator[Tuple[FileRecord, List[ChunkNode], List[ChunkContent], List[CodeRelation]], None, None]:
         if not self.snapshot_id:
-            raise ValueError("Parser: snapshot_id not set. Cannot process files without a version context.")
+            raise ValueError("Parser: snapshot_id not set.")
 
         files_to_process = set(file_list) if file_list else None
         commit_hash = self.repo_info.get('commit_hash', 'HEAD')
         
+        # Walk Loop
         for root, dirs, files in os.walk(self.repo_path, topdown=True):
-            # Pruning delle directory ignorate "in-place" per non scenderci dentro
-            # Ignoriamo GLOBAL_IGNORE_DIRS e le directory nascoste
             dirs[:] = [d for d in dirs if d not in self.all_ignore_dirs and not d.startswith('.')]
 
-            
             for file_name in files:
                 _, ext = os.path.splitext(file_name)
                 lang_object = self.languages.get(ext)
@@ -223,86 +252,97 @@ class TreeSitterRepoParser:
                 if not self._should_process_file(rel_path): continue
                 if files_to_process and rel_path not in files_to_process: continue
 
-                try:
-                    content, error_msg = self._safe_read_file(full_path)
+                # [OTEL] Span per singolo file.
+                # Questo è fondamentale per debugging granulare.
+                with tracer.start_as_current_span("parser.process_file") as span:
+                    span.set_attribute("file.path", rel_path)
+                    span.set_attribute("file.extension", ext)
+                    span.set_attribute("file.lang", self.LANGUAGE_MAP[ext])
                     
-                    if error_msg:
-                        # Log o skip silenzioso per non sporcare il DB con errori noti
-                        continue
-
-                    file_rec = FileRecord(
-                        id=str(uuid.uuid4()), 
-                        snapshot_id=self.snapshot_id, 
-                        commit_hash=commit_hash,
-                        file_hash="", path=rel_path,
-                        language=self.LANGUAGE_MAP[ext], size_bytes=0,
-                        category=self.metadata_provider.get_file_category(rel_path),
-                        indexed_at=datetime.datetime.utcnow().isoformat() + "Z",
-                        parsing_status="success", parsing_error=None
-                    )
-
-                    if self._is_minified_or_generated(content, rel_path):
-                        file_rec.parsing_status = "skipped"
-                        file_rec.parsing_error = "Minified/Generated"
-                        # Yieldiamo comunque il file skipped per tracciabilità nel DB?
-                        # Enterprise: Sì, meglio sapere perché manca un file.
-                        yield (file_rec, [], [], [])
-                        continue
-
-                    if error_msg:
-                        file_rec.parsing_status = "skipped"
-                        file_rec.parsing_error = error_msg
-                        yield (file_rec, [], [], [])
-                        continue
-
-                    file_rec.size_bytes = len(content)
-                    file_rec.file_hash = self.metadata_provider.get_file_hash(rel_path, content)
-                    
-                    if self._is_minified_or_generated(content, rel_path):
-                        file_rec.parsing_status = "skipped"
-                        file_rec.parsing_error = "Minified/Generated"
-                        yield (file_rec, [], [], [])
-                        continue
-
-                    self._set_parser_language(lang_object)
-                    tree = self.parser.parse(content)
-                    
-                    lang_name = self.LANGUAGE_MAP[ext]
-                    semantic_captures = self._get_semantic_captures(tree, lang_name)
-                    
-                    nodes = []; contents = {}; relations = []
-                    
-                    # [OPTIMIZATION] Uso memoryview per zero-copy slicing
-                    mv_content = memoryview(content)
-                    
-                    self._process_scope(
-                        tree.root_node, mv_content, content, rel_path, file_rec.id, None, 
-                        nodes, contents, relations,
-                        semantic_captures=semantic_captures
-                    )
-
-                    if nodes:
-                        nodes.sort(key=lambda c: c.byte_range[0])
-                        yield (file_rec, nodes, list(contents.values()), relations)
-                    else:
-                        yield (file_rec, [], [], [])
-
-                except Exception as e: 
-                    # Logghiamo ma non fermiamo il processo
-                    print(f"[ERROR] Processing {rel_path}: {e}")
                     try:
-                        err_rec = FileRecord(
-                            id=str(uuid.uuid4()), 
-                            snapshot_id=self.snapshot_id,
-                            commit_hash=commit_hash,
-                            file_hash="error", path=rel_path, language=self.LANGUAGE_MAP.get(ext, "unknown"),
-                            size_bytes=0, category="unknown",
-                            indexed_at=datetime.datetime.utcnow().isoformat() + "Z",
-                            parsing_status="failed", parsing_error=str(e)
+                        # 1. READ (I/O)
+                        with tracer.start_as_current_span("parser.io_read") as io_span:
+                            content, error_msg = self._safe_read_file(full_path)
+                            if content:
+                                io_span.set_attribute("file.size_bytes", len(content))
+                        
+                        # Gestione Errori Lettura / Minificazione
+                        if error_msg or self._is_minified_or_generated(content, rel_path):
+                            span.set_attribute("parsing.status", "skipped")
+                            span.set_attribute("parsing.skip_reason", error_msg or "minified")
+                            
+                            # Creiamo record Skipped
+                            file_rec = self._create_file_record(
+                                rel_path, commit_hash, ext, 
+                                status="skipped", error=error_msg or "Minified/Generated"
+                            )
+                            yield (file_rec, [], [], [])
+                            continue
+
+                        # 2. HASHING (CPU)
+                        with tracer.start_as_current_span("parser.hashing"):
+                            file_hash = self.metadata_provider.get_file_hash(rel_path, content)
+
+                        # Creiamo record Base
+                        file_rec = self._create_file_record(
+                            rel_path, commit_hash, ext, 
+                            size=len(content), file_hash=file_hash
+                        )
+
+                        # 3. PARSING (CPU - TreeSitter)
+                        self._set_parser_language(lang_object)
+                        with tracer.start_as_current_span("parser.tree_sitter"):
+                            tree = self.parser.parse(content)
+                        
+                        lang_name = self.LANGUAGE_MAP[ext]
+                        with tracer.start_as_current_span("parser.queries_exec") as query_span:
+                            semantic_captures = self._get_semantic_captures(tree, lang_name)
+                        
+                        nodes = []; contents = {}; relations = []
+                        mv_content = memoryview(content)
+                        
+                        # 4. CHUNKING (CPU - Recursive)
+                        # Nota: Un solo span per tutto l'albero, non ricorsivo
+                        with tracer.start_as_current_span("parser.chunking") as chunk_span:
+                            self._process_scope(
+                                tree.root_node, mv_content, content, rel_path, file_rec.id, None, 
+                                nodes, contents, relations,
+                                semantic_captures=semantic_captures
+                            )
+                            chunk_span.set_attribute("chunks.generated", len(nodes))
+
+                        if nodes:
+                            nodes.sort(key=lambda c: c.byte_range[0])
+                            yield (file_rec, nodes, list(contents.values()), relations)
+                        else:
+                            yield (file_rec, [], [], [])
+
+                    except Exception as e:
+                        # [OTEL] Capture Exception
+                        span.record_exception(e)
+                        span.set_status(trace.Status(trace.StatusCode.ERROR))
+                        print(f"[ERROR] Processing {rel_path}: {e}")
+                        
+                        # Yield Error Record
+                        err_rec = self._create_file_record(
+                            rel_path, commit_hash, ext, 
+                            status="failed", error=str(e)
                         )
                         yield (err_rec, [], [], [])
-                    except: pass
 
+    def _create_file_record(self, path, commit, ext, status="success", error=None, size=0, file_hash=""):
+        """Helper per pulire il codice principale"""
+        return FileRecord(
+            id=str(uuid.uuid4()), 
+            snapshot_id=self.snapshot_id, 
+            commit_hash=commit,
+            file_hash=file_hash, path=path,
+            language=self.LANGUAGE_MAP.get(ext, "unknown"), size_bytes=size,
+            category=self.metadata_provider.get_file_category(path),
+            indexed_at=datetime.datetime.utcnow().isoformat() + "Z",
+            parsing_status=status, parsing_error=error
+        )
+                
     def extract_semantic_chunks(self) -> ParsingResult:
         files, nodes, contents, all_rels = [], [], {}, []
         for f, n, c, r in self.stream_semantic_chunks():

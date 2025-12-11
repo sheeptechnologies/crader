@@ -15,21 +15,54 @@ from code_graph_indexer import CodebaseIndexer
 from code_graph_indexer.storage.connector import PooledConnector
 from code_graph_indexer.storage.postgres import PostgresGraphStorage
 
+from opentelemetry import trace
+from opentelemetry.trace import ProxyTracerProvider
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+
+
+# [TELEMETRY HOOK]
+# Questa funzione è Top-Level, quindi è serializzabile (Picklable) per i worker.
+def setup_telemetry():
+    # 1. Definisci chi siamo
+    resource = Resource.create(attributes={
+        "service.name": "sheep-indexer-worker",
+        "deployment.environment": "development",
+        "process.pid": os.getpid()
+    })
+
+    # 2. Configura il Provider
+    # [FIX] Controllo robusto invece di _sdk_config
+    provider = trace.get_tracer_provider()
+    
+    # Se il provider è ancora un Proxy, significa che non è stato configurato.
+    if isinstance(provider, ProxyTracerProvider):
+        print(f"📡 [PID {os.getpid()}] Configuring OTel Exporter...")
+        
+        real_provider = TracerProvider(resource=resource)
+        
+        # 3. Configura l'Exporter
+        exporter = OTLPSpanExporter(endpoint="http://localhost:4317", insecure=True)
+        real_provider.add_span_processor(BatchSpanProcessor(exporter))
+        
+        # 4. Imposta come Globale
+        trace.set_tracer_provider(real_provider)
+    else:
+        print(f"ℹ️  [PID {os.getpid()}] OTel already configured.")
 # --- CONFIGURAZIONE ---
-# Testiamo su Django (grande abbastanza per far girare SCIP seriamente)
 REPO_URL = "https://github.com/django/django.git" 
 BRANCH = "main"
 
-# Assicurati che punti alla porta corretta:
-# 6432 = PgBouncer (Enterprise Mode)
-# 5433 = Postgres Diretto (Fallback se PgBouncer non è attivo)
+# DB Config
 DB_PORT = "6432" 
 DB_USER = "sheep_user"
 DB_PASS = "sheep_password"
 DB_NAME = "sheep_index"
 DB_DSN = f"postgresql://{DB_USER}:{DB_PASS}@localhost:{DB_PORT}/{DB_NAME}"
 
-# Setup Logger
+# Logger Setup
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger("BENCHMARK")
 logger.setLevel(logging.INFO)
@@ -39,9 +72,8 @@ def clean_database():
     """Pulisce il DB usando un connettore di servizio."""
     print("🧹 Cleaning Database...")
     try:
-        # Usiamo un pool minimo per l'admin task
         connector = PooledConnector(dsn=DB_DSN, min_size=1, max_size=1)
-        storage = PostgresGraphStorage(connector)
+        # Non serve istanziare storage wrapper, basta una query raw
         with connector.get_connection() as conn:
             conn.execute("TRUNCATE repositories CASCADE")
         connector.close()
@@ -63,25 +95,32 @@ def run_session(mode_name: str, single_core: bool):
     
     clean_database()
     
-    # Configurazione automatica via ENV per l'Indexer
     os.environ["DB_URL"] = DB_DSN
     
     start_time = time.time()
     
-    # NOTA: Abbiamo rimosso il patch di SCIP. Ora gira davvero!
-    
     if single_core:
         print("🐌 Single-Core (Simulated)...")
-        # Simuliamo 1 solo worker di parsing
+        # Simuliamo pochi core per vedere la differenza
         with patch('multiprocessing.cpu_count', return_value=2):
-            indexer = CodebaseIndexer(REPO_URL, BRANCH)
+            # [MODIFICA QUI] Passiamo l'hook di telemetria
+            indexer = CodebaseIndexer(
+                REPO_URL, 
+                BRANCH, 
+                worker_telemetry_init=setup_telemetry
+            )
             indexer.index(force=True)
             indexer.close()
     else:
         real_cpus = multiprocessing.cpu_count()
         print(f"⚡ Enterprise Multi-Core ({real_cpus} CPU)...")
         
-        indexer = CodebaseIndexer(REPO_URL, BRANCH)
+        # [MODIFICA QUI] Passiamo l'hook di telemetria
+        indexer = CodebaseIndexer(
+            REPO_URL, 
+            BRANCH, 
+            worker_telemetry_init=setup_telemetry
+        )
         indexer.index(force=True)
         indexer.close()
 
@@ -93,14 +132,14 @@ def run_session(mode_name: str, single_core: bool):
 def print_report(optimized):
     print("\n\n")
     print("🏆 FINAL BENCHMARK REPORT (Full Stack SCIP)")
-    print(f"{'Metrica':<20} | {'Baseline (1 Core)':<20} | {'Enterprise (Multi)':<20} | {'Speedup'}")
+    print(f"{'Metrica':<20} | {'Baseline (Ref)':<20} | {'Enterprise (Multi)':<20} | {'Speedup'}")
     print("-" * 85)
     
-    t1, t2 = 241.69, optimized['duration']
+    # Valore di riferimento hardcoded per confronto rapido
+    t1 = 241.69 
+    t2 = optimized['duration']
     
-    # Recupero stats
-    # f1 = baseline['stats'].get('files', 0)
-    n1 = 40796
+    n1 = 40796 # Baseline reference nodes
     
     f2 = optimized['stats'].get('files', 0)
     n2 = optimized['stats'].get('total_nodes', 0)
@@ -116,17 +155,15 @@ def print_report(optimized):
     
     if abs(n1 - n2) > 200:
         print("⚠️ Warning: Differenza significativa nel numero di nodi tra le esecuzioni.")
-        print("Potrebbe indicare una race condition nel salvataggio SCIP se i numeri sono molto diversi.")
     else:
         print(f"✅ Integrità Dati OK: {n2} nodi.")
 
 if __name__ == "__main__":
-    # Assicurati che PgBouncer (6432) sia su, oppure cambia DB_PORT a 5433
+    print("Running file:", __file__)
+    print("TracerProvider is:", TracerProvider)
+    # 1. Configura telemetria per il PROCESSO PADRE
+    setup_telemetry()
     
-    # 1. Baseline Run (1 Parse Worker + SCIP)
-    # res_base = run_session("Baseline", single_core=True)
-    
-    # 2. Optimized Run (N Parse Workers + SCIP)
+    # 2. Esegui il benchmark (L'hook configurerà i worker)
     res_opt = run_session("Enterprise", single_core=False)
-    
-    print_report( res_opt)
+    print_report(res_opt)

@@ -1,11 +1,17 @@
+from collections import defaultdict
 import os
 import logging
 import concurrent.futures
 import multiprocessing
 import itertools
+from contextlib import ExitStack
 import json
-from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime
+from typing import Callable, Dict, Any, List, Optional, Tuple
+
+from opentelemetry import trace, context
+from opentelemetry.propagate import inject, extract
+
+tracer = trace.get_tracer(__name__)
 
 # Componenti Interni
 from .volume_manager.git_volume_manager import GitVolumeManager
@@ -26,11 +32,17 @@ logger = logging.getLogger(__name__)
 _worker_parser = None
 _worker_storage = None
 
-def _init_worker_process(worktree_path: str, snapshot_id: str, commit_hash: str, repo_url: str, branch: str, db_url: str):
+def _init_worker_process(worktree_path: str, snapshot_id: str, commit_hash: str, repo_url: str, branch: str, db_url: str,worker_init_fn: Optional[Callable]):
     """
     Bootstrap del Worker Process.
     Ogni worker si crea il proprio SingleConnector dedicato verso PgBouncer.
     """
+    if worker_init_fn:
+        try:
+            worker_init_fn()
+        except Exception as e:
+            print(f"⚠️ [WORKER INIT] Custom telemetry setup failed: {e}")
+
     global _worker_parser, _worker_storage
     
     # 1. Init Parser (Cpu Bound)
@@ -57,75 +69,95 @@ def _init_worker_process(worktree_path: str, snapshot_id: str, commit_hash: str,
         print(f"❌ [WORKER INIT ERROR] DB Connect failed: {e}")
         _worker_storage = None
 
-def _process_and_insert_chunk(file_paths: List[str]) -> int:
+
+def _process_and_insert_chunk(file_paths: List[str], carrier: Dict[str, str]) -> Tuple[int, Dict[str, float]]:
     """
-    Il worker parsifica un chunk di file e scrive direttamente su DB via COPY.
-    Nessun dato viene ritornato al processo padre (Zero IPC overhead).
+    Worker ottimizzato con Micro-Batching per evitare OOM su chunk grandi.
     """
     global _worker_parser, _worker_storage
-    
-    if not _worker_storage:
-        return 0 # Fail safe
+    if not _worker_storage: return 0, {}
 
-    # Buffer Locali (Tuple per COPY/INSERT raw)
-    t_files = []
-    t_nodes = []
-    t_contents = []
-    t_rels = []
+    ctx = extract(carrier)
     
-    count = 0
+    # Parametri di Tuning Memoria
+    BATCH_SIZE_NODES = 50000  # Flush ogni 100k nodi (max efficienza COPY)
+    BATCH_SIZE_FILES = 500     # Flush ogni 500 file
+    
+    # Buffer Locali
+    buffer = {
+        'files': [], 'nodes': [], 'contents': [], 'rels': []
+    }
+    
+    processed_count = 0
 
-    for f_path in file_paths:
+    def flush_buffers():
+        """Helper interno per scaricare i buffer su DB."""
+        if not (buffer['files'] or buffer['nodes']): return
+        
         try:
-            # Parsing stream
-            for f_rec, nodes, contents, rels in _worker_parser.stream_semantic_chunks(file_list=[f_path]):
+            with tracer.start_as_current_span("worker.db_flush") as db_span:
+                db_span.set_attribute("nodes.count", len(buffer['nodes']))
+                db_span.set_attribute("files.count", len(buffer['files']))
                 
-                # 1. File Tuple
-                t_files.append((
-                    f_rec.id, f_rec.snapshot_id, f_rec.commit_hash, f_rec.file_hash, f_rec.path, 
-                    f_rec.language, f_rec.size_bytes, f_rec.category, f_rec.indexed_at, 
-                    f_rec.parsing_status, f_rec.parsing_error
-                ))
+                if buffer['files']: _worker_storage.add_files_raw(buffer['files'])
+                if buffer['contents']: _worker_storage.add_contents_raw(buffer['contents'])
+                if buffer['nodes']: _worker_storage.add_nodes_raw(buffer['nodes'])
+                if buffer['rels']: _worker_storage.add_relations_raw(buffer['rels'])
                 
-                # 2. Node Tuple (per COPY)
-                for n in nodes:
-                    bs, be = n.byte_range
-                    t_nodes.append((
-                        n.id, n.file_id, n.file_path, 
-                        n.start_line, n.end_line, bs, be, 
-                        n.chunk_hash, be - bs, 
-                        json.dumps(n.metadata) 
-                    ))
-                
-                # 3. Content Tuple
-                for c in contents:
-                    t_contents.append((c.chunk_hash, c.content))
-                    
-                # 4. Relation Tuple
-                for r in rels:
-                    t_rels.append((
-                        r.source_id, r.target_id, r.relation_type, 
-                        json.dumps(r.metadata)
-                    ))
-                
-                count += 1
-                
+            # Reset buffer (Liberiamo RAM!)
+            buffer['files'].clear()
+            buffer['nodes'].clear()
+            buffer['contents'].clear()
+            buffer['rels'].clear()
+            
         except Exception as e:
-            # Logghiamo l'errore ma continuiamo col prossimo file nel chunk
-            print(f"⚠️ [WORKER ERROR] Processing {f_path}: {e}")
-            continue
+            logger.error(f"❌ [WORKER FLUSH ERROR] {e}")
+            raise e
 
-    # SCRITTURA DIRETTA SU DB
-    try:
-        if t_files: _worker_storage.add_files_raw(t_files)
-        if t_contents: _worker_storage.add_contents_raw(t_contents)
-        if t_nodes: _worker_storage.add_nodes_raw(t_nodes) # COPY Command (Velocissimo)
-        if t_rels: _worker_storage.add_relations_raw(t_rels)
-    except Exception as e:
-        print(f"❌ [WORKER DB ERROR] Write failed on chunk: {e}")
-        return 0
+    with tracer.start_as_current_span("worker.process_chunk", context=ctx) as span:
+        span.set_attribute("chunk.total_files", len(file_paths))
+        span.set_attribute("process.pid", os.getpid())
 
-    return count
+        for f_path in file_paths:
+            try:
+                # Parsing Stream
+                for f_rec, nodes, contents, rels in _worker_parser.stream_semantic_chunks(file_list=[f_path]):
+                    # Accumulo Files
+                    buffer['files'].append((
+                        f_rec.id, f_rec.snapshot_id, f_rec.commit_hash, f_rec.file_hash, f_rec.path, 
+                        f_rec.language, f_rec.size_bytes, f_rec.category, f_rec.indexed_at, 
+                        f_rec.parsing_status, f_rec.parsing_error
+                    ))
+                    
+                    # Accumulo Nodes
+                    for n in nodes:
+                        bs, be = n.byte_range
+                        buffer['nodes'].append((
+                            n.id, n.file_id, n.file_path, n.start_line, n.end_line, bs, be, 
+                            n.chunk_hash, be - bs, json.dumps(n.metadata) 
+                        ))
+                    
+                    # Accumulo Contents & Rels
+                    for c in contents: buffer['contents'].append((c.chunk_hash, c.content))
+                    for r in rels: buffer['rels'].append((r.source_id, r.target_id, r.relation_type, json.dumps(r.metadata)))
+                    
+                    processed_count += 1
+
+                    # === SMART FLUSH CHECK ===
+                    # Se abbiamo troppi dati in RAM, scarichiamo subito
+                    if len(buffer['nodes']) >= BATCH_SIZE_NODES or len(buffer['files']) >= BATCH_SIZE_FILES:
+                        with tracer.start_as_current_span("worker.flush_buffers", context=ctx):
+                            flush_buffers()
+                
+            except Exception as e:
+                span.record_exception(e)
+                logger.warning(f"⚠️ Skipping {f_path}: {e}")
+                continue
+
+        # Flush finale per i residui
+        flush_buffers()
+        
+        return processed_count, {}
 
 def _chunked_iterable(iterable, size):
     it = iter(iterable)
@@ -139,13 +171,14 @@ def _chunked_iterable(iterable, size):
 # ==============================================================================
 
 class CodebaseIndexer:
-    def __init__(self, repo_url: str, branch: str, db_url: Optional[str] = None):
+    def __init__(self, repo_url: str, branch: str, db_url: Optional[str] = None, worker_telemetry_init: Optional[Callable[[], None]] = None):
         """
         Inizializza l'indexer.
         Si auto-configura usando db_url o la variabile d'ambiente DB_URL.
         """
         self.repo_url = repo_url
         self.branch = branch
+        self.worker_telemetry_init = worker_telemetry_init
         
         # Risoluzione DB URL
         self.db_url = db_url or os.getenv("DB_URL")
@@ -169,82 +202,109 @@ class CodebaseIndexer:
         Esegue l'indicizzazione completa.
         Gestisce il ciclo di vita dello snapshot e il lock distribuito.
         """
+        
         logger.info(f"🚀 Indexing Request Start: {self.repo_url} ({self.branch})")
         
         repo_name = self.repo_url.rstrip('/').split('/')[-1].replace('.git', '')
         repo_id = self.storage.ensure_repository(self.repo_url, self.branch, repo_name)
         
-        active_snapshot_id = None
+        with tracer.start_as_current_span("indexer.run") as span:
+            span.set_attribute("repo.url", self.repo_url)
+            span.set_attribute("repo.branch", self.branch)
+            span.set_attribute("config.force", force)
 
-        # === GREEDY WORKER LOOP ===
-        while True:
-            # Fase A: Network Sync
-            logger.info("🌍 Syncing repository cache...")
-            self.git_manager.ensure_repo_updated(self.repo_url)
-            commit = self.git_manager.get_head_commit(self.repo_url, self.branch)
-            
-            # Fase B: Lock & Concurrency Check
-            snapshot_id, is_new = self.storage.create_snapshot(repo_id, commit, force_new=force)
-            
-            if not is_new and snapshot_id is None:
-                logger.info("⏸️  Repo occupata, richiesta accodata.")
-                return "queued"
-            
-            if not is_new and snapshot_id and not force:
-                logger.info(f"✅ Snapshot {snapshot_id} già valido.")
-                return snapshot_id
+            active_snapshot_id = None
 
-            active_snapshot_id = snapshot_id
-            
-            try:
-                # Fase C: Esecuzione in Ambiente Effimero
-                with self.git_manager.ephemeral_worktree(self.repo_url, commit) as worktree_path:
-                    logger.info(f"⚙️  Worktree montato in: {worktree_path}")
-                    
-                    self._run_indexing_pipeline(
-                        repo_id=repo_id,
-                        snapshot_id=snapshot_id,
-                        commit=commit,
-                        worktree_path=worktree_path
-                    )
+            # === GREEDY WORKER LOOP ===
+            while True:
+                # Fase A: Network Sync
+                logger.info("🌍 Syncing repository cache...")
+                self.git_manager.ensure_repo_updated(self.repo_url)
+                commit = self.git_manager.get_head_commit(self.repo_url, self.branch)
+                
+                # Fase B: Lock & Concurrency Check
+                with tracer.start_as_current_span("indexer.check_snapshot"):
+                    snapshot_id, is_new = self.storage.create_snapshot(repo_id, commit, force_new=force)
+                
+                if not is_new and snapshot_id is None:
+                    logger.info("⏸️  Repo occupata, richiesta accodata.")
+                    span.set_attribute("status", "queued")
+                    return "queued"
+                
+                if not is_new and snapshot_id and not force:
+                    logger.info(f"✅ Snapshot {snapshot_id} già valido.")
+                    span.set_attribute("status", "cached")
+                    return snapshot_id
 
-                # Fase D: Check Tail (Debounce)
-                if self.storage.check_and_reset_reindex_flag(repo_id):
-                    logger.info("🔁 Rilevata nuova richiesta pendente. Riavvio loop...")
-                    force = True
-                    continue 
-                else:
-                    logger.info("✅ Indicizzazione completata.")
-                    break
+                active_snapshot_id = snapshot_id
+                
+                try:
 
-            except Exception as e:
-                logger.error(f"❌ Indexing Failed on {snapshot_id}: {e}", exc_info=True)
-                self.storage.fail_snapshot(snapshot_id, str(e))
-                raise e
+                    # Fase C: Esecuzione in Ambiente Effimero
+                    # 1. Per il Parser (Context Completo: Codice + Test + Docs)
+                    # 2. Per SCIP (Core Graph: Solo Codice, Pruned)
+                    with ExitStack() as stack:
+                        parser_worktree = stack.enter_context(
+                            self.git_manager.ephemeral_worktree(self.repo_url, commit)
+                        )
+                        scip_worktree = stack.enter_context(
+                            self.git_manager.ephemeral_worktree(self.repo_url, commit)
+                        )
+                        
+                        logger.info(f"⚙️  Worktrees montati.\n   Parser: {parser_worktree}\n   SCIP: {scip_worktree}")
+                        
+                        self._run_indexing_pipeline(
+                            repo_id=repo_id,
+                            snapshot_id=snapshot_id,
+                            commit=commit,
+                            parser_worktree=parser_worktree, # Passiamo entrambi
+                            scip_worktree=scip_worktree
+                        )
+
+                    # Fase D: Check Tail (Debounce)
+                    if self.storage.check_and_reset_reindex_flag(repo_id):
+                        logger.info("🔁 Rilevata nuova richiesta pendente. Riavvio loop...")
+                        force = True
+                        continue 
+                    else:
+                        logger.info("✅ Indicizzazione completata.")
+                        break
+
+                except Exception as e:
+                    logger.error(f"❌ Indexing Failed on {snapshot_id}: {e}", exc_info=True)
+                    span.record_exception(e)
+                    span.set_status(trace.Status(trace.StatusCode.ERROR))
+                    self.storage.fail_snapshot(snapshot_id, str(e))
+                    raise e
         
         return active_snapshot_id
 
-    def _run_indexing_pipeline(self, repo_id: str, snapshot_id: str, commit: str, worktree_path: str):
+    def _run_indexing_pipeline(self, repo_id: str, snapshot_id: str, commit: str, parser_worktree: str, scip_worktree: str):
         """
         Orchestra il parsing parallelo e l'analisi SCIP.
         """
         # Inizializzazione Componenti
         # Nota: SCIPRunner e Indexer lavorano sul path locale
-        scip_indexer = SCIPIndexer(repo_path=worktree_path)
+        # scip_runner = SCIPRunner(repo_path=scip_worktree) # SCIP lavora sul path che verrà potato
+        scip_indexer = SCIPIndexer(repo_path=scip_worktree)
         previous_live_snapshot = self.storage.get_active_snapshot_id(repo_id)
+        current_context = context.get_current()
 
         # File Discovery
         logger.info("🔍 Scanning files...")
         all_files = []
         IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "dist", "build", "target", "vendor"}
         
-        for root, dirs, files in os.walk(worktree_path):
+        for root, dirs, files in os.walk(parser_worktree):
             dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
             for file in files:
                 _, ext = os.path.splitext(file)
                 if ext in {'.py', '.js', '.ts', '.tsx', '.jsx', '.java', '.go', '.rs', '.c', '.cpp', '.php', '.html', '.css'}: 
-                    rel_path = os.path.relpath(os.path.join(root, file), worktree_path)
+                    rel_path = os.path.relpath(os.path.join(root, file), parser_worktree)
                     all_files.append(rel_path)
+
+        carrier = {}
+        inject(carrier)
 
         # Configurazione Parallelismo
         num_workers = max(1, multiprocessing.cpu_count() - 1)
@@ -254,37 +314,46 @@ class CodebaseIndexer:
         logger.info(f"🔨 Parsing & SCIP with {num_workers} workers (Direct DB Mode)...")
 
         # Funzione helper per SCIP in thread
-        def _run_scip_buffered():
-            # Esegue prepare_indices + stream_relations e ritorna la lista completa
-            # Questo corre in parallelo al parsing CPU-bound
+        def _run_scip_buffered(ctx):
+            # 1. Attacca il contesto del padre (Main Thread) a questo Thread
+            token = context.attach(ctx)
             try:
-                return list(scip_indexer.stream_relations())
-            except Exception as e:
-                logger.error(f"SCIP Extraction Failed: {e}")
-                return []
+                # 2. Avvia lo span ORA che il contesto è corretto
+                with tracer.start_as_current_span("scip.binary_execution") as span:
+                    try:
+                        return list(scip_indexer.stream_relations())
+                    except Exception as e:
+                        logger.error(f"SCIP Extraction Failed: {e}")
+                        span.record_exception(e)
+                        span.set_status(trace.Status(trace.StatusCode.ERROR))
+                        return []
+            finally:
+                # 3. Stacca il contesto SOLO quando tutto è finito (fuori dal 'with')
+                context.detach(token)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as scip_executor:
             # 1. Avvio SCIP in background (Heavy Process + Streaming)
-            future_scip = scip_executor.submit(_run_scip_buffered)
+            future_scip = scip_executor.submit(_run_scip_buffered, current_context)
 
             # 2. Avvio Parsing Workers (Heavy CPU + DB Write)
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=num_workers, 
                 initializer=_init_worker_process,
-                initargs=(worktree_path, snapshot_id, commit, self.repo_url, self.branch, self.db_url)
+                initargs=(parser_worktree, snapshot_id, commit, self.repo_url, self.branch, self.db_url,self.worker_telemetry_init)
             ) as executor:
                 
                 future_to_chunk = {
-                    executor.submit(_process_and_insert_chunk, chunk): chunk 
+                    executor.submit(_process_and_insert_chunk, chunk,carrier): chunk 
                     for chunk in file_chunks
                 }
                 
                 total_processed = 0
                 completed_chunks = 0
-                
+
                 for future in concurrent.futures.as_completed(future_to_chunk):
                     try:
-                        count = future.result()
+                        count,_ = future.result()
+
                         total_processed += count
                         completed_chunks += 1
                         
@@ -296,7 +365,11 @@ class CodebaseIndexer:
 
             # 3. Integrazione SCIP (SQL-Based Resolution)
             logger.info("🔗 Waiting for SCIP relations extraction...")
-            scip_relations = future_scip.result() # Lista di oggetti CodeRelation
+
+            with tracer.start_as_current_span("indexer.wait_scip"):
+                scip_relations = future_scip.result()
+
+
             
             if scip_relations:
                 logger.info(f"🔗 Processing {len(scip_relations)} SCIP relations (SQL Batch Mode)...")
@@ -332,6 +405,7 @@ class CodebaseIndexer:
             else:
                 logger.info("ℹ️ No SCIP relations found.")
 
+
         # Attivazione Finale
         current_stats = self.storage.get_stats()
         stats = {
@@ -342,12 +416,28 @@ class CodebaseIndexer:
         
         manifest_tree = {"type": "dir", "children": {}} 
         
-        self.storage.activate_snapshot(repo_id, snapshot_id, stats, manifest=manifest_tree)
-        logger.info(f"🚀 SNAPSHOT ACTIVATED: {snapshot_id}")
+        # 4. RECONSTRUCT MANIFEST FROM DB
+        # Poiché usiamo COPY e INSERT raw, il manifest in memoria non è aggiornato.
+        # Lo ricostruiamo leggendo i path salvati che sono la source of truth.
+        db_files = self.storage.list_file_paths(snapshot_id)
+        
+        for path in db_files:
+            parts = path.split('/')
+            curr = manifest_tree
+            for part in parts[:-1]:
+                if part not in curr["children"]:
+                    curr["children"][part] = {"type": "dir", "children": {}}
+                curr = curr["children"][part]
+            curr["children"][parts[-1]] = {"type": "file"} 
+        
+        with tracer.start_as_current_span("indexer.activate_snapshot"):
+            self.storage.activate_snapshot(repo_id, snapshot_id, stats, manifest=manifest_tree)
+            logger.info(f"🚀 SNAPSHOT ACTIVATED: {snapshot_id}")
 
         if previous_live_snapshot and previous_live_snapshot != snapshot_id:
             logger.info(f"🧹 Pruning old snapshot {previous_live_snapshot}...")
             self.storage.prune_snapshot(previous_live_snapshot)
+
 
     def embed(self, provider: EmbeddingProvider, batch_size: int = 32, debug: bool = False, force_snapshot_id: str = None):
         """

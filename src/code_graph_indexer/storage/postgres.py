@@ -5,10 +5,13 @@ from typing import List, Dict, Any, Optional, Tuple
 import psycopg
 from psycopg.errors import UniqueViolation
 
+from opentelemetry import trace
+logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)
+
 from .base import GraphStorage
 from .connector import DatabaseConnector  # Importiamo l'interfaccia
 
-logger = logging.getLogger(__name__)
 
 class PostgresGraphStorage(GraphStorage):
     def __init__(self, connector: DatabaseConnector, vector_dim: int = 1536):
@@ -312,10 +315,12 @@ class PostgresGraphStorage(GraphStorage):
         return " AND " + " AND ".join(clauses), params
 
     def search_vectors(self, query_vector: List[float], limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+
         if not snapshot_id: raise ValueError("snapshot_id mandatory.")
+
         sql = """
             SELECT ne.chunk_id, ne.file_path, ne.start_line, ne.end_line, ne.snapshot_id, n.metadata, c.content, ne.language, 
-                   (ne.embedding <=> %s::vector) as distance
+                (ne.embedding <=> %s::vector) as distance
             FROM node_embeddings ne 
             JOIN nodes n ON ne.chunk_id = n.id 
             JOIN contents c ON n.chunk_hash = c.chunk_hash
@@ -330,17 +335,27 @@ class PostgresGraphStorage(GraphStorage):
         
         sql += " ORDER BY distance ASC LIMIT %s"
         params.append(limit)
+        
+        with tracer.start_as_current_span("db.search.vectors") as span:
 
-        with self.connector.get_connection() as conn:
-            results = []
-            for row in conn.execute(sql, params).fetchall():
-                results.append({
-                    "id": str(row['chunk_id']), "file_path": row['file_path'], 
-                    "start_line": row['start_line'], "end_line": row['end_line'],
-                    "snapshot_id": str(row['snapshot_id']), "metadata": row['metadata'], 
-                    "content": row['content'], "language": row['language'], "score": 1 - row['distance']
-                })
-            return results
+            span.set_attribute("search.limit", limit)
+            span.set_attribute("snapshot.id", snapshot_id)
+            if filters:
+                span.set_attribute("search.filters_keys", list(filters.keys()))
+
+            with self.connector.get_connection() as conn:
+                results = []
+                # Qui misuriamo implicitamente anche il tempo di esecuzione della query
+                for row in conn.execute(sql, params).fetchall():
+                    results.append({
+                        "id": str(row['chunk_id']), "file_path": row['file_path'], 
+                        "start_line": row['start_line'], "end_line": row['end_line'],
+                        "snapshot_id": str(row['snapshot_id']), "metadata": row['metadata'], 
+                        "content": row['content'], "language": row['language'], "score": 1 - row['distance']
+                    })
+                
+                span.set_attribute("search.results_count", len(results))
+                return results
 
     def search_fts(self, query: str, limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         if not snapshot_id: raise ValueError("snapshot_id mandatory.")
@@ -575,15 +590,23 @@ class PostgresGraphStorage(GraphStorage):
             COPY nodes (id, file_id, file_path, start_line, end_line, byte_start, byte_end, chunk_hash, size, metadata)
             FROM STDIN
         """
-        try:
-            with self.connector.get_connection() as conn:
-                with conn.cursor() as cur:
-                    with cur.copy(sql) as copy:
-                        for row in nodes_tuples:
-                            copy.write_row(row)
-        except Exception as e:
-            logger.error(f"❌ COPY failed in add_nodes_raw: {e}")
-            raise e
+        with tracer.start_as_current_span("db.write.nodes_copy") as span:
+            batch_size = len(nodes_tuples)
+            span.set_attribute("db.batch_size", batch_size)
+            span.set_attribute("db.table", "nodes")
+            
+            try:
+                with self.connector.get_connection() as conn:
+                    with conn.cursor() as cur:
+                        with cur.copy(sql) as copy:
+                            for row in nodes_tuples:
+                                copy.write_row(row)
+                                
+            except Exception as e:
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR))
+                logger.error(f"❌ COPY failed in add_nodes_raw: {e}")
+                raise e
 
     def add_contents_raw(self, contents_tuples: List[Tuple]):
         """Inserimento massivo contenuti."""
@@ -644,24 +667,33 @@ class PostgresGraphStorage(GraphStorage):
         # Questo disabilita temporaneamente l'autocommit per questo blocco.
         # Garantisce che la TEMP table sopravviva tra il CREATE e il COPY,
         # e venga eliminata automaticamente (ON COMMIT DROP) all'uscita del blocco.
-        try:
-            with self.connector.get_connection() as conn:
-                with conn.transaction(): 
-                    with conn.cursor() as cur:
-                        # 1. Crea Tabella (isolata per sessione)
-                        cur.execute(ddl_temp)
-                        
-                        # 2. Carica Dati Raw
-                        with cur.copy("COPY temp_scip_staging FROM STDIN") as copy:
-                            for row in relations_tuples:
-                                copy.write_row(row)
-                        
-                        # 3. Risolvi e Inserisci
-                        cur.execute(sql_resolve, (snapshot_id, snapshot_id))
-                        
-                        logger.info(f"🔗 SCIP Bulk Ingestion: {cur.rowcount} edges created.")
-                        
-        except Exception as e:
-            logger.error(f"❌ SCIP Ingestion Failed: {e}")
-            raise e
+        with tracer.start_as_current_span("db.scip.ingest_transaction") as span:
+            span.set_attribute("db.batch_size", len(relations_tuples))
+            span.set_attribute("snapshot.id", snapshot_id)
+
+            try:
+                with self.connector.get_connection() as conn:
+                    with conn.transaction(): 
+                        with conn.cursor() as cur:
+                            cur.execute(ddl_temp)
+                            
+                            # [OTEL] Fase 1: Caricamento Dati Raw (I/O Bound)
+                            with tracer.start_as_current_span("db.scip.copy_temp") as copy_span:
+                                copy_span.set_attribute("row.count", len(relations_tuples))
+                                with cur.copy("COPY temp_scip_staging FROM STDIN") as copy:
+                                    for row in relations_tuples:
+                                        copy.write_row(row)
+                            
+                            # [OTEL] Fase 2: Risoluzione Relazionale (CPU/Join Bound)
+                            with tracer.start_as_current_span("db.scip.resolve_query") as resolve_span:
+                                cur.execute(sql_resolve, (snapshot_id, snapshot_id))
+                                resolve_span.set_attribute("edges.created", cur.rowcount)
+                            
+                            logger.info(f"🔗 SCIP Bulk Ingestion: {cur.rowcount} edges created.")
+                            
+            except Exception as e:
+                span.record_exception(e)
+                span.set_status(trace.Status(trace.StatusCode.ERROR))
+                logger.error(f"❌ SCIP Ingestion Failed: {e}")
+                raise e
         

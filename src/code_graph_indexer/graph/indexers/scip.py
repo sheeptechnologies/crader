@@ -7,6 +7,7 @@ import tempfile
 import sqlite3
 import logging
 import concurrent.futures
+import fnmatch  # [CRITICO] Necessario per i pattern
 from functools import lru_cache
 from typing import List, Dict, Any, Set, Tuple, Optional, Generator
 
@@ -32,7 +33,7 @@ def get_relation_verb(role_mask: int) -> str:
     if role_mask & SCIP_ROLE_READ: return "reads_from"
     return "calls"
 
-# --- 2. DISK SYMBOL TABLE (Invariata) ---
+# --- 2. DISK SYMBOL TABLE ---
 class DiskSymbolTable:
     def __init__(self):
         self.db_path = tempfile.NamedTemporaryFile(delete=False, suffix=".db").name
@@ -93,8 +94,49 @@ class SCIPRunner:
     def __init__(self, repo_path: str):
         self.repo_path = os.path.abspath(repo_path)
         self._active_indices = []
-        # SCIP deve essere più aggressivo del parser nell'ignorare cose.
-        self.ignore_dirs = GLOBAL_IGNORE_DIRS | SEMANTIC_NOISE_DIRS
+        # Combiniamo le liste per avere un set completo di regole di esclusione
+        self.ignore_rules = GLOBAL_IGNORE_DIRS | SEMANTIC_NOISE_DIRS
+
+    def _prune_workspace(self, project_root: str):
+        """
+        Rimuove FISICAMENTE le directory dal worktree SCIP basandosi su pattern.
+        Supporta wildcard (es. '*test*', 'mock*').
+        """
+        targets = self.ignore_rules
+        
+        # Walk top-down: importante per rimuovere directory ed evitare di scenderci dentro
+        for root, dirs, files in os.walk(project_root, topdown=True):
+            dirs_to_remove = set()
+            
+            for d in dirs:
+                # 1. Directory Nascoste (Sempre rimosse)
+                if d.startswith('.'):
+                    dirs_to_remove.add(d)
+                    continue
+                
+                # 2. Match Esatto (Veloce O(1))
+                if d in targets:
+                    dirs_to_remove.add(d)
+                    continue
+                
+                # 3. Pattern Matching (Globale per supportare *test*)
+                # Verifica se la directory matcha una qualsiasi regola (es. "*test*")
+                for rule in targets:
+                    if fnmatch.fnmatch(d, rule):
+                        dirs_to_remove.add(d)
+                        break
+            
+            # Rimozione Fisica con Logging
+            for d in dirs_to_remove:
+                full_path = os.path.join(root, d)
+                try:
+                    shutil.rmtree(full_path)
+                    logger.info(f"✂️ [SCIP Prune] Removed: {d}") 
+                except OSError as e:
+                    pass # Ignore errors (es. permessi)
+            
+            # Aggiornamento in-place di 'dirs' per fermare la ricorsione di os.walk
+            dirs[:] = [d for d in dirs if d not in dirs_to_remove]
 
     def prepare_indices(self) -> List[Tuple[str, str]]:
         if not shutil.which(self.SCIP_CLI):
@@ -102,7 +144,10 @@ class SCIPRunner:
             return []
         
         tasks = self._discover_tasks()
-        if not tasks: return []
+        if not tasks: 
+            # Non è un errore critico, magari è una repo di soli docs
+            logger.warning("[SCIP] Nessun task di indicizzazione trovato.")
+            return []
         
         results = []
         env = os.environ.copy()
@@ -120,19 +165,38 @@ class SCIPRunner:
         return results
 
     def _run_single_index(self, task, env) -> Optional[Tuple[str, str]]:
-
         indexer, project_root = task
         tmp_idx = tempfile.NamedTemporaryFile(delete=False, suffix=".scip").name
+        
         try:
+            # [CRITICAL] Pruning prima dell'esecuzione per pulire il worktree
+            self._prune_workspace(project_root)
+
             logger.info(f"[SCIP] Indexing {project_root} with {indexer}...")
-            subprocess.run(
+
+            # [FIX] Catturiamo STDERR per debuggare i fallimenti silenziosi
+            result = subprocess.run(
                 [indexer, "index", ".", "--output", tmp_idx],
-                cwd=project_root, check=False, capture_output=True, env=env
+                cwd=project_root, 
+                check=False, 
+                capture_output=True, 
+                env=env,
+                text=True # Importante per leggere stderr come stringa
             )
+            
+            if result.returncode != 0:
+                logger.error(f"❌ [SCIP FAIL] {indexer} exited with code {result.returncode}")
+                # Stampiamo solo le prime righe di errore per non intasare i log
+                logger.error(f"   Stderr: {result.stderr[:1000]}...") 
+                return None
+
             if os.path.exists(tmp_idx) and os.path.getsize(tmp_idx) > 10:
                 return (project_root, tmp_idx)
+            else:
+                logger.warning(f"⚠️ [SCIP WARN] Index file empty for {project_root}")
+                
         except Exception as e:
-            logger.error(f"[SCIP] Error {indexer}: {e}")
+            logger.error(f"❌ [SCIP ERROR] Exception {indexer}: {e}")
         return None
     
 
@@ -149,8 +213,7 @@ class SCIPRunner:
                         payload = json.loads(line)
                         docs = payload if isinstance(payload, list) else payload.get("documents", [payload])
                         for doc in docs:
-                            # [NEW] Filtraggio Post-Processing per i documenti
-                            # Se l'indexer ha incluso file che volevamo ignorare (es. tests), li scartiamo qui.
+                            # Filtro di sicurezza post-processing
                             if self._should_skip_document(doc.get("relative_path", "")):
                                 continue
                             yield {"project_root": project_root, "document": doc}
@@ -163,10 +226,14 @@ class SCIPRunner:
         """Controlla se il file restituito da SCIP è in una directory ignorata."""
         if not rel_path: return True
         parts = rel_path.split('/')
-        # Se una qualsiasi parte del path è nella blacklist, scarta
+        
         for part in parts:
-            if part in self.ignore_dirs or part.startswith('.'):
+            if part in self.ignore_rules or part.startswith('.'):
                 return True
+            # [FIX] Check pattern anche qui per coerenza
+            for rule in self.ignore_rules:
+                if fnmatch.fnmatch(part, rule):
+                    return True
         return False
 
     def cleanup(self):
@@ -179,10 +246,21 @@ class SCIPRunner:
         tasks = []
         found_roots = set()
         
-        # Usa self.ignore_dirs (che include SEMANTIC_NOISE) per potare l'albero
         for root, dirs, files in os.walk(self.repo_path, topdown=True):
-            # Modifica in-place di dirs per non scendere in cartelle ignorate
-            dirs[:] = [d for d in dirs if d not in self.ignore_dirs and not d.startswith('.')]
+            # Filtro directory anche durante la discovery
+            dirs_to_skip = []
+            for d in dirs:
+                if d.startswith('.') or d in self.ignore_rules:
+                    dirs_to_skip.append(d)
+                    continue
+                # Pattern check
+                for rule in self.ignore_rules:
+                    if fnmatch.fnmatch(d, rule):
+                        dirs_to_skip.append(d)
+                        break
+            
+            # Pruning in-place di os.walk
+            dirs[:] = [d for d in dirs if d not in dirs_to_skip]
             
             if any(root.startswith(p) for p in found_roots): continue
             
@@ -190,13 +268,12 @@ class SCIPRunner:
                 if marker in files and shutil.which(indexer):
                     tasks.append((indexer, root))
                     found_roots.add(root)
-                    dirs[:] = [] # Stop recursion in this project
+                    dirs[:] = [] # Stop recursion
                     break
         
         if not tasks:
             detected = set()
             for root, _, files in os.walk(self.repo_path):
-                # Anche qui filtriamo implicitamente perché os.walk sopra ha già potato 'dirs'
                 for f in files:
                     ext = os.path.splitext(f)[1]
                     if ext in self.EXTENSION_MAP:
@@ -207,7 +284,7 @@ class SCIPRunner:
 
     def _find_installed_indexers(self): return {} 
 
-# --- 4. INDEXER (PIPELINED & FILTERED) ---
+# --- 4. INDEXER ---
 class SCIPIndexer(BaseGraphIndexer):
     INDEXER_NAME = "scip"
 
@@ -220,21 +297,16 @@ class SCIPIndexer(BaseGraphIndexer):
         return list(self.stream_relations())
 
     def stream_relations(self, exclude_definitions: bool = True, exclude_externals: bool = True) -> Generator[CodeRelation, None, None]:
-        """
-        Generatore principale con filtraggio.
-        """
         indices = self.runner.prepare_indices()
         if not indices: return
 
         symbol_table = DiskSymbolTable()
         try:
-            # PASS 1: Popola Symbol Table
             for wrapper in self.runner.stream_documents(indices):
                 self._process_definitions(wrapper, symbol_table)
             
             symbol_table.flush()
 
-            # PASS 2: Genera Relazioni con Filtri
             for wrapper in self.runner.stream_documents(indices):
                 yield from self._process_occurrences(wrapper, symbol_table, exclude_definitions, exclude_externals)
                 
@@ -263,10 +335,7 @@ class SCIPIndexer(BaseGraphIndexer):
 
         for o in doc.get("occurrences", []):
             roles = o.get("symbol_roles", 0)
-            
-            # [FILTER] Exclude Definitions (Auto-reference nodes)
-            if exclude_definitions and (roles & SCIP_ROLE_DEFINITION): 
-                continue 
+            if exclude_definitions and (roles & SCIP_ROLE_DEFINITION): continue 
             
             raw_sym = o["symbol"]
             is_local = raw_sym.startswith("local")
@@ -278,14 +347,11 @@ class SCIPIndexer(BaseGraphIndexer):
             elif not is_local:
                 ext = True
                 parts = raw_sym.split()
-                # Creiamo un ID fittizio per l'esterno, ma non lo useremo se filtriamo
                 tgt = sys.intern(f"EXTERNAL::{parts[2]}::{parts[3]}") if len(parts)>=4 else "EXTERNAL::UNKNOWN"
                 tgt_rng = []
             else: continue 
 
-            # [FILTER] Exclude Externals (Prevention of FK Error)
-            if exclude_externals and ext:
-                continue
+            if exclude_externals and ext: continue
 
             verb = get_relation_verb(roles)
             clean_sym = self._extract_symbol_name(norm_p, o["range"]) if is_local else self._clean_symbol(raw_sym)
@@ -296,14 +362,9 @@ class SCIPIndexer(BaseGraphIndexer):
                 source_line=o["range"][0]+1, target_line=tgt_rng[0]+1 if not ext else 1,
                 source_byte_range=self._bytes(norm_p, o["range"]),
                 target_byte_range=None if ext else self._bytes(tgt, tgt_rng),
-                metadata={
-                    "tool": self.INDEXER_NAME,
-                    "symbol": clean_sym,
-                    "is_external": ext
-                }
+                metadata={"tool": self.INDEXER_NAME, "symbol": clean_sym, "is_external": ext}
             )
 
-    # --- Helpers ---
     @lru_cache(maxsize=1024)
     def _get_file_content_cached(self, rel_path: str) -> Optional[List[str]]:
         abs_path = os.path.join(self.repo_path, rel_path)

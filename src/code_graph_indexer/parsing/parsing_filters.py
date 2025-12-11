@@ -19,20 +19,20 @@ GLOBAL_IGNORE_DIRS = {
 # SCIP dovrebbe ignorarle per non appesantire il grafo.
 SEMANTIC_NOISE_DIRS = {
     "migrations", "fixture", "fixtures",
-    "mock", "mocks", "test", "tests", "spec", "specs", # Test dir comuni
+    "mock", "mocks", "spec", "specs", # Test dir comuni
     "locales", "translations",
     "vendor", "assets", "static", "public",
-    "docs", "documentation", "examples"
+    "docs", "documentation", "examples","*test*"
 }
 
 # Configurazione specifica per linguaggio
 LANGUAGE_SPECIFIC_FILTERS = {
     "python": {
-        "exclude_patterns": ["*/test/*", "test_*.py", "*_test.py", "conftest.py", "manage.py", "wsgi.py", "asgi.py", "setup.py", "alembic/versions/*"],
+        "exclude_patterns": [ "conftest.py", "manage.py", "wsgi.py", "asgi.py", "setup.py", "alembic/versions/*"], #"*/test/*","*test*" "test_*.py", "*_test.py",
         "exclude_extensions": {".pyc", ".pyo", ".pyd", ".pyi"}
     },
     "javascript": {
-        "exclude_patterns": ["*.test.js", "*.spec.js", "*.min.js", "*.bundle.js", "webpack.config.js", "rollup.config.js"],
+        "exclude_patterns": ["*.test.js","*test*", "*.spec.js", "*.min.js", "*.bundle.js", "webpack.config.js", "rollup.config.js"],
         "exclude_extensions": {".map", ".d.ts"}
     },
     "java": {
@@ -49,5 +49,5 @@ LANGUAGE_SPECIFIC_FILTERS = {
     }
 }
 
-MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
+MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024
 MAX_LINE_LENGTH = 1000
