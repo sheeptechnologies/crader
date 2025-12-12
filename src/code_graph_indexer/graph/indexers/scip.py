@@ -7,15 +7,19 @@ import tempfile
 import sqlite3
 import logging
 import concurrent.futures
-import fnmatch  # [CRITICO] Necessario per i pattern
+import fnmatch
 from functools import lru_cache
 from typing import List, Dict, Any, Set, Tuple, Optional, Generator
 
-from ..base import BaseGraphIndexer, CodeRelation
+# --- TELEMETRY IMPORTS ---
+from opentelemetry import trace, context
+from opentelemetry.trace import Status, StatusCode
 
+from ..base import BaseGraphIndexer, CodeRelation
 from ...parsing.parsing_filters import GLOBAL_IGNORE_DIRS, SEMANTIC_NOISE_DIRS
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__)  # Inizializziamo il tracer
 
 # --- SCIP CONSTANTS & UTILS ---
 SCIP_ROLE_DEFINITION = 1
@@ -43,6 +47,7 @@ class DiskSymbolTable:
         self.cursor.execute("PRAGMA journal_mode = MEMORY")
         self.cursor.execute("CREATE TABLE defs (symbol TEXT, scope_file TEXT, file_path TEXT, start_line INTEGER, start_char INTEGER, end_line INTEGER, end_char INTEGER, PRIMARY KEY (symbol, scope_file))")
         self.buffer = []
+        self._insert_count = 0 # Telemetria interna
 
     def add(self, symbol: str, file_path: str, scip_range: List[int], is_local: bool):
         scope = file_path if is_local else ""
@@ -54,6 +59,7 @@ class DiskSymbolTable:
 
     def flush(self):
         if self.buffer:
+            self._insert_count += len(self.buffer)
             self.cursor.executemany("INSERT OR REPLACE INTO defs VALUES (?, ?, ?, ?, ?, ?, ?)", self.buffer)
             self.conn.commit()
             self.buffer = []
@@ -73,6 +79,7 @@ class DiskSymbolTable:
         if os.path.exists(self.db_path):
             try: os.remove(self.db_path)
             except OSError: pass
+        return self._insert_count
 
 # --- 3. SCIP RUNNER (STREAMING) ---
 class SCIPRunner:
@@ -94,143 +101,184 @@ class SCIPRunner:
     def __init__(self, repo_path: str):
         self.repo_path = os.path.abspath(repo_path)
         self._active_indices = []
-        # Combiniamo le liste per avere un set completo di regole di esclusione
         self.ignore_rules = GLOBAL_IGNORE_DIRS | SEMANTIC_NOISE_DIRS
 
     def _prune_workspace(self, project_root: str):
         """
-        Rimuove FISICAMENTE le directory dal worktree SCIP basandosi su pattern.
-        Supporta wildcard (es. '*test*', 'mock*').
+        Pulisce il workspace mantenendo SOLO codice sorgente e file di configurazione.
+        Riduce drasticamente l'I/O e il tempo di scansione di SCIP.
         """
-        targets = self.ignore_rules
-        
-        # Walk top-down: importante per rimuovere directory ed evitare di scenderci dentro
-        for root, dirs, files in os.walk(project_root, topdown=True):
-            dirs_to_remove = set()
+        with tracer.start_as_current_span("scip.prune_workspace") as span:
+            span.set_attribute("scip.prune.root", project_root)
             
-            for d in dirs:
-                # 1. Directory Nascoste (Sempre rimosse)
-                if d.startswith('.'):
-                    dirs_to_remove.add(d)
-                    continue
+            # Set per lookup O(1)
+            targets = self.ignore_rules
+            valid_exts = set(self.EXTENSION_MAP.keys())
+            valid_markers = set(self.PROJECT_MARKERS.keys())
+            
+            removed_dirs = 0
+            removed_files = 0
+            
+            for root, dirs, files in os.walk(project_root, topdown=True):
+                # 1. Pruning Directory (Blacklist)
+                dirs_to_remove = set()
+                for d in dirs:
+                    if d.startswith('.'):
+                        dirs_to_remove.add(d); continue
+                    if d in targets:
+                        dirs_to_remove.add(d); continue
+                    for rule in targets:
+                        if fnmatch.fnmatch(d, rule):
+                            dirs_to_remove.add(d); break
                 
-                # 2. Match Esatto (Veloce O(1))
-                if d in targets:
-                    dirs_to_remove.add(d)
-                    continue
+                for d in dirs_to_remove:
+                    try:
+                        shutil.rmtree(os.path.join(root, d))
+                        removed_dirs += 1
+                    except OSError: pass
                 
-                # 3. Pattern Matching (Globale per supportare *test*)
-                # Verifica se la directory matcha una qualsiasi regola (es. "*test*")
-                for rule in targets:
-                    if fnmatch.fnmatch(d, rule):
-                        dirs_to_remove.add(d)
-                        break
-            
-            # Rimozione Fisica con Logging
-            for d in dirs_to_remove:
-                full_path = os.path.join(root, d)
-                try:
-                    shutil.rmtree(full_path)
-                    logger.info(f"✂️ [SCIP Prune] Removed: {d}") 
-                except OSError as e:
-                    pass # Ignore errors (es. permessi)
-            
-            # Aggiornamento in-place di 'dirs' per fermare la ricorsione di os.walk
-            dirs[:] = [d for d in dirs if d not in dirs_to_remove]
+                # Aggiorniamo la lista dirs per fermare la discesa
+                dirs[:] = [d for d in dirs if d not in dirs_to_remove]
+                
+                # 2. Pruning File (Whitelist Aggressiva) [NUOVO]
+                # Cancelliamo tutto ciò che non è codice o config di progetto
+                for f in files:
+                    if f in valid_markers: continue # Mantieni package.json, requirements.txt...
+                    
+                    _, ext = os.path.splitext(f)
+                    if ext in valid_exts: continue # Mantieni .py, .ts, .java...
+                    
+                    # Se arriviamo qui, è un file inutile (es. .jpg, .csv, .log) -> DELETE
+                    try:
+                        os.remove(os.path.join(root, f))
+                        removed_files += 1
+                    except OSError: pass
+
+            span.set_attribute("scip.prune.removed_dirs", removed_dirs)
+            span.set_attribute("scip.prune.removed_files", removed_files)
+            logger.info(f"✂️ [SCIP Prune] Cleaned {removed_dirs} dirs and {removed_files} junk files.")
+
 
     def prepare_indices(self) -> List[Tuple[str, str]]:
-        if not shutil.which(self.SCIP_CLI):
-            logger.error(f"[SCIP] CLI '{self.SCIP_CLI}' non trovato.")
-            return []
-        
-        tasks = self._discover_tasks()
-        if not tasks: 
-            # Non è un errore critico, magari è una repo di soli docs
-            logger.warning("[SCIP] Nessun task di indicizzazione trovato.")
-            return []
-        
-        results = []
-        env = os.environ.copy()
-        env["PYTHONPATH"] = self.repo_path + os.pathsep + env.get("PYTHONPATH", "")
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(tasks), 4)) as executor:
-            future_to_task = {
-                executor.submit(self._run_single_index, t, env): t for t in tasks
-            }
-            for future in concurrent.futures.as_completed(future_to_task):
-                res = future.result()
-                if res:
-                    results.append(res)
-                    self._active_indices.append(res[1])
-        return results
-
-    def _run_single_index(self, task, env) -> Optional[Tuple[str, str]]:
-        indexer, project_root = task
-        tmp_idx = tempfile.NamedTemporaryFile(delete=False, suffix=".scip").name
-        
-        try:
-            # [CRITICAL] Pruning prima dell'esecuzione per pulire il worktree
-            self._prune_workspace(project_root)
-
-            logger.info(f"[SCIP] Indexing {project_root} with {indexer}...")
-
-            # [FIX] Catturiamo STDERR per debuggare i fallimenti silenziosi
-            result = subprocess.run(
-                [indexer, "index", ".", "--output", tmp_idx],
-                cwd=project_root, 
-                check=False, 
-                capture_output=True, 
-                env=env,
-                text=True # Importante per leggere stderr come stringa
-            )
+        with tracer.start_as_current_span("scip.prepare_indices") as span:
+            if not shutil.which(self.SCIP_CLI):
+                span.record_exception(FileNotFoundError("SCIP CLI not found"))
+                span.set_status(Status(StatusCode.ERROR, "SCIP CLI missing"))
+                logger.error(f"[SCIP] CLI '{self.SCIP_CLI}' non trovato.")
+                return []
             
-            if result.returncode != 0:
-                logger.error(f"❌ [SCIP FAIL] {indexer} exited with code {result.returncode}")
-                # Stampiamo solo le prime righe di errore per non intasare i log
-                logger.error(f"   Stderr: {result.stderr[:1000]}...") 
-                return None
+            tasks = self._discover_tasks()
+            span.set_attribute("scip.tasks_count", len(tasks))
+            
+            if not tasks: 
+                logger.warning("[SCIP] Nessun task di indicizzazione trovato.")
+                return []
+            
+            results = []
+            env = os.environ.copy()
+            env["PYTHONPATH"] = self.repo_path + os.pathsep + env.get("PYTHONPATH", "")
+            current_ctx = context.get_current()
 
-            if os.path.exists(tmp_idx) and os.path.getsize(tmp_idx) > 10:
-                return (project_root, tmp_idx)
-            else:
-                logger.warning(f"⚠️ [SCIP WARN] Index file empty for {project_root}")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(tasks), 4)) as executor:
+                future_to_task = {
+                    executor.submit(self._run_single_index, t, env,current_ctx): t for t in tasks
+                }
+                for future in concurrent.futures.as_completed(future_to_task):
+                    res = future.result()
+                    if res:
+                        results.append(res)
+                        self._active_indices.append(res[1])
+            
+            span.set_attribute("scip.successful_indices", len(results))
+            return results
+
+    def _run_single_index(self, task, env,ctx) -> Optional[Tuple[str, str]]:
+        token = context.attach(ctx)
+        indexer, project_root = task
+        # Usiamo il tracer per monitorare ogni singola esecuzione della CLI
+        with tracer.start_as_current_span("scip.exec_cli") as span:
+            span.set_attribute("scip.indexer", indexer)
+            span.set_attribute("scip.project_root", project_root)
+            
+            tmp_idx = tempfile.NamedTemporaryFile(delete=False, suffix=".scip").name
+            
+            try:
+                self._prune_workspace(project_root)
+
+                logger.info(f"[SCIP] Indexing {project_root} with {indexer}...")
+
+                result = subprocess.run(
+                    [indexer, "index", ".", "--output", tmp_idx],
+                    cwd=project_root, 
+                    check=False, 
+                    capture_output=True, 
+                    env=env,
+                    text=True
+                )
                 
-        except Exception as e:
-            logger.error(f"❌ [SCIP ERROR] Exception {indexer}: {e}")
-        return None
+                span.set_attribute("scip.exit_code", result.returncode)
+
+                if result.returncode != 0:
+                    span.set_status(Status(StatusCode.ERROR))
+                    span.set_attribute("scip.stderr", result.stderr[:2000]) # Limitiamo la size
+                    logger.error(f"❌ [SCIP FAIL] {indexer} exited with code {result.returncode}")
+                    return None
+
+                if os.path.exists(tmp_idx):
+                    size = os.path.getsize(tmp_idx)
+                    span.set_attribute("scip.index_size_bytes", size)
+                    if size > 10:
+                        return (project_root, tmp_idx)
+                
+                logger.warning(f"⚠️ [SCIP WARN] Index file empty for {project_root}")
+                span.add_event("empty_index_file")
+                    
+            except Exception as e:
+                logger.error(f"❌ [SCIP ERROR] Exception {indexer}: {e}")
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR))
+                return None
+            finally:
+                context.detach(token)
+            
     
 
     def stream_documents(self, indices: List[Tuple[str, str]]) -> Generator[Dict, None, None]:
         for project_root, index_path in indices:
-            try:
-                proc = subprocess.Popen(
-                    [self.SCIP_CLI, "print", "--json", index_path],
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
-                )
-                for line in proc.stdout:
-                    if not line.strip(): continue
-                    try:
-                        payload = json.loads(line)
-                        docs = payload if isinstance(payload, list) else payload.get("documents", [payload])
-                        for doc in docs:
-                            # Filtro di sicurezza post-processing
-                            if self._should_skip_document(doc.get("relative_path", "")):
-                                continue
-                            yield {"project_root": project_root, "document": doc}
-                    except ValueError: pass
-                proc.wait()
-            except Exception as e:
-                logger.error(f"[SCIP] Stream error for {project_root}: {e}")
+            # Monitoriamo il processo di lettura/streaming
+            with tracer.start_as_current_span("scip.stream_decode") as span:
+                span.set_attribute("scip.index_path", index_path)
+                doc_count = 0
+                
+                try:
+                    proc = subprocess.Popen(
+                        [self.SCIP_CLI, "print", "--json", index_path],
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
+                    )
+                    for line in proc.stdout:
+                        if not line.strip(): continue
+                        try:
+                            payload = json.loads(line)
+                            docs = payload if isinstance(payload, list) else payload.get("documents", [payload])
+                            for doc in docs:
+                                if self._should_skip_document(doc.get("relative_path", "")):
+                                    continue
+                                doc_count += 1
+                                yield {"project_root": project_root, "document": doc}
+                        except ValueError: pass
+                    proc.wait()
+                except Exception as e:
+                    span.record_exception(e)
+                    logger.error(f"[SCIP] Stream error for {project_root}: {e}")
+                
+                span.set_attribute("scip.docs_streamed", doc_count)
 
     def _should_skip_document(self, rel_path: str) -> bool:
-        """Controlla se il file restituito da SCIP è in una directory ignorata."""
         if not rel_path: return True
         parts = rel_path.split('/')
-        
         for part in parts:
             if part in self.ignore_rules or part.startswith('.'):
                 return True
-            # [FIX] Check pattern anche qui per coerenza
             for rule in self.ignore_rules:
                 if fnmatch.fnmatch(part, rule):
                     return True
@@ -247,19 +295,14 @@ class SCIPRunner:
         found_roots = set()
         
         for root, dirs, files in os.walk(self.repo_path, topdown=True):
-            # Filtro directory anche durante la discovery
             dirs_to_skip = []
             for d in dirs:
                 if d.startswith('.') or d in self.ignore_rules:
-                    dirs_to_skip.append(d)
-                    continue
-                # Pattern check
+                    dirs_to_skip.append(d); continue
                 for rule in self.ignore_rules:
                     if fnmatch.fnmatch(d, rule):
-                        dirs_to_skip.append(d)
-                        break
+                        dirs_to_skip.append(d); break
             
-            # Pruning in-place di os.walk
             dirs[:] = [d for d in dirs if d not in dirs_to_skip]
             
             if any(root.startswith(p) for p in found_roots): continue
@@ -268,7 +311,7 @@ class SCIPRunner:
                 if marker in files and shutil.which(indexer):
                     tasks.append((indexer, root))
                     found_roots.add(root)
-                    dirs[:] = [] # Stop recursion
+                    dirs[:] = [] 
                     break
         
         if not tasks:
@@ -294,25 +337,50 @@ class SCIPIndexer(BaseGraphIndexer):
         self.runner = SCIPRunner(repo_path)
 
     def extract_relations(self, chunk_map: Dict) -> List[CodeRelation]:
-        return list(self.stream_relations())
+        # Wrap anche qui per sicurezza
+        with tracer.start_as_current_span("scip.extract_relations"):
+            return list(self.stream_relations())
 
     def stream_relations(self, exclude_definitions: bool = True, exclude_externals: bool = True) -> Generator[CodeRelation, None, None]:
-        indices = self.runner.prepare_indices()
-        if not indices: return
+        with tracer.start_as_current_span("scip.pipeline_run") as span:
+            indices = self.runner.prepare_indices()
+            if not indices: 
+                span.set_attribute("scip.no_indices", True)
+                return
 
-        symbol_table = DiskSymbolTable()
-        try:
-            for wrapper in self.runner.stream_documents(indices):
-                self._process_definitions(wrapper, symbol_table)
+            symbol_table = DiskSymbolTable()
+            total_rels = 0
             
-            symbol_table.flush()
+            try:
+                # Fase 1: Definition Pass
+                with tracer.start_as_current_span("scip.pass_definitions") as def_span:
+                    for wrapper in self.runner.stream_documents(indices):
+                        self._process_definitions(wrapper, symbol_table)
+                    
+                    inserted = symbol_table.flush() # Modificato per tornare count se vuoi, o usa attributo
+                    # Qui accediamo alla variabile interna per telemetria
+                    def_span.set_attribute("scip.definitions_found", symbol_table._insert_count)
 
-            for wrapper in self.runner.stream_documents(indices):
-                yield from self._process_occurrences(wrapper, symbol_table, exclude_definitions, exclude_externals)
+                # Fase 2: Occurrence Pass
+                with tracer.start_as_current_span("scip.pass_occurrences") as occ_span:
+                    for wrapper in self.runner.stream_documents(indices):
+                        for rel in self._process_occurrences(wrapper, symbol_table, exclude_definitions, exclude_externals):
+                            yield rel
+                            total_rels += 1
+                    
+                    occ_span.set_attribute("scip.relations_yielded", total_rels)
+                    
+            except Exception as e:
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR))
+                logger.error(f"SCIP Pipeline Fatal Error: {e}")
+                raise e # Rilanciamo per il gestore superiore
                 
-        finally:
-            symbol_table.close()
-            self.runner.cleanup()
+            finally:
+                definitions_count = symbol_table.close() # close ora può ritornare stats
+                self.runner.cleanup()
+                span.set_attribute("scip.total_definitions_db", definitions_count if definitions_count else 0)
+                span.set_attribute("scip.total_relations_final", total_rels)
 
     def _process_definitions(self, wrapper: Dict, table: DiskSymbolTable):
         root, doc = wrapper['project_root'], wrapper['document']
@@ -326,6 +394,8 @@ class SCIPIndexer(BaseGraphIndexer):
                         table.add(o["symbol"], norm_p, o["range"], is_local)
 
     def _process_occurrences(self, wrapper: Dict, table: DiskSymbolTable, exclude_definitions: bool, exclude_externals: bool) -> Generator[CodeRelation, None, None]:
+        # Ottimizzazione: Non creiamo uno span per ogni file qui, troppo overhead.
+        # Il parent span "scip.pass_occurrences" copre tutto.
         root, doc = wrapper['project_root'], wrapper['document']
         if "relative_path" not in doc or not root: return
         

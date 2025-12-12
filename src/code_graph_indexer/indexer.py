@@ -1,5 +1,9 @@
-from collections import defaultdict
 import os
+
+os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0" 
+os.environ["GRPC_POLL_STRATEGY"] = "poll"
+import gc
+
 import logging
 import concurrent.futures
 import multiprocessing
@@ -74,13 +78,14 @@ def _process_and_insert_chunk(file_paths: List[str], carrier: Dict[str, str]) ->
     """
     Worker ottimizzato con Micro-Batching per evitare OOM su chunk grandi.
     """
+    gc.disable()
     global _worker_parser, _worker_storage
     if not _worker_storage: return 0, {}
 
     ctx = extract(carrier)
     
     # Parametri di Tuning Memoria
-    BATCH_SIZE_NODES = 50000  # Flush ogni 100k nodi (max efficienza COPY)
+    BATCH_SIZE_NODES = 50000  # Flush ogni 50k nodi (max efficienza COPY)
     BATCH_SIZE_FILES = 500     # Flush ogni 500 file
     
     # Buffer Locali
@@ -293,7 +298,7 @@ class CodebaseIndexer:
         # File Discovery
         logger.info("🔍 Scanning files...")
         all_files = []
-        IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "dist", "build", "target", "vendor"}
+        IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "dist", "build", "target", "vendor"} # da modificare usare parsing_filters.py
         
         for root, dirs, files in os.walk(parser_worktree):
             dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
@@ -307,7 +312,10 @@ class CodebaseIndexer:
         inject(carrier)
 
         # Configurazione Parallelismo
-        num_workers = max(1, multiprocessing.cpu_count() - 1)
+        total_cpus = multiprocessing.cpu_count()
+        num_workers = 5#max(1, total_cpus // 2)
+        mp_context = multiprocessing.get_context('spawn')
+
         TASK_CHUNK_SIZE = 50 
         file_chunks = list(_chunked_iterable(all_files, TASK_CHUNK_SIZE))
         
@@ -338,6 +346,7 @@ class CodebaseIndexer:
             # 2. Avvio Parsing Workers (Heavy CPU + DB Write)
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=num_workers, 
+                mp_context=mp_context,
                 initializer=_init_worker_process,
                 initargs=(parser_worktree, snapshot_id, commit, self.repo_url, self.branch, self.db_url,self.worker_telemetry_init)
             ) as executor:
@@ -368,8 +377,6 @@ class CodebaseIndexer:
 
             with tracer.start_as_current_span("indexer.wait_scip"):
                 scip_relations = future_scip.result()
-
-
             
             if scip_relations:
                 logger.info(f"🔗 Processing {len(scip_relations)} SCIP relations (SQL Batch Mode)...")

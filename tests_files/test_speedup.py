@@ -159,11 +159,15 @@ def print_report(optimized):
         print(f"✅ Integrità Dati OK: {n2} nodi.")
 
 if __name__ == "__main__":
-    print("Running file:", __file__)
-    print("TracerProvider is:", TracerProvider)
-    # 1. Configura telemetria per il PROCESSO PADRE
     setup_telemetry()
     
-    # 2. Esegui il benchmark (L'hook configurerà i worker)
-    res_opt = run_session("Enterprise", single_core=False)
-    print_report(res_opt)
+    try:
+        # Esegui il benchmark
+        res_opt = run_session("Enterprise", single_core=False)
+        print_report(res_opt)
+        
+    finally:
+        # [FIX CRITICO] Forza l'invio dei dati pendenti
+        print("📡 Flushing telemetry to Jaeger...")
+        trace.get_tracer_provider().shutdown()
+        print("👋 Done.")
