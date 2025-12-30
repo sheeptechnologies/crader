@@ -1,147 +1,214 @@
+import asyncio
+import logging
 import os
 import sys
-import shutil
-import tempfile
-import subprocess
-import logging
+import uuid
+import hashlib
 import json
-from typing import List, Dict
+import random
+from typing import List
 
-# Assicuriamo che il path includa 'src'
+# --- SETUP PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
-src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
+src_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from code_graph_indexer.indexer import CodebaseIndexer
-from code_graph_indexer.providers.embedding import DummyEmbeddingProvider, FastEmbedProvider
+from code_graph_indexer.storage.connector import PooledConnector
+from code_graph_indexer.storage.postgres import PostgresGraphStorage
+from code_graph_indexer.embedding.embedder import CodeEmbedder
+from code_graph_indexer.providers.embedding import EmbeddingProvider
+from code_graph_indexer.models import ChunkNode, FileRecord, ChunkContent
 
-# Configurazione Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
-logger = logging.getLogger("STRICT_TEST")
+# --- CONFIGURAZIONE DB ---
+DB_PORT = "6432" 
+DB_USER = "sheep_user"
+DB_PASS = "sheep_password"
+DB_NAME = "sheep_index"
+DB_DSN = f"postgresql://{DB_USER}:{DB_PASS}@localhost:{DB_PORT}/{DB_NAME}"
 
-def setup_dummy_repo(base_dir: str, branch_name: str = "feature/verification-test") -> str:
-    """Crea una repo git valida con contenuto Python e un branch specifico."""
-    repo_path = os.path.join(base_dir, "strict-repo")
-    os.makedirs(repo_path)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("TEST_PIPELINE")
+
+class MockProvider(EmbeddingProvider):
+    def __init__(self, dim=1536):
+        self._dim = dim
     
-    # 1. Init Git
-    subprocess.run(["git", "init"], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
-    subprocess.run(["git", "config", "user.email", "test@bot.com"], cwd=repo_path, check=True)
-    subprocess.run(["git", "config", "user.name", "TestBot"], cwd=repo_path, check=True)
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    @property
+    def model_name(self) -> str:
+        return "mock-v1-enterprise"
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        return [[random.random() for _ in range(self._dim)] for _ in texts]
+        
+    async def embed_async(self, texts: List[str]) -> List[List[float]]:
+        await asyncio.sleep(0.005)
+        return [[random.random() for _ in range(self._dim)] for _ in texts]
+
+def clean_database():
+    logger.info("🧹 Cleaning Database...")
+    try:
+        connector = PooledConnector(dsn=DB_DSN, min_size=1, max_size=1)
+        with connector.get_connection() as conn:
+            conn.execute("TRUNCATE repositories CASCADE")
+        connector.close()
+    except Exception as e:
+        logger.error(f"⚠️ Errore pulizia DB: {e}")
+
+async def main():
+    clean_database()
     
-    # 2. Crea file Python
-    code = """
-class AuthenticationManager:
-    def login(self, user):
-        print(f"Logging in {user}")
-        return True
-
-def logout(user):
-    print("Logout")
-"""
-    with open(os.path.join(repo_path, "auth.py"), "w") as f:
-        f.write(code)
-
-    # 3. Commit e Branch
-    subprocess.run(["git", "add", "."], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
-    subprocess.run(["git", "commit", "-m", "Initial"], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
-    subprocess.run(["git", "checkout", "-b", branch_name], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
+    logger.info("🔌 Connecting to DB...")
+    connector = PooledConnector(dsn=DB_DSN, min_size=4, max_size=10)
+    storage = PostgresGraphStorage(connector)
+    provider = MockProvider()
     
-    return repo_path
-
-def strict_verification_test():
-    temp_dir = tempfile.mkdtemp()
-    db_path = os.path.join(temp_dir, "test_index.db")
-    target_branch = "feature/verification-test"
+    embedder = CodeEmbedder(storage, provider)
     
     try:
-        logger.info("=== 1. SETUP AMBIENTE ===")
-        repo_path = setup_dummy_repo(temp_dir, branch_name=target_branch)
-        logger.info(f"Repo creata in: {repo_path} (Branch: {target_branch})")
+        # ==========================================
+        # FASE 1: SNAPSHOT INIZIALE
+        # ==========================================
+        logger.info("\n=== PHASE 1: Initial Snapshot (Cold Start) ===")
+        repo_id = storage.ensure_repository("http://test.enterprise.git", "main", "test-repo")
+        snap1_id, _ = storage.create_snapshot(repo_id, "commit-initial", force_new=True)
+        
+        NUM_NODES_1 = 1000
+        logger.info(f"📥 Seeding DB with {NUM_NODES_1} nodes...")
+        
+        files = []
+        nodes = []
+        contents = []
+        content_hashes_map = {} 
+        
+        for i in range(NUM_NODES_1):
+            fid = str(uuid.uuid4())
+            cid = str(uuid.uuid4())
+            content_str = f"def function_{i}():\n    return 'business_logic_{i}'"
+            chash = hashlib.sha256(content_str.encode()).hexdigest()
+            content_hashes_map[i] = chash
+            
+            f = FileRecord(
+                id=fid, snapshot_id=snap1_id, path=f"src/module_{i}.py",
+                file_hash=f"hash_{i}", commit_hash="c1", language="python",
+                size_bytes=len(content_str), category="source", 
+                indexed_at="2024-01-01T00:00:00Z", parsing_status="success"
+            )
+            n = ChunkNode(
+                id=cid, file_id=fid, file_path=f.path, chunk_hash=chash,
+                start_line=1, end_line=5, byte_range=[0, len(content_str)],
+                metadata={"complexity": "high", "semantic_matches": []}
+            )
+            c = ChunkContent(chunk_hash=chash, content=content_str)
+            files.append(f); nodes.append(n); contents.append(c)
+            
+        storage.add_files(files)
+        storage.add_contents(contents)
+        storage.add_nodes(nodes)
+        
+        logger.info("🚀 Running Async Embedder Pipeline...")
+        stats_1 = {}
+        async for update in embedder.run_indexing(snap1_id, batch_size=200, mock_api=True):
+            if update['status'] == 'completed':
+                stats_1 = update
+            elif update['status'] in ['staging_progress', 'embedding_progress']:
+                 print(f"   [Progress] Embedded: {update.get('total_embedded')}", end='\r')
+        print("")
 
-        logger.info("\n=== 2. TEST INDEXING ===")
-        indexer = CodebaseIndexer(repo_path, db_path=db_path)
-        indexer.index()
+        logger.info(f"✅ Result Snap 1: {stats_1}")
         
-        # VERIFICA 1: Repo ID e Branch nel DB
-        repo_id = indexer.repo_id
-        repo_record = indexer.storage.get_repository(repo_id)
-        
-        if not repo_record:
-            raise AssertionError("❌ ERRORE: Repository non trovata nel DB!")
-        
-        logger.info(f"✅ Repo ID persistito: {repo_record['id']}")
-        logger.info(f"✅ Branch persistito:  {repo_record['branch']}")
-        
-        if repo_record['branch'] != target_branch:
-            raise AssertionError(f"❌ MISMATCH BRANCH: Atteso '{target_branch}', Trovato '{repo_record['branch']}'")
+        # [FIX] ATTIVIAMO LO SNAPSHOT PER LIBERARE IL LOCK 'indexing'
+        storage.activate_snapshot(repo_id, snap1_id, stats=stats_1)
+        logger.info("🔓 Snapshot 1 Activated (Status: completed)")
 
-        # VERIFICA 2: Conteggio Nodi
-        stats = indexer.get_stats()
-        total_nodes = stats['total_nodes']
-        logger.info(f"✅ Nodi indicizzati:   {total_nodes}")
+        # ==========================================
+        # FASE 2: SNAPSHOT INCREMENTALE
+        # ==========================================
+        logger.info("\n=== PHASE 2: Incremental Snapshot (Deduplication Test) ===")
         
-        if total_nodes == 0:
-            raise AssertionError("❌ ERRORE: Nessun nodo indicizzato!")
-
-        logger.info("\n=== 3. TEST EMBEDDING ===")
-        # Usiamo DummyProvider per velocità e determinismo
-        provider = FastEmbedProvider(model_name="jinaai/jina-embeddings-v2-base-code")
+        # Ora create_snapshot funzionerà perché snap1 è 'completed'
+        snap2_id, created = storage.create_snapshot(repo_id, "commit-incremental", force_new=True)
+        if not snap2_id:
+            raise RuntimeError("❌ Impossibile creare Snapshot 2: repository lockato o errore unique violation.")
+            
+        logger.info(f"📥 Seeding DB for Snap 2 (ID: {snap2_id})...")
         
-        embedded_docs = []
-        # debug=True è FONDAMENTALE per ottenere indietro i documenti generati
-        for item in indexer.embed(provider, batch_size=10, debug=True):
-            if "status" not in item: # È un documento vettoriale
-                embedded_docs.append(item)
-
-        logger.info(f"✅ Documenti generati: {len(embedded_docs)}")
-
-        logger.info("\n=== 4. STRICT CHECK & VALIDATION ===")
+        files_2 = []
+        nodes_2 = []
+        contents_2 = []
         
-        # CHECK A: Coerenza Branch in TUTTI i documenti
-        invalid_branch_docs = [d for d in embedded_docs if d['branch'] != target_branch]
-        if invalid_branch_docs:
-            raise AssertionError(f"❌ ERRORE CRITICO: {len(invalid_branch_docs)} documenti hanno il branch sbagliato! Es: {invalid_branch_docs[0]['branch']}")
-        else:
-            logger.info(f"✅ GARANZIA: Tutti i {len(embedded_docs)} documenti hanno branch='{target_branch}'")
-
-        # CHECK B: Coerenza Repo ID in TUTTI i documenti
-        invalid_repo_docs = [d for d in embedded_docs if d['repo_id'] != repo_id]
-        if invalid_repo_docs:
-            raise AssertionError(f"❌ ERRORE CRITICO: {len(invalid_repo_docs)} documenti hanno repo_id sbagliato!")
-        else:
-            logger.info(f"✅ GARANZIA: Tutti i {len(embedded_docs)} documenti hanno repo_id='{repo_id}'")
-
-        # CHECK C: Cross-Check Conteggi (Storage vs Embedding)
-        # Nota: L'embedder potrebbe scartare nodi vuoti o non supportati, ma in questo caso semplice
-        # dovrebbero coincidere o essere molto vicini.
-        # Recuperiamo manualmente i nodi candidati per confronto esatto
-        candidates = list(indexer.storage.get_nodes_cursor(repo_id=repo_id, branch=target_branch))
-        candidate_ids = set(c['id'] for c in candidates)
-        embedded_ids = set(d['chunk_id'] for d in embedded_docs)
+        # 1. I vecchi (990)
+        for i in range(990):
+            fid = str(uuid.uuid4())
+            cid = str(uuid.uuid4())
+            chash = content_hashes_map[i]
+            
+            f = FileRecord(
+                id=fid, snapshot_id=snap2_id, path=f"src/module_{i}.py",
+                file_hash=f"hash_{i}", commit_hash="c2", language="python",
+                size_bytes=100, category="source", 
+                indexed_at="2024-01-02T00:00:00Z", parsing_status="success"
+            )
+            n = ChunkNode(
+                id=cid, file_id=fid, file_path=f.path, chunk_hash=chash,
+                start_line=1, end_line=5, byte_range=[0, 100],
+                metadata={"complexity": "high", "semantic_matches": []}
+            )
+            files_2.append(f); nodes_2.append(n)
+            
+        # 2. I nuovi (10)
+        for i in range(1000, 1010):
+            fid = str(uuid.uuid4())
+            cid = str(uuid.uuid4())
+            content_str = f"def function_NEW_{i}(): return 'brand_new'"
+            chash = hashlib.sha256(content_str.encode()).hexdigest()
+            
+            f = FileRecord(
+                id=fid, snapshot_id=snap2_id, path=f"src/new_module_{i}.py",
+                file_hash=f"hash_new_{i}", commit_hash="c2", language="python",
+                size_bytes=len(content_str), category="source",
+                indexed_at="2024-01-02T00:00:00Z", parsing_status="success"
+            )
+            n = ChunkNode(
+                id=cid, file_id=fid, file_path=f.path, chunk_hash=chash,
+                start_line=1, end_line=5, byte_range=[0, len(content_str)],
+                metadata={"tag": "new"}
+            )
+            c = ChunkContent(chunk_hash=chash, content=content_str)
+            files_2.append(f); nodes_2.append(n); contents_2.append(c)
+            
+        storage.add_files(files_2)
+        storage.add_contents(contents_2)
+        storage.add_nodes(nodes_2)
         
-        logger.info(f"   Candidati (Storage): {len(candidates)}")
-        logger.info(f"   Embeddati (Vettori): {len(embedded_docs)}")
-        
-        missing = candidate_ids - embedded_ids
-        if missing:
-            logger.warning(f"⚠️  Attenzione: {len(missing)} nodi non sono stati embeddati (forse vuoti o filtrati).")
-        
-        if len(embedded_docs) == 0:
-             raise AssertionError("❌ ERRORE: Pipeline embedding fallita (0 documenti).")
+        logger.info("🚀 Running Pipeline for Snapshot 2...")
+        stats_2 = {}
+        async for update in embedder.run_indexing(snap2_id, batch_size=200, mock_api=True):
+             if update['status'] == 'completed':
+                stats_2 = update
+             elif update['status'] == 'deduplication_stats':
+                 logger.info(f"   ♻️  Recovered: {update['recovered']}")
 
-        logger.info("\n🎉 SUCCESSO: IL PROCESSO È GARANTITO AL 100%")
-        return True
-
+        logger.info(f"✅ Result Snap 2: {stats_2}")
+        
+        assert stats_2['total_nodes'] == 1000
+        assert stats_2['recovered_from_history'] == 990
+        assert stats_2['newly_embedded'] == 10
+        
+        logger.info("\n🎉🎉🎉 TEST PASSED: Enterprise Staging Pipeline Works! 🎉🎉🎉")
+        
+    except AssertionError as ae:
+        logger.error(f"❌ ASSERTION FAILED: {ae}")
+        raise ae
     except Exception as e:
-        logger.error(f"\n❌ TEST FALLITO: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+        logger.exception("❌ UNEXPECTED ERROR")
+        raise e
     finally:
-        if 'indexer' in locals(): indexer.close()
-        shutil.rmtree(temp_dir)
+        connector.close()
 
 if __name__ == "__main__":
-    strict_verification_test()
+    asyncio.run(main())

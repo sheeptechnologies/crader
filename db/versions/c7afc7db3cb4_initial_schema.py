@@ -189,6 +189,7 @@ def upgrade() -> None:
     # Indice HNSW partizionato per snapshot sarebbe ideale, ma iniziamo con indice standard su embedding
     # e indice btree su snapshot_id per il filtering.
     op.create_index('ix_embeddings_snapshot', 'node_embeddings', ['snapshot_id'])
+    op.create_index('ix_node_embeddings_vector_hash', 'node_embeddings', ['vector_hash'])
     # op.create_index('ix_embeddings_vector', 'node_embeddings', ['embedding'], postgresql_using='hnsw', postgresql_ops={'embedding': 'vector_cosine_ops'})
     # (L'indice HNSW spesso si crea manualmente post-data load per performance, o si lascia qui se il DB è piccolo)
 

@@ -460,11 +460,12 @@ class CodebaseIndexer:
              raise ValueError("No active snapshot found. Run index() first.")
         
         embedder = CodeEmbedder(self.storage, provider)
-        yield from embedder.run_indexing(
-            snapshot_id=target_snapshot_id,
-            batch_size=batch_size, 
-            yield_debug_docs=debug
-        )
+        with tracer.start_as_current_span("indexer.embed") as span:
+            yield from embedder.run_indexing(
+                snapshot_id=target_snapshot_id,
+                batch_size=batch_size, 
+                yield_debug_docs=debug
+            )
 
     def get_stats(self):
         return self.storage.get_stats()

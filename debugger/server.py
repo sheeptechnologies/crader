@@ -3,9 +3,13 @@ import shutil
 import logging
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import git
+
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.code_graph_indexer.indexer import CodebaseIndexer
 from src.code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider, DummyEmbeddingProvider
@@ -778,6 +782,15 @@ def search(req: SearchRequest):
     )
     
     return results
+
+# --- Frontend Static Files ---
+frontend_dist = os.path.join(os.path.dirname(__file__), "frontend", "dist")
+if os.path.exists(frontend_dist):
+    # Mount assets separately if needed, or just mount root with html=True
+    # Mounting root at the end acts as a fallback for non-api routes
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+else:
+    logger.warning(f"Frontend dist directory not found at {frontend_dist}")
 
 if __name__ == "__main__":
     import uvicorn

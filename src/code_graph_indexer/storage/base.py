@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional, Generator, Tuple
+from typing import Iterator, List, Dict, Any, Optional, Generator, Tuple
 
 class GraphStorage(ABC):
     """
@@ -97,3 +97,38 @@ class GraphStorage(ABC):
     def get_stats(self) -> Dict[str, int]: pass
     @abstractmethod
     def close(self): pass
+
+
+
+    @abstractmethod
+    def prepare_embedding_staging(self): 
+        """Crea la tabella temporanea per il caricamento massivo."""
+        pass
+
+    @abstractmethod
+    def load_staging_data(self, data_generator: Iterator[Tuple]):
+        """Carica i dati grezzi nella staging table via COPY stream."""
+        pass
+
+    @abstractmethod
+    def backfill_staging_vectors(self) -> int:
+        """Deduplica: Copia i vettori dagli snapshot passati alla staging table."""
+        pass
+
+    @abstractmethod
+    def flush_staged_hits(self, snapshot_id: str) -> int:
+        """
+        Sposta i record completi (con vettore) dalla staging alla tabella finale.
+        Ritorna il numero di vettori recuperati (Hits).
+        """
+        pass
+
+    @abstractmethod
+    def fetch_staging_delta(self, batch_size: int = 2000) -> Generator[List[Dict], None, None]:
+        """Itera sui record rimasti in staging (quelli senza vettore) per calcolarli."""
+        pass
+
+    @abstractmethod
+    def save_embeddings_direct(self, records: List[Dict[str, Any]]):
+        """Salvataggio diretto (bypass staging) per i nuovi vettori calcolati."""
+        pass

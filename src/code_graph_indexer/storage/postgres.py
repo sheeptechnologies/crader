@@ -1,7 +1,8 @@
 import json
 import logging
+from pydoc import text
 import uuid
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Generator, Iterator, List, Dict, Any, Optional, Tuple
 import psycopg
 from psycopg.errors import UniqueViolation
 
@@ -474,26 +475,6 @@ class PostgresGraphStorage(GraphStorage):
                 label = m.get('label') or m.get('value')
         return {"id": str(row['id']), "label": label}
 
-    def get_nodes_to_embed(self, snapshot_id: str, model_name: str, batch_size: int = 2000):
-        sql = """
-            SELECT n.id, n.file_path, n.chunk_hash, n.start_line, n.end_line, n.metadata,
-                   f.language, f.category 
-            FROM files f JOIN nodes n ON f.id = n.file_id
-            LEFT JOIN node_embeddings ne ON (n.id = ne.chunk_id AND ne.model_name = %s)
-            WHERE f.snapshot_id = %s AND ne.id IS NULL
-        """
-        cursor_name = f"embed_stream_{uuid.uuid4().hex}"
-        with self.connector.get_connection() as conn:
-            with conn.transaction():
-                with conn.cursor(name=cursor_name) as cur:
-                    cur.itersize = batch_size
-                    cur.execute(sql, (model_name, snapshot_id))
-                    for r in cur:
-                        yield {
-                            "id": str(r['id']), "file_path": r['file_path'], "chunk_hash": r['chunk_hash'],
-                            "start_line": r['start_line'], "end_line": r['end_line'], "metadata_json": json.dumps(r['metadata']),
-                            "snapshot_id": snapshot_id, "language": r['language'], "category": r['category']
-                        }
 
     def get_vectors_by_hashes(self, vector_hashes: List[str], model_name: str) -> Dict[str, List[float]]:
         if not vector_hashes: return {}
@@ -697,3 +678,213 @@ class PostgresGraphStorage(GraphStorage):
                 logger.error(f"❌ SCIP Ingestion Failed: {e}")
                 raise e
         
+    # ==========================================
+    # 3. EMBEDDING OPERATIONS
+    # ==========================================
+
+    def prepare_embedding_staging(self):
+        """
+        Crea la tabella di staging.
+        [FIX CRITICO]: Aggiunto DROP TABLE per resettare lo schema errato (UUID) 
+        e usare TEXT per id/chunk_id, così da matchare node_embeddings.
+        """
+        sql_drop = "DROP TABLE IF EXISTS staging_embeddings"
+        
+        sql_create = """
+            CREATE UNLOGGED TABLE IF NOT EXISTS staging_embeddings (
+                id TEXT PRIMARY KEY,        -- FIX: TEXT (non UUID) per compatibilità con node_embeddings.id
+                chunk_id TEXT NOT NULL,     -- FIX: TEXT (non UUID) per compatibilità con nodes.id
+                snapshot_id TEXT NOT NULL,
+                vector_hash TEXT NOT NULL,
+                embedding VECTOR(1536),
+                file_path TEXT,
+                language TEXT,
+                category TEXT,
+                start_line INTEGER,
+                end_line INTEGER,
+                model_name TEXT,
+                content TEXT
+            );
+        """ 
+        with self.connector.get_connection() as conn:
+            # Droppiamo la tabella vecchia per assicurarci che quella nuova abbia i tipi corretti (TEXT)
+            conn.execute(sql_drop)
+            conn.execute(sql_create)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_snap_vhash ON staging_embeddings(snapshot_id, vector_hash)")
+
+    def load_staging_data(self, data_generator: Iterator[Tuple]):
+        """
+        Caricamento via COPY.
+        """
+        sql = """
+            COPY staging_embeddings (id, chunk_id, snapshot_id, vector_hash, file_path, language, category, start_line, end_line, model_name, content)
+            FROM STDIN
+        """
+        with tracer.start_as_current_span("db.staging.load") as span:
+            try:
+                with self.connector.get_connection() as conn:
+                    with conn.cursor() as cur:
+                        with cur.copy(sql) as copy:
+                            count = 0
+                            for row in data_generator:
+                                copy.write_row(row)
+                                count += 1
+                            span.set_attribute("rows_loaded", count)
+            except Exception as e:
+                logger.error(f"Copy to staging failed: {e}")
+                raise e
+
+    def backfill_staging_vectors(self, snapshot_id: str) -> int:
+        """
+        Deduplica Storica.
+        """
+        sql = """
+            WITH historic_vectors AS (
+                SELECT DISTINCT ON (vector_hash) vector_hash, embedding
+                FROM node_embeddings
+                WHERE vector_hash IN (SELECT vector_hash FROM staging_embeddings WHERE snapshot_id = %s)
+                AND embedding IS NOT NULL
+            )
+            UPDATE staging_embeddings s
+            SET embedding = h.embedding
+            FROM historic_vectors h
+            WHERE s.vector_hash = h.vector_hash
+            AND s.snapshot_id = %s
+        """
+        with tracer.start_as_current_span("db.staging.backfill") as span:
+            with self.connector.get_connection() as conn:
+                res = conn.execute(sql, (snapshot_id, snapshot_id))
+                count = res.rowcount
+                logger.info(f"♻️  Deduplicated {count} vectors from history.")
+                return count
+
+    def flush_staged_hits(self, snapshot_id: str) -> int:
+        """
+        Flush Hits.
+        Ora i tipi (TEXT vs VARCHAR) combaciano, quindi il DELETE con IN clause non fallirà.
+        """
+        sql = """
+            WITH moved_rows AS (
+                INSERT INTO node_embeddings (
+                    id, chunk_id, snapshot_id, vector_hash, model_name, created_at, embedding,
+                    file_path, language, category, start_line, end_line
+                )
+                SELECT 
+                    id, chunk_id, %s, vector_hash, model_name, NOW(), embedding,
+                    file_path, language, category, start_line, end_line
+                FROM staging_embeddings
+                WHERE embedding IS NOT NULL 
+                AND snapshot_id = %s
+                RETURNING id
+            )
+            DELETE FROM staging_embeddings 
+            WHERE id IN (SELECT id FROM moved_rows)
+        """
+        with tracer.start_as_current_span("db.staging.flush_hits"):
+            with self.connector.get_connection() as conn:
+                res = conn.execute(sql, (snapshot_id, snapshot_id))
+                return res.rowcount
+
+    def fetch_staging_delta(self, snapshot_id: str, batch_size: int = 2000) -> Generator[List[Dict], None, None]:
+        """
+        Fetch Delta.
+        """
+        sql = """
+            SELECT id, content, model_name, file_path, language, category, start_line, end_line, chunk_id, vector_hash
+            FROM staging_embeddings
+            WHERE snapshot_id = %s
+        """
+        cursor_name = f"delta_stream_{uuid.uuid4().hex}"
+        
+        with self.connector.get_connection() as conn:
+            with conn.transaction():
+                with conn.cursor(name=cursor_name) as cur:
+                    cur.itersize = batch_size
+                    cur.execute(sql, (snapshot_id,))
+                    while True:
+                        rows = cur.fetchmany(batch_size)
+                        if not rows: break
+                        yield rows
+
+    def cleanup_staging(self, snapshot_id: str):
+        """
+        Pulizia finale dei dati di staging per questo snapshot.
+        """
+        sql = "DELETE FROM staging_embeddings WHERE snapshot_id = %s"
+        with self.connector.get_connection() as conn:
+            conn.execute(sql, (snapshot_id,))
+
+    def save_embeddings_direct(self, records: List[Dict[str, Any]]):
+        """
+        Scrittura diretta.
+        """
+        if not records: return
+        sql = """
+            INSERT INTO node_embeddings (
+                id, chunk_id, snapshot_id, vector_hash, model_name, created_at, 
+                file_path, language, category, start_line, end_line, embedding
+            ) VALUES (
+                %(id)s, %(chunk_id)s, %(snapshot_id)s, %(vector_hash)s, %(model_name)s, %(created_at)s,
+                %(file_path)s, %(language)s, %(category)s, %(start_line)s, %(end_line)s, %(embedding)s
+            )
+            ON CONFLICT (id) DO NOTHING
+        """
+        with self.connector.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(sql, records)
+
+    # ==========================================
+    # SUPER QUERY (Updated)
+    # ==========================================
+
+    def get_nodes_to_embed(self, snapshot_id: str, model_name: str, batch_size: int = 2000):
+        sql = """
+            SELECT 
+                n.id, 
+                n.file_path, 
+                n.chunk_hash, 
+                n.start_line, 
+                n.end_line, 
+                n.metadata,
+                f.language, 
+                f.category,
+                c.content,
+                COALESCE(
+                    (
+                        SELECT array_agg(DISTINCT e.metadata->>'symbol') 
+                        FROM edges e 
+                        WHERE e.target_id = n.id 
+                          AND e.relation_type = 'calls'
+                    ), 
+                    '{}'
+                ) as incoming_definitions
+            FROM files f 
+            JOIN nodes n ON f.id = n.file_id
+            JOIN contents c ON n.chunk_hash = c.chunk_hash
+            LEFT JOIN node_embeddings ne ON (n.id = ne.chunk_id AND ne.model_name = %s)
+            WHERE f.snapshot_id = %s 
+              AND ne.id IS NULL
+        """
+        
+        cursor_name = f"embed_stream_{uuid.uuid4().hex}"
+        
+        with self.connector.get_connection() as conn:
+            with conn.transaction():
+                with conn.cursor(name=cursor_name) as cur:
+                    cur.itersize = batch_size
+                    cur.execute(sql, (model_name, snapshot_id))
+                    
+                    for r in cur:
+                        yield {
+                            "id": str(r['id']), 
+                            "file_path": r['file_path'], 
+                            "chunk_hash": r['chunk_hash'],
+                            "start_line": r['start_line'], 
+                            "end_line": r['end_line'], 
+                            "metadata_json": json.dumps(r['metadata']),
+                            "snapshot_id": snapshot_id, 
+                            "language": r['language'], 
+                            "category": r['category'],
+                            "content": r['content'],
+                            "incoming_definitions": r['incoming_definitions'] if r['incoming_definitions'] else []
+                        }
