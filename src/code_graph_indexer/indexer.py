@@ -36,9 +36,28 @@ logger = logging.getLogger(__name__)
 _worker_parser = None
 _worker_storage = None
 
-def _init_worker_process(worktree_path: str, snapshot_id: str, commit_hash: str, repo_url: str, branch: str, db_url: str,worker_init_fn: Optional[Callable]):
+def _init_worker_process(worktree_path: str, db_url: str):
     """
-    Worker Process Bootstrap.
+    Bootstrap entry point for worker processes in the indexing pipeline.
+    
+    Initializes a localized environment for the worker, including:
+    1.  **Parser Initialization**: Sets up a `TreeSitterRepoParser` instance attached to the 
+        specific `worktree_path`. This parser is responsible for granular analysis of source files.
+    2.  **Storage Access**: Establishes a *direct*, dedicated `PostgresGraphStorage` connection 
+        using `SingleConnector`. This ensures independent I/O handling for the worker, avoiding 
+        contention with the main process's connection pool.
+
+    The global variables `_worker_parser` and `_worker_storage` are populated here to be accessed relative to 
+    the process state.
+
+    Args:
+        worktree_path (str): The filesystem path to the ephemeral worktree where the repository files are checked out.
+        snapshot_id (str): The unique identifier for the current indexing snapshot.
+        commit_hash (str): The SHA-1 hash of the commit being indexed.
+        repo_url (str): The origin URL of the repository.
+        branch (str): The branch name currently being processed.
+        db_url (str): The database connection string (DSN).
+        worker_init_fn (Optional[Callable]): An optional hook for custom worker initialization (e.g., telemetry setup).
     """
     if worker_init_fn:
         try:
@@ -72,6 +91,25 @@ def _init_worker_process(worktree_path: str, snapshot_id: str, commit_hash: str,
 
 
 def _process_and_insert_chunk(file_paths: List[str], carrier: Dict[str, str]) -> Tuple[int, Dict[str, float]]:
+    """
+    Worker routine to process a batch of files.
+    
+    This function is the core unit of work executed by parallel workers. It performs the following steps:
+    1.  **Context Extraction**: Restores the distributed tracing context from the `carrier`.
+    2.  **Buffers Initialization**: Sets up local buffers for files, nodes, contents, and relationships to batch DB writes.
+    3.  **Parsing Loops**: Iterates through the assigned `file_paths`:
+        *   Invokes `_worker_parser.stream_semantic_chunks` to parse the file.
+        *   Accumulates the resulting FileRecords, ChunkNodes, Content, and Relations into the local buffers.
+    4.  **Batch Flashing**: Periodically (based on `BATCH_SIZE`) flushes the accumulated data to the database via `_worker_storage`.
+    5.  **Error Handling**: Catches frame-level exceptions, logs warnings for unparsable files, and ensures robust execution.
+
+    Args:
+        file_paths (List[str]): A list of relative paths to the files assigned to this worker.
+        carrier (Dict[str, str]): The tracing context propagation carrier.
+
+    Returns:
+        Tuple[int, Dict[str, float]]: A tuple containing the count of successfully processed files and an empty metrics dictionary (reserved for future use).
+    """
     gc.disable()
     global _worker_parser, _worker_storage
     if not _worker_storage: return 0, {}
@@ -143,7 +181,40 @@ def _chunked_iterable(iterable, size):
 # ==============================================================================
 
 class CodebaseIndexer:
+    """
+    The High-Level Orchestrator for the Codebase Indexing Pipeline.
+
+    This class serves as the central control unit for ingesting, parsing, and indexing a source code repository.
+    It manages the end-to-end lifecycle of the indexing process, coordinating:
+    
+    *   **Repository Synchronization**: Using `GitVolumeManager` to fetch and update the local code cache.
+    *   **Snapshot Management**: creating, validating, and activating snapshots in the `GraphStorage`.
+    *   **Parallel Parsing**: Distributing the parsing workload across multiple worker processes using `ProcessPoolExecutor`.
+    *   **SCIP Analysis**: Integrating SCIP (Stack Graph) analysis for precise code intelligence and cross-file references.
+    *   **Graph Construction**: Orchestrating the storage of nodes, edges, and semantic metadata into the PostgreSQL backend.
+    
+    Attributes:
+        repo_url (str): The URL of the repository being indexed.
+        branch (str): The target branch name.
+        db_url (str): The database connection string.
+        storage (PostgresGraphStorage): The storage interface for graph data persistence.
+        git_manager (GitVolumeManager): The manager for git operations and worktrees.
+        builder (KnowledgeGraphBuilder): Helper for graph construction logic.
+    """
+
     def __init__(self, repo_url: str, branch: str, db_url: Optional[str] = None, worker_telemetry_init: Optional[Callable[[], None]] = None):
+        """
+        Initializes the CodebaseIndexer.
+
+        Args:
+            repo_url (str): The URL of the repository to index.
+            branch (str): The specific branch to index (e.g., 'main').
+            db_url (Optional[str]): Database connection string. If None, it attempts to load from `DB_URL` env var.
+            worker_telemetry_init (Optional[Callable]): Optional callback to initialize telemetry in worker processes.
+        
+        Raises:
+            ValueError: If `db_url` is not provided and `DB_URL` environment variable is missing.
+        """
         self.repo_url = repo_url
         self.branch = branch
         self.worker_telemetry_init = worker_telemetry_init
@@ -163,8 +234,30 @@ class CodebaseIndexer:
 
     def index(self, force: bool = False, auto_prune: bool = False) -> str:
         """
-        Executes full indexing (Parsing + SCIP + Activation).
-        [FIX] auto_prune=False by default to preserve history for embedding.
+        Executes the full indexing pipeline: Repository Sync -> Parsing + SCIP -> Activation.
+
+        This method encapsulates the core logic for checking the repository state and performing the indexing if necessary.
+        
+        **Workflow:**
+        1.  **Repository Sync**: Ensures the local cache of the repository is up-to-date with the remote.
+        2.  **Snapshot Creation**: Checks if a snapshot for the current commit already exists.
+            *   If yes and `force` is False, returns the existing snapshot ID.
+            *   If no (or `force` is True), creates a new snapshot with status 'indexing'.
+        3.  **Worktree Setup**: Creates ephemeral worktrees for isolated parsing and SCIP analysis.
+        4.  **Pipeline Execution**: Invokes `_run_indexing_pipeline` to perform the heavy lifting (parsing, SCIP extraction, DB ingestion).
+        5.  **Completion & Activation**:
+            *   On success: Marks the snapshot as 'completed', activates it (updating the repository's current pointer), and generates the file manifest.
+            *   On failure: Marks the snapshot as 'failed' and re-raises the exception.
+        
+        Args:
+            force (bool): If True, bypasses the check for existing snapshots and forces a re-index.
+            auto_prune (bool): If True, attempts to prune old snapshots after successful indexing. 
+                               Defaults to False to allow for subsequent embedding processes on historical data.
+
+        Returns:
+            str: The ID of the active snapshot (either newly created or existing).
+            
+        Returns "queued" if the repository is currently locked/busy.
         """
         
         logger.info(f"🚀 Indexing Request Start: {self.repo_url} ({self.branch})")
@@ -236,6 +329,25 @@ class CodebaseIndexer:
         return active_snapshot_id
 
     def _run_indexing_pipeline(self, repo_id: str, snapshot_id: str, commit: str, parser_worktree: str, scip_worktree: str):
+        """
+        Internal engine driving the parsing and analysis pipeline.
+
+        This method orchestrates the parallel execution of file parsing and the concurrent execution of SCIP analysis.
+        
+        **Components:**
+        *   **File Enumeration**: Scans the `parser_worktree` to identify relevant source files, respecting ignore patterns.
+        *   **Parallel Parsing**: Uses a `ProcessPoolExecutor` to spawn worker processes that parse files in chunks and ingest them into the DB.
+        *   **SCIP Analysis**: concurrently runs the `SCIPIndexer` in a separate thread to extract cross-file relationship data.
+        *   **Normalization**: Merges SCIP data with the parsed nodes to create a rich property graph (resolved edges).
+        *   **Snapshot Finalization**: Compiles statistics and generates the file structure manifest before activating the snapshot.
+
+        Args:
+            repo_id (str): The internal ID of the repository.
+            snapshot_id (str): The ID of the current snapshot being populated.
+            commit (str): The commit hash.
+            parser_worktree (str): Path to the worktree dedicated to AST parsing.
+            scip_worktree (str): Path to the worktree dedicated to SCIP analysis.
+        """
         scip_indexer = SCIPIndexer(repo_path=scip_worktree)
         current_context = context.get_current()
 
@@ -344,7 +456,28 @@ class CodebaseIndexer:
 
     async def embed(self, provider: EmbeddingProvider, batch_size: int = 1000, mock_api: bool = False, force_snapshot_id: str = None) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        Generates embeddings asynchronously.
+        Triggers the Asynchronous Embedding Pipeline.
+
+        This method delegates the generation of vector embeddings to the `CodeEmbedder`. It operates as a generator,
+        yielding status updates throughout the process to allow the caller to track progress.
+
+        **Key Features:**
+        *   **Asynchronous Processing**: Uses asyncio to handle concurrent API calls efficiently.
+        *   **Staging & Deduplication**: The pipeline (managed by `CodeEmbedder`) includes phases for staging vectors 
+            and deduplicating against existing vectors to minimize API costs.
+        *   **Incremental Updates**: Only new or changed code blocks are sent for embedding.
+
+        Args:
+            provider (EmbeddingProvider): The provider (e.g., OpenAI) to use for generating embeddings.
+            batch_size (int): Number of items to process in a single batch.
+            mock_api (bool): If True, simulates API calls (for testing/debugging).
+            force_snapshot_id (Optional[str]): If provided, forces embedding of a specific snapshot ID instead of the currently active one.
+
+        Yields:
+            Dict[str, Any]: Status update dictionaries containing keys like "status", "progress", etc.
+
+        Raises:
+            ValueError: If no active snapshot is found or specified.
         """
         logger.info(f"🤖 Embedding Start: {provider.model_name} (Async Mode)")
         

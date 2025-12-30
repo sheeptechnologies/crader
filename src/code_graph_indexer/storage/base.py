@@ -3,8 +3,12 @@ from typing import Iterator, List, Dict, Any, Optional, Generator, Tuple
 
 class GraphStorage(ABC):
     """
-    Interfaccia astratta per lo storage Enterprise (Snapshot-based).
-    Definisce il contratto minimo per Identity, Write, Read e Graph Analysis.
+    Abstract Base Class (ABC) for Enterprise Graph Storage.
+
+    Defines the contract for the Code Property Graph (CPG) persistence layer. 
+    It mandates support for Snapshot isolation, allowing concurrent indexing and retrieval operations.
+    
+    Any compliant backend (Postgres, SQLite) must implement these methods.
     """
     
     # --- IDENTITY & SNAPSHOTS ---
@@ -35,7 +39,10 @@ class GraphStorage(ABC):
     
     @abstractmethod
     def get_repository(self, repo_id: str) -> Optional[Dict[str, Any]]: 
-        """Serve al Reader (Legacy Mode) per trovare il path su disco."""
+        """
+        Retrieves repository metadata (url, branch, current_snapshot).
+        Used by the Reader to locate the physical path on disk (legacy mode) or logical volume refs.
+        """
         pass
 
     # --- WRITE OPERATIONS ---
@@ -73,7 +80,7 @@ class GraphStorage(ABC):
     @abstractmethod
     def search_vectors(self, query_vector: List[float], limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]: pass
 
-    # --- GRAPH NAVIGATION (Cruciale per Navigator) ---
+    # --- GRAPH NAVIGATION (Crucial for Navigator) ---
     @abstractmethod
     def get_context_neighbors(self, node_id: str) -> Dict[str, List[Dict[str, Any]]]: pass
     
@@ -102,33 +109,49 @@ class GraphStorage(ABC):
 
     @abstractmethod
     def prepare_embedding_staging(self): 
-        """Crea la tabella temporanea per il caricamento massivo."""
+        """
+        Initializes an ephemeral staging area (e.g., UNLOGGED table) for high-speed massive insertion.
+        Required for the vector embedding pipeline.
+        """
         pass
 
     @abstractmethod
     def load_staging_data(self, data_generator: Iterator[Tuple]):
-        """Carica i dati grezzi nella staging table via COPY stream."""
+        """
+        Bulk loads raw data tuples into the staging area.
+        Should use the fastest available method (e.g., COPY protocol).
+        """
         pass
 
     @abstractmethod
     def backfill_staging_vectors(self) -> int:
-        """Deduplica: Copia i vettori dagli snapshot passati alla staging table."""
+        """
+        Deduplication Strategy: Checks if staged vectors already exist in history.
+        Must fill the 'embedding' column in the staging table from historical data to save API cost.
+        Returns the number of recovered vectors.
+        """
         pass
 
     @abstractmethod
     def flush_staged_hits(self, snapshot_id: str) -> int:
         """
-        Sposta i record completi (con vettore) dalla staging alla tabella finale.
-        Ritorna il numero di vettori recuperati (Hits).
+        Promotes fully resolved records (those with embeddings) from Staging to Production (Node Embeddings table).
+        Returns the count of promoted items (Hits).
         """
         pass
 
     @abstractmethod
     def fetch_staging_delta(self, batch_size: int = 2000) -> Generator[List[Dict], None, None]:
-        """Itera sui record rimasti in staging (quelli senza vettore) per calcolarli."""
+        """
+        Yields batches of staged records that are still missing embeddings (The Delta).
+        These will be processed by external embedding workers.
+        """
         pass
 
     @abstractmethod
     def save_embeddings_direct(self, records: List[Dict[str, Any]]):
-        """Salvataggio diretto (bypass staging) per i nuovi vettori calcolati."""
+        """
+        Direct write path for new vectors calculated by workers.
+        Bypasses staging and inserts directly into the production table (e.g., via INSERT ... ON CONFLICT).
+        """
         pass

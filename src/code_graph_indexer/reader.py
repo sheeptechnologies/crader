@@ -7,13 +7,25 @@ logger = logging.getLogger(__name__)
 
 class CodeReader:
     """
-    Virtual Filesystem Reader (Manifest-Based).
-    O(1) listing, Lazy Loading reading.
+    Virtual Filesystem Reader based on Immutable Snapshots.
+    
+    This facade provides high-performance, consistent read access to the repository's file structure and content 
+    as it existed at a specific point in time (Snapshot). It abstracts the underlying storage mechanism (which stores files as distributed chunks)
+    into a coherent file system interface.
+
+    **Key Architectures:**
+    *   **Manifest-Based Listing**: Directory listings are O(1) operations served from a pre-computed JSON manifest stored with the snapshot, creating a "Virtual File System".
+    *   **Lazy Loading**: File contents are re-assembled on-demand from database chunks, ensuring that reading small sections of large files is efficient.
+    *   **Caching**: Implements session-level caching for manifests to minimize database round-trips during heavy read sessions.
+
+    Attributes:
+        storage (GraphStorage): The storage backend interface.
+        _manifest_cache (Dict): Internal cache to store loaded snapshot manifests.
     """
     
     def __init__(self, storage: GraphStorage):
         self.storage = storage
-        # Cache locale del manifest per sessione (opzionale, ma utile se l'oggetto Reader vive a lungo)
+        # Local manifest cache per session (optional, but useful if the Reader object is long-lived)
         self._manifest_cache = {}
 
     def _get_manifest(self, snapshot_id: str) -> Dict:
@@ -23,13 +35,32 @@ class CodeReader:
 
     def read_file(self, snapshot_id: str, file_path: str, start_line: int = None, end_line: int = None) -> Dict[str, Any]:
         """
-        Smart Read: Scarica solo i chunk necessari dal DB.
+        Retrieves file content, potentially partial, from the snapshot.
+
+        This method reconstructs the file (or a segment of it) by querying the underlying chunks in the database.
+        It is optimized to fetch only the data strictly necessary for the requested range.
+
+        Args:
+            snapshot_id (str): The ID of the snapshot to read from.
+            file_path (str): The relative path of the file (e.g., 'src/main.py').
+            start_line (Optional[int]): The 1-based start line number (inclusive). Defaults to beginning of file.
+            end_line (Optional[int]): The 1-based end line number (inclusive). Defaults to end of file.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing:
+                *   'file_path': The input path.
+                *   'content': The string content of the file (or range).
+                *   'start_line': The actual start line returned.
+                *   'end_line': The actual end line returned.
+
+        Raises:
+            FileNotFoundError: If the file path does not exist in the specified snapshot.
         """
-        # Nota: Qui potremmo anche validare l'esistenza del file guardando il manifest prima di chiamare il DB
+        # Note: We could also validate file existence by looking at the manifest before calling the DB
         content = self.storage.get_file_content_range(snapshot_id, file_path, start_line, end_line)
         
         if content is None:
-            raise FileNotFoundError(f"File '{file_path}' non trovato nello snapshot {snapshot_id[:8]}")
+            raise FileNotFoundError(f"File '{file_path}' not found in snapshot {snapshot_id[:8]}")
 
         return {
             "file_path": file_path,
@@ -40,26 +71,41 @@ class CodeReader:
 
     def list_directory(self, snapshot_id: str, path: str = "") -> List[Dict[str, Any]]:
         """
-        O(1) Listing usando il Manifest JSON pre-calcolato.
+        Lists the contents of a directory using the O(1) Manifest mechanism.
+
+        This method traverses the pre-loaded JSON manifest tree to find the target directory and lists its immediate children.
+        It does NOT query the database files table directly, making it extremely fast even for huge repositories.
+
+        Args:
+            snapshot_id (str): The ID of the snapshot.
+            path (str): The relative path to the directory to list (empty string for root).
+
+        Returns:
+            List[Dict[str, Any]]: A sorted list of directory entries, where each entry is:
+                *   'name': Name of the file/dir.
+                *   'type': 'file' or 'dir'.
+                *   'path': Full relative path.
+            
+            Result is sorted so directories appear first.
         """
         manifest = self._get_manifest(snapshot_id)
         
-        # Navigazione nell'albero JSON
+        # Navigation in the JSON tree
         current = manifest
-        # Rimuoviamo slash iniziali/finali
+        # Remove leading/trailing slashes
         target_parts = [p for p in path.split('/') if p]
         
         try:
-            # Scendiamo nell'albero
+            # Descend into tree
             for part in target_parts:
                 current = current["children"][part]
                 if current["type"] != "dir":
-                    raise NotADirectoryError(f"{path} non è una directory.")
+                    raise NotADirectoryError(f"{path} is not a directory.")
         except KeyError:
-            # Se un pezzo del path non esiste
-            return [] # O raise FileNotFoundError, ma [] è più sicuro per l'agente
+            # If a part of the path does not exist
+            return [] # Or raise FileNotFoundError, but [] is safer for the agent
 
-        # Formattazione output (figli diretti)
+        # Output formatting (direct children)
         results = []
         children = current.get("children", {})
         
@@ -70,13 +116,23 @@ class CodeReader:
                 "path": f"{path}/{name}".strip("/")
             })
             
-        # Sort: Directory prima
+        # Sort: Directory first
         return sorted(results, key=lambda x: (x['type'] != 'dir', x['name']))
 
     def find_directories(self, snapshot_id: str, name_pattern: str, limit: int = 10) -> List[str]:
         """
-        Ricerca ricorsiva nel Manifest (In-Memory).
-        Molto più veloce che scaricare tutti i path e splittare stringhe.
+        Performs a recursive 'fuzzy find' for directories within the Manifest.
+
+        This execution happens entirely In-Memory on the JSON structure, avoiding expensive database `LIKE` queries over paths.
+        Useful for fuzzy navigation like "find the 'tests' folder".
+
+        Args:
+            snapshot_id (str): The ID of the snapshot.
+            name_pattern (str): The substring to search for in directory names (e.g., "utils").
+            limit (int): Max number of results to return.
+
+        Returns:
+            List[str]: A list of matching directory paths.
         """
         manifest = self._get_manifest(snapshot_id)
         found = []
@@ -89,7 +145,7 @@ class CodeReader:
             for name, meta in children.items():
                 full_path = f"{current_path}/{name}".strip("/")
                 
-                # Se è una directory
+                # If it is a directory
                 if meta["type"] == "dir":
                     # Check match
                     if pattern in name.lower():

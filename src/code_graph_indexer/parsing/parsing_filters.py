@@ -1,8 +1,17 @@
 """
-Configurazione centralizzata per il filtraggio dei file.
+Centralized Configuration for Indexing Exclusion Rules.
+
+This module defines "Noise Control" policies.
+It prevents the indexer from wasting cycles on compiled binaries, package manager lockfiles,
+or generated code that dilutes the semantic quality of the Knowledge Graph.
+
+**Categories**:
+*   `GLOBAL_IGNORE_DIRS`: Technical noise (git, node_modules) -> Never indexed.
+*   `SEMANTIC_NOISE_DIRS`: Low-value code (fixtures, translations) -> Indexed by Parser but skipped by graph builders (configurable).
+*   `LANGUAGE_SPECIFIC_FILTERS`: Fine-grained file pattern rejections via `fnmatch`.
 """
 
-# Directory che vanno SEMPRE ignorate (Rumore Tecnico)
+# Directories that are ALWAYS ignored (Technical Noise)
 GLOBAL_IGNORE_DIRS = {
     ".git", ".svn", ".hg", ".cvs",
     ".vscode", ".idea", ".eclipse", ".settings",
@@ -15,17 +24,17 @@ GLOBAL_IGNORE_DIRS = {
     "logs", "tmp", "temp"
 }
 
-# Directory che contengono codice ma poco valore strutturale (Rumore Semantico)
-# SCIP dovrebbe ignorarle per non appesantire il grafo.
+# Directories containing code but with low structural value (Semantic Noise)
+# SCIP should ignore these to avoid bloating the graph.
 SEMANTIC_NOISE_DIRS = {
     "migrations", "fixture", "fixtures",
-    "mock", "mocks", "spec", "specs", # Test dir comuni
+    "mock", "mocks", "spec", "specs", # Common test dirs
     "locales", "translations",
     "vendor", "assets", "static", "public",
     "docs", "documentation", "examples","*test*"
 }
 
-# Configurazione specifica per linguaggio
+# Language-specific specific configuration
 LANGUAGE_SPECIFIC_FILTERS = {
     "python": {
         "exclude_patterns": [ "conftest.py", "manage.py", "wsgi.py", "asgi.py", "setup.py", "alembic/versions/*"], #"*/test/*","*test*" "test_*.py", "*_test.py",

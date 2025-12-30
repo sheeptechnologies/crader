@@ -1,7 +1,17 @@
 import os
 from pathlib import Path
 
-# --- STORAGE CONFIGURATION ---
+# ==============================================================================
+#  STORAGE CONFIGURATION & DEFAULTS
+# ==============================================================================
+
+"""
+Defines the runtime configuration for the Repository Volume Manager.
+
+Scalability Note:
+In a distributed environment (Kubernetes/Cloud), `REPO_VOLUME` should ideally point to a 
+Shared Persistent Volume (NFS/EFS) to allow all worker pods to access the same raw git data.
+"""
 
 # 1. Look for 'REPO_VOLUME' environment variable (set by Docker/Kubernetes or .env)
 # 2. If missing, use a local folder './sheep_data/repositories' relative to CWD.

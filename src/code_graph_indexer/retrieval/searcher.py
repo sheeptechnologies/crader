@@ -7,22 +7,46 @@ logger = logging.getLogger(__name__)
 
 class SearchExecutor:
     """
-    Helper per eseguire le strategie di ricerca.
-    Allineato alla logica 'Snapshot Strict' (Niente repo_id verso lo storage).
+    Orchestration Engine for Search Strategies.
+
+    This static utility class is responsible for dispatching queries to different search backends
+    (Vector Search, Full-Text Search) and accumulating the results into a unified candidate pool.
+
+    **Key Principles:**
+    *   **Snapshot Isolation**: Enforces searching strictly within a target `snapshot_id`.
+    *   **Normalization**: Standardizes results from different backends into a common dictionary structure.
+    *   **Side-Effect Accumulation**: Modifies a `candidates` dictionary in-place to prepare for Fusion (RRF).
     """
     
     @staticmethod
     def vector_search(storage: GraphStorage, embedder: EmbeddingProvider, 
                      query: str, limit: int, 
-                     snapshot_id: str, # [CRITICAL] Il contesto primario
-                     repo_id: Optional[str] = None, # Legacy/Audit only (non usato per storage)
+                     snapshot_id: str, 
+                     repo_id: Optional[str] = None, 
                      filters: Optional[Dict[str, Any]] = None,
                      candidates: Dict[str, Any] = None):
+        """
+        Executes Semantic Search (ANN) and accumulates results.
+        
+        1.  Computes the embedding vector for the `query` using `embedder`.
+        2.  Delegates the ANN search to `storage.search_vectors`.
+        3.  Updates the `candidates` pool with the results, tagging them with `method='vector'`.
+
+        Args:
+            storage: The data access layer.
+            embedder: Identity provider for vectorization.
+            query: The user's natural language query.
+            limit: Max items to fetch.
+            snapshot_id: The target snapshot UUID.
+            repo_id: (Deprecated) Kept for interface compatibility, not used for logic.
+            filters: Metadata filters.
+            candidates: Mutable dictionary for result aggregation.
+        """
         if candidates is None: candidates = {}
         try:
             query_vec = embedder.embed([query])[0]
             
-            # [FIX] Rimossa chiamata con repo_id
+            # [FIX] Removed call with repo_id
             results = storage.search_vectors(
                 query_vector=query_vec, 
                 limit=limit, 
@@ -39,10 +63,27 @@ class SearchExecutor:
                       repo_id: Optional[str] = None,
                       filters: Optional[Dict[str, Any]] = None,
                       candidates: Dict[str, Any] = None):
+        """
+        Executes Lexical Search (FTS) and accumulates results.
+
+        1.  Delegates the Full-Text Search to `storage.search_fts`.
+        2.  Updates the `candidates` pool with results, tagging them with `method='keyword'`.
+        
+        Use Case: Finds exact matches, specific function names, or error codes that semantic search might miss.
+
+        Args:
+            storage: The data access layer.
+            query: The keywords/tokens to fuzzy match.
+            limit: Max items to fetch.
+            snapshot_id: The target snapshot UUID.
+            repo_id: (Deprecated) Unused.
+            filters: Metadata filters.
+            candidates: Mutable dictionary for result aggregation.
+        """
         if candidates is None: candidates = {}
         try:
-            # [FIX] Rimossa chiamata con repo_id
-            # Nota: search_fts in postgres.py ora richiede esplicitamente snapshot_id
+            # [FIX] Removed call with repo_id
+            # Note: search_fts in postgres.py now explicitly requires snapshot_id
             results = storage.search_fts(
                 query=query, 
                 limit=limit, 

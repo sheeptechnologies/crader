@@ -11,8 +11,14 @@ logger = logging.getLogger(__name__)
 
 class EmbeddingProvider(ABC):
     """
-    Interfaccia astratta per modelli di embedding.
-    Supporta modalità Sync (legacy) e Async (pipeline enterprise).
+    Abstract Interface for Vector Embedding Models.
+    
+    This contract allows the indexer to be model-agnostic, supporting OpenAI, Cohere, HuggingFace, etc.
+    It mandates both synchronous (legacy/CLI) and asynchronous (high-throughput pipeline) support.
+
+    **Enterprise Requirements**:
+    *   **Concurrency Control**: Must expose `max_concurrency` to prevent rate-limiting downstream.
+    *   **Dimensions**: Must declare vector size explicitly for database schema init.
     """
     
     @abstractmethod
@@ -36,8 +42,11 @@ class EmbeddingProvider(ABC):
     @property
     def max_concurrency(self) -> int:
         """
-        Numero massimo di batch paralleli. 
-        OpenAI Tier 1 supporta ~5-10 richieste concorrenti prima del 429.
+        Recommended maximum number of concurrent requests.
+        
+        Example:
+        *   OpenAI Tier 1: ~5-10 parallel batches before 429 Too Many Requests.
+        *   Local Model (FastEmbed): ~CPU Core count (typically low).
         """
         return 5
 
@@ -101,7 +110,13 @@ class FastEmbedProvider(EmbeddingProvider):
 
 class OpenAIEmbeddingProvider(EmbeddingProvider):
     """
-    Provider Enterprise per OpenAI con supporto nativo Async.
+    Enterprise-grade OpenAI Integration.
+
+    Uses `AsyncOpenAI` for non-blocking I/O during heavy indexing jobs.
+    Includes built-in handling for:
+    *   **Rate Limits**: Basic strategy (errors surface to worker, which retries).
+    *   **Token Limits**: Pre-cleaning of input (stripping newlines) as recommended by OpenAI documentation.
+    *   **Batching**: Handled by the caller (`CodeEmbedder`), but strictly typed here.
     """
     def __init__(self, model: str = "text-embedding-3-small", batch_size: int = 100, max_concurrency: int = 10):
         self._model = model
@@ -134,7 +149,10 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         return self._max_concurrency
 
     def embed(self, texts: List[str]) -> List[List[float]]:
-        """Sync fallback"""
+        """
+        Synchronous wrapper for single-threaded usage (not recommended for bulk indexing).
+        Implements chunked batching manually to respect `batch_size`.
+        """
         clean_texts = [t.replace("\n", " ") for t in texts]
         clean_texts = [t if t.strip() else "empty" for t in clean_texts]
         all_embeddings = []
@@ -151,7 +169,10 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
     async def embed_async(self, texts: List[str]) -> List[List[float]]:
         """
-        Async implementation per high-throughput indexing.
+        High-Throughput Asynchronous Embedding Generation.
+        
+        Leverages `httpx` via `AsyncOpenAI` client.
+        Note: The caller is responsible for semaphore management using `max_concurrency`.
         """
         # OpenAI raccomanda di sostituire newline con spazi per embedding migliori
         clean_texts = [t.replace("\n", " ") for t in texts]

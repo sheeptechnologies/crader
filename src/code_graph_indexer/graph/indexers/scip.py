@@ -19,7 +19,7 @@ from ..base import BaseGraphIndexer, CodeRelation
 from ...parsing.parsing_filters import GLOBAL_IGNORE_DIRS, SEMANTIC_NOISE_DIRS
 
 logger = logging.getLogger(__name__)
-tracer = trace.get_tracer(__name__)  # Inizializziamo il tracer
+tracer = trace.get_tracer(__name__)  # Initialize the tracer
 
 # --- SCIP CONSTANTS & UTILS ---
 SCIP_ROLE_DEFINITION = 1
@@ -39,15 +39,29 @@ def get_relation_verb(role_mask: int) -> str:
 
 # --- 2. DISK SYMBOL TABLE ---
 class DiskSymbolTable:
+    """
+    Ephemeral SQLite-backed Symbol Table.
+
+    Used during the indexing phase to resolve symbol references (calls) to their definitions.
+    
+    **Why SQLite?**
+    *   **Memory Efficiency**: Large repositories (monorepos) can have millions of symbols.
+        Keeping a `Dict[str, Location]` in Python memory causes OOM kills.
+    *   **Performance**: Bulk inserts and indexed lookups are faster than specialized disk-KV stores for this use case.
+    
+    **Lifecycle**:
+    Created fresh for each indexing run and automatically deleted upon completion.
+    """
     def __init__(self):
         self.db_path = tempfile.NamedTemporaryFile(delete=False, suffix=".db").name
         self.conn = sqlite3.connect(self.db_path)
         self.cursor = self.conn.cursor()
+        # Performance Tuning: Speed over Durability (It's a temporary cache)
         self.cursor.execute("PRAGMA synchronous = OFF")
         self.cursor.execute("PRAGMA journal_mode = MEMORY")
         self.cursor.execute("CREATE TABLE defs (symbol TEXT, scope_file TEXT, file_path TEXT, start_line INTEGER, start_char INTEGER, end_line INTEGER, end_char INTEGER, PRIMARY KEY (symbol, scope_file))")
         self.buffer = []
-        self._insert_count = 0 # Telemetria interna
+        self._insert_count = 0 # Internal telemetry
 
     def add(self, symbol: str, file_path: str, scip_range: List[int], is_local: bool):
         scope = file_path if is_local else ""
@@ -83,6 +97,15 @@ class DiskSymbolTable:
 
 # --- 3. SCIP RUNNER (STREAMING) ---
 class SCIPRunner:
+    """
+    Facade for the Source Code Indexing Protocol (SCIP) CLI tools.
+
+    Manages the lifecycle of external indexers (scip-python, scip-typescript, etc.):
+    1.  **Discovery**: Auto-detects project types based on marker files (e.g. `package.json`).
+    2.  **Execution**: Runs the correct SCIP indexer in a subprocess / temp environment.
+    3.  **Optimization**: Prunes the workspace before indexing to speed up traversal.
+    4.  **Streaming**: Decodes the protobuf output into a Python generator.
+    """
     PROJECT_MARKERS = {
         "pyproject.toml": "scip-python", "requirements.txt": "scip-python", "setup.py": "scip-python",
         "package.json": "scip-typescript", "tsconfig.json": "scip-typescript",
@@ -105,8 +128,15 @@ class SCIPRunner:
 
     def _prune_workspace(self, project_root: str):
         """
-        Pulisce il workspace mantenendo SOLO codice sorgente e file di configurazione.
-        Riduce drasticamente l'I/O e il tempo di scansione di SCIP.
+        IO Optimization: Aggressive Workspace Pruning.
+        
+        Removes all non-essential files (images, logs, binaries) from the worktree *before*
+        passing it to the SCIP indexer. This drastically reduces the time SCIP tools spend
+        walking the filesystem.
+
+        **Safety**:
+        Only operates on the isolated, ephemeral worktree managed by `GitVolumeManager`,
+        never on the user's actual source code.
         """
         with tracer.start_as_current_span("scip.prune_workspace") as span:
             span.set_attribute("scip.prune.root", project_root)
@@ -120,7 +150,7 @@ class SCIPRunner:
             removed_files = 0
             
             for root, dirs, files in os.walk(project_root, topdown=True):
-                # 1. Pruning Directory (Blacklist)
+                # 1. Directory Pruning (Blacklist)
                 dirs_to_remove = set()
                 for d in dirs:
                     if d.startswith('.'):
@@ -137,18 +167,21 @@ class SCIPRunner:
                         removed_dirs += 1
                     except OSError: pass
                 
-                # Aggiorniamo la lista dirs per fermare la discesa
+                # Update dirs list to stop descent
                 dirs[:] = [d for d in dirs if d not in dirs_to_remove]
                 
-                # 2. Pruning File (Whitelist Aggressiva) [NUOVO]
-                # Cancelliamo tutto ciò che non è codice o config di progetto
+                # 2. File Pruning (Aggressive Whitelist) [NEW]
+                """
+                Cleans the workspace keeping ONLY source code and configuration files.
+                Drastically reduces I/O and SCIP scanning time.
+                """
                 for f in files:
-                    if f in valid_markers: continue # Mantieni package.json, requirements.txt...
+                    if f in valid_markers: continue # Keep package.json, requirements.txt...
                     
                     _, ext = os.path.splitext(f)
-                    if ext in valid_exts: continue # Mantieni .py, .ts, .java...
+                    if ext in valid_exts: continue # Keep .py, .ts, .java...
                     
-                    # Se arriviamo qui, è un file inutile (es. .jpg, .csv, .log) -> DELETE
+                    # If we get here, it's a useless file (e.g. .jpg, .csv, .log) -> DELETE
                     try:
                         os.remove(os.path.join(root, f))
                         removed_files += 1
@@ -164,14 +197,14 @@ class SCIPRunner:
             if not shutil.which(self.SCIP_CLI):
                 span.record_exception(FileNotFoundError("SCIP CLI not found"))
                 span.set_status(Status(StatusCode.ERROR, "SCIP CLI missing"))
-                logger.error(f"[SCIP] CLI '{self.SCIP_CLI}' non trovato.")
+                logger.error(f"[SCIP] CLI '{self.SCIP_CLI}' not found.")
                 return []
             
             tasks = self._discover_tasks()
             span.set_attribute("scip.tasks_count", len(tasks))
             
             if not tasks: 
-                logger.warning("[SCIP] Nessun task di indicizzazione trovato.")
+                logger.warning("[SCIP] No indexing tasks found.")
                 return []
             
             results = []
@@ -195,7 +228,7 @@ class SCIPRunner:
     def _run_single_index(self, task, env,ctx) -> Optional[Tuple[str, str]]:
         token = context.attach(ctx)
         indexer, project_root = task
-        # Usiamo il tracer per monitorare ogni singola esecuzione della CLI
+        # Use the tracer to monitor each single CLI execution
         with tracer.start_as_current_span("scip.exec_cli") as span:
             span.set_attribute("scip.indexer", indexer)
             span.set_attribute("scip.project_root", project_root)
@@ -220,7 +253,7 @@ class SCIPRunner:
 
                 if result.returncode != 0:
                     span.set_status(Status(StatusCode.ERROR))
-                    span.set_attribute("scip.stderr", result.stderr[:2000]) # Limitiamo la size
+                    span.set_attribute("scip.stderr", result.stderr[:2000]) # Limit buffer size
                     logger.error(f"❌ [SCIP FAIL] {indexer} exited with code {result.returncode}")
                     return None
 
@@ -243,9 +276,17 @@ class SCIPRunner:
             
     
 
+            
+    
     def stream_documents(self, indices: List[Tuple[str, str]]) -> Generator[Dict, None, None]:
+        """
+        Yields documents from generated SCIP indices.
+        
+        Invokes `scip print --json` to convert the binary Protobuf index into a stream of JSON objects.
+        This allows processing indices that are larger than available memory.
+        """
         for project_root, index_path in indices:
-            # Monitoriamo il processo di lettura/streaming
+            # Monitor the reading/streaming process
             with tracer.start_as_current_span("scip.stream_decode") as span:
                 span.set_attribute("scip.index_path", index_path)
                 doc_count = 0
@@ -329,6 +370,19 @@ class SCIPRunner:
 
 # --- 4. INDEXER ---
 class SCIPIndexer(BaseGraphIndexer):
+    """
+    Codebase Graph Builder based on LSIF/SCIP.
+    
+    This is the "Deep Analysis" engine. Unlike Tree-sitter (which is purely syntactic),
+    SCIP indexers understand the semantics of the language (type resolution, cross-file references).
+
+    **Pipeline**:
+    1.  **Detection**: Determine language and tools.
+    2.  **Indexing**: Run `scip-python`, `scip-java` etc. to produce `.scip` files.
+    3.  **Extraction**: Two-pass processing of the index:
+        *   Pass 1: Build a Symbol Table of all Definitions.
+        *   Pass 2: Resolve all References (Calls) against the Definitions.
+    """
     INDEXER_NAME = "scip"
 
     def __init__(self, repo_path: str):
@@ -337,11 +391,20 @@ class SCIPIndexer(BaseGraphIndexer):
         self.runner = SCIPRunner(repo_path)
 
     def extract_relations(self, chunk_map: Dict) -> List[CodeRelation]:
-        # Wrap anche qui per sicurezza
+        # Wrap here too for safety
         with tracer.start_as_current_span("scip.extract_relations"):
             return list(self.stream_relations())
 
     def stream_relations(self, exclude_definitions: bool = True, exclude_externals: bool = True) -> Generator[CodeRelation, None, None]:
+        """
+        Orchestrates the Relation Extraction Pipeline.
+
+        Yields `CodeRelation` objects representing the "Edge Configuration" of the code graph.
+        
+        Args:
+            exclude_definitions: If True, do not yield edges for definitions themselves (just references).
+            exclude_externals: If True, ignore calls to libraries outside the repo (e.g. stdlib).
+        """
         with tracer.start_as_current_span("scip.pipeline_run") as span:
             indices = self.runner.prepare_indices()
             if not indices: 
@@ -357,8 +420,8 @@ class SCIPIndexer(BaseGraphIndexer):
                     for wrapper in self.runner.stream_documents(indices):
                         self._process_definitions(wrapper, symbol_table)
                     
-                    inserted = symbol_table.flush() # Modificato per tornare count se vuoi, o usa attributo
-                    # Qui accediamo alla variabile interna per telemetria
+                    inserted = symbol_table.flush() # Modified to return count if desired, or use attribute
+                    # Here we access the internal variable for telemetry
                     def_span.set_attribute("scip.definitions_found", symbol_table._insert_count)
 
                 # Fase 2: Occurrence Pass
@@ -377,7 +440,7 @@ class SCIPIndexer(BaseGraphIndexer):
                 raise e # Rilanciamo per il gestore superiore
                 
             finally:
-                definitions_count = symbol_table.close() # close ora può ritornare stats
+                definitions_count = symbol_table.close() # close can now return stats
                 self.runner.cleanup()
                 span.set_attribute("scip.total_definitions_db", definitions_count if definitions_count else 0)
                 span.set_attribute("scip.total_relations_final", total_rels)
@@ -394,8 +457,8 @@ class SCIPIndexer(BaseGraphIndexer):
                         table.add(o["symbol"], norm_p, o["range"], is_local)
 
     def _process_occurrences(self, wrapper: Dict, table: DiskSymbolTable, exclude_definitions: bool, exclude_externals: bool) -> Generator[CodeRelation, None, None]:
-        # Ottimizzazione: Non creiamo uno span per ogni file qui, troppo overhead.
-        # Il parent span "scip.pass_occurrences" copre tutto.
+        # Optimization: Do not create a span for each file here, too much overhead.
+        # The parent span "scip.pass_occurrences" covers everything.
         root, doc = wrapper['project_root'], wrapper['document']
         if "relative_path" not in doc or not root: return
         

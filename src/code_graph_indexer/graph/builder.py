@@ -9,8 +9,14 @@ logger = logging.getLogger(__name__)
 
 class KnowledgeGraphBuilder:
     """
-    Costruisce il grafo scrivendo nodi, file e relazioni sullo Storage.
-    Snapshot-Aware: Le relazioni esterne (SCIP) vengono risolte nel contesto dello snapshot corrente.
+    Facade for Constructing the Code Property Graph (CPG).
+
+    Serves as the high-level API for pushing parsed artifacts (Files, Nodes, Edges) into storage.
+    
+    **Key Responsibilities**:
+    *   **Abstraction**: Hides specific storage implementation details from the `CodebaseIndexer`.
+    *   **Resolution**: Handles the complex logic of linking edges (e.g., `calls`, `inherits`) by resolving byte-ranges to concrete `node_id`s, especially for cross-file references.
+    *   **Search Optimization**: Aggregates metadata and content to populate the specific Full-Text Search index.
     """
     def __init__(self, storage: GraphStorage):
         self.storage = storage
@@ -26,7 +32,11 @@ class KnowledgeGraphBuilder:
 
     def index_search_content(self, nodes: List[ChunkNode], contents: Dict[str, ChunkContent]):
         """
-        Prepara e salva i dati per la ricerca FTS unificata.
+        Populates the Lexical Search Index (FTS).
+
+        Aggregates semantic tags, roles, and raw code content into a unified "Search Document".
+        This empowers the search engine to find code not just by text match but by concepts 
+        (e.g. "auth controller", "retry logic").
         """
         search_batch = []
         for node in nodes:
@@ -55,25 +65,32 @@ class KnowledgeGraphBuilder:
 
     def add_relations(self, relations: List[CodeRelation], snapshot_id: str = None):
         """
-        Aggiunge le relazioni al grafo.
-        
+        Resolution and Insertion of Graph Edges.
+
+        This method bridges the gap between the Abstract Syntax Tree (AST) relationships (often expressed as 
+        byte-ranges in a file) and the physical Graph Database (Node IDs).
+
+        **Logic Flow**:
+        1.  **Resolution**: Converts `(file_path, byte_range)` tuples into concrete `node_id`s using the Storage index.
+        2.  **External Linking**: Handles external references (e.g. imports from stdlib) - *Currently a placeholder*.
+        3.  **Persist**: Writes valid edges to the `edges` table.
+
         Args:
-            relations: Lista di oggetti CodeRelation.
-            snapshot_id: FONDAMENTALE per risolvere le relazioni SCIP (byte-range -> node_id).
-                         Se le relazioni hanno già source_id/target_id (interne), questo parametro è ignorato.
+            relations: List of relationship descriptors found during parsing (SCIP/TreeSitter).
+            snapshot_id: Required context to perform range-to-node lookups in the specific version of the code.
         """
         if not relations: return
         
         logger.info(f"Elaborazione di {len(relations)} relazioni (Context Snap: {snapshot_id})...")
         lookup_cache = {}
         
-        # Helper per risolvere ID da range
+        # Helper to resolve ID from range
         def resolve_id(file_path, byte_range):
             if not snapshot_id: return None
             key = (file_path, tuple(byte_range))
             if key in lookup_cache: return lookup_cache[key]
             
-            # Chiamata allo storage con snapshot_id
+            # Call to storage with snapshot_id
             nid = self.storage.find_chunk_id(file_path, byte_range, snapshot_id)
             if nid: lookup_cache[key] = nid
             return nid
@@ -91,7 +108,7 @@ class KnowledgeGraphBuilder:
                 if rel.metadata.get("is_external"):
                     # Gestione nodi esterni (es. librerie std) - Placeholder
                     # self.storage.ensure_external_node(rel.target_file) 
-                    rel.target_id = rel.target_file # Semplificazione per nodi fantasma
+                    rel.target_id = rel.target_file # Simplification for phantom nodes
                 elif rel.target_byte_range and len(rel.target_byte_range) == 2:
                     rel.target_id = resolve_id(rel.target_file, rel.target_byte_range)
 

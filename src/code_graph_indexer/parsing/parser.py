@@ -24,8 +24,22 @@ tracer = trace.get_tracer(__name__)
 
 class TreeSitterRepoParser:
     """
-    Parser semantico ottimizzato per High-Performance Indexing.
-    Utilizza MemoryView e Bytearray per ridurre allocazioni e copie (Zero-Copy Slicing).
+    High-Performance Semantic Code Parser powered by Tree-Sitter.
+
+    This engine is responsible for converting raw source code into a structured Code Property Graph (CPG).
+    It employs several optimizations for throughput and memory efficiency:
+
+    **Key Architecture:**
+    *   **Zero-Copy Slicing**: Uses Python `memoryview` and `bytearray` to handle large file contents without redundant copying.
+    *   **Incremental Hashing**: Computes SHA-256 signatures for files and chunks to enable content-addressable storage (CAS) and deduplication.
+    *   **Polyglot Support**: Dynamically loads Tree-Sitter grammars based on file extension.
+    *   **Semantic Querying**: Uses S-expression queries (`.scm` files) to extract high-level constructs like Classes, Functions, and Imports.
+
+    **Pipeline phase**:
+    1.  **Filtering**: Selects relevant files (ignoring test/vendor noise).
+    2.  **Parsing**: Builds a Concrete Syntax Tree (CST).
+    3.  **Capturing**: Applies semantic queries to identify "Interesting Nodes".
+    4.  **Chunking**: Recursively breaks down the code into manageable blocks ("Chunks") preserving lexical scope.
     """
 
     EXT_TO_LANG_CONFIG = {
@@ -86,10 +100,10 @@ class TreeSitterRepoParser:
 
         self.parser = Parser()
         
-        # Il parser ignora SIA il rumore tecnico (node_modules) SIA quello semantico (se deciso così)
-        # Ma nel nostro design, il Parser ACCETTA semantic noise (test) ma SCIP no.
-        # Quindi qui ignoriamo SOLO GLOBAL_IGNORE_DIRS (rumore tecnico).
-        # Se vuoi che il parser ignori anche i test, aggiungi SEMANTIC_NOISE_DIRS qui.
+        # The parser ignores BOTH technical noise (node_modules) AND semantic noise (if configured).
+        # However, in our design, the Parser ACCEPTS semantic noise (e.g., test files) but SCIP does not.
+        # So here we only ignore GLOBAL_IGNORE_DIRS (technical noise).
+        # If you want the parser to ignore tests as well, add SEMANTIC_NOISE_DIRS here.
         self.all_ignore_dirs = GLOBAL_IGNORE_DIRS #| SEMANTIC_NOISE_DIRS
 
     def _set_parser_language(self, lang_object):
@@ -105,11 +119,14 @@ class TreeSitterRepoParser:
 
     def _is_minified_or_generated(self, content_sample: bytes, file_path: str) -> bool:
         """
-        Euristica basata sul contenuto per rilevare file minificati/generati.
+        Content-based heuristic to detect minified/generated files.
+
+        Returns:
+            bool: True if the file should be skipped.
         """
         try:
-            # Check 1: Linea troppo lunga (Minified JS/CSS)
-            # Analizziamo solo le prime righe per velocità
+            # Check 1: Line too long (Minified JS/CSS)
+            # Analyze only the first lines for speed
             first_lines = content_sample[:2048].split(b'\n')[:5]
             for line in first_lines:
                 if len(line) > MAX_LINE_LENGTH: 
@@ -146,6 +163,7 @@ class TreeSitterRepoParser:
     # ==============================================================================
 
     def _load_query_for_language(self, language_name: str) -> Optional[str]:
+        """Loads the raw S-expression query string for the given language from disk."""
         try:
             base_path = os.path.dirname(__file__)
             query_path = os.path.join(base_path, "queries", f"{language_name}.scm")
@@ -153,11 +171,12 @@ class TreeSitterRepoParser:
                 with open(query_path, "r", encoding="utf-8") as f:
                     return f.read()
         except Exception as e:
-            # Silenzioso se manca il file query per lingue meno comuni
+            # Silent if the query file is missing for less common languages
             pass
         return None
 
     def _generate_label(self, category: str, value: str) -> str:
+        """Generates a human-readable label for a semantic capture (e.g., 'class' -> 'Class Definition')."""
         labels = {
             ("role", "entry_point"): "Application Entry Point",
             ("role", "test_suite"): "Test Suite Class",
@@ -174,7 +193,7 @@ class TreeSitterRepoParser:
         if language_name in self._query_cache:
             query = self._query_cache[language_name]
         else:
-            # 2. LOAD & COMPILE (Slow Path - Solo una volta per worker)
+            # 2. LOAD & COMPILE (Slow Path - Only once per worker)
             query_scm = self._load_query_for_language(language_name)
             if not query_scm:
                 self._query_cache[language_name] = None
@@ -188,7 +207,7 @@ class TreeSitterRepoParser:
             lang_obj = self.languages[target_ext]
             
             try:
-                # La compilazione è costosa, la facciamo una volta sola
+                # Compilation is expensive, we do it only once
                 query = lang_obj.query(query_scm)
                 self._query_cache[language_name] = query
             except Exception as e:
@@ -196,7 +215,7 @@ class TreeSitterRepoParser:
                 self._query_cache[language_name] = None
                 return []
 
-        # Se la query non esiste o è fallita in precedenza, esci
+        # If the query does not exist or failed previously, exit
         if query is None: 
             return []
         
@@ -231,6 +250,22 @@ class TreeSitterRepoParser:
     # ==============================================================================
 
     def stream_semantic_chunks(self, file_list: Optional[List[str]] = None) -> Generator[Tuple[FileRecord, List[ChunkNode], List[ChunkContent], List[CodeRelation]], None, None]:
+        """
+        The Main Pipeline Entry Point.
+
+        Iterates over the provided file list (or scans the repo) and yields structured graph data.
+        It is designed to be a generator to allow streaming processing and keep memory usage constant.
+
+        **Yields**:
+            A tuple containing:
+            1.  `FileRecord`: Metadata and status of the file.
+            2.  `List[ChunkNode]`: All the chunks (functions, classes) found.
+            3.  `List[ChunkContent]`: The actual text content (for CAS).
+            4.  `List[CodeRelation]`: Relationships (parent-child) extracted.
+
+        Args:
+            file_list (List[str], optional): Explicit list of relative paths to process.
+        """
         if not self.snapshot_id:
             raise ValueError("Parser: snapshot_id not set.")
         
@@ -359,8 +394,15 @@ class TreeSitterRepoParser:
 
     def _should_process_file(self, rel_path: str) -> bool:
         """
-        Motore decisionale Enterprise per filtrare i file.
-        Ritorna True se il file è valido per l'indicizzazione.
+        Enterprise Filtering Logic.
+
+        Determines if a file is suitable for indexing based on:
+        1.  **Global Blacklists**: `node_modules`, `.git`, temporary folders.
+        2.  **Language Rules**: Allowed extensions, specific exclude patterns (e.g., `_test.go`).
+        3.  **Heuristics**: Dotfiles, lockfiles.
+
+        Returns:
+            bool: True if the file should be parsed.
         """
         parts = rel_path.split(os.sep)
         filename = parts[-1]
@@ -407,6 +449,20 @@ class TreeSitterRepoParser:
                        initial_glue: Union[bytes, bytearray] = b"", initial_glue_start: Optional[int] = None,
                        is_breakdown_mode: bool = False,
                        semantic_captures: List[Dict] = None):
+        """
+        Recursive Chunking Engine.
+
+        This is the core algorithm that iterates over the Tree-Sitter AST to group code into semantic chunks.
+        It balances two competing goals:
+        1.  **Granularity**: Keeping chunks small enough for embedding models (e.g. < 800 tokens).
+        2.  **Context**: Keeping related code (e.g. comments + function signatures) together.
+
+        **Algorithm**:
+        *   Iterates over children of the current node.
+        *   Accumulates "Glue" (comments, whitespace, small statements).
+        *   When a "Barrier" (Class, Function) is met, flushes the glue and descends into the barrier.
+        *   If a node is too large, it triggers `_handle_large_node` to break it down further.
+        """
         
         semantic_captures = semantic_captures or []
         body_node = parent_node.child_by_field_name("body") or parent_node.child_by_field_name("block") or parent_node.child_by_field_name("consequence")
@@ -532,6 +588,13 @@ class TreeSitterRepoParser:
                            file_path: str, file_id: str, parent_chunk_id: Optional[str],
                            nodes: List, contents: Dict, relations: List,
                            semantic_captures: List[Dict] = None):
+        """
+        Strategy for handling nodes that exceed the chunk size limit.
+        
+        It attempts to separate the "Header" (signature, decorators) from the "Body".
+        If the body is still too large, it recursively calls `_process_scope` on the body.
+        As a last resort (fallback), it performs a hard lexical split.
+        """
         
         target_node = node
         if node.type == 'decorated_definition':

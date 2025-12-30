@@ -10,25 +10,45 @@ logger = logging.getLogger(__name__)
 
 class DatabaseConnector(Protocol):
     """
-    Interfaccia Contract per qualsiasi fornitore di connessioni Postgres.
-    Garantisce che lo Storage riceva sempre una connessione valida,
-    indipendentemente da come questa venga creata (Pool o Single).
+    Interface Contract for PostgreSQL connection providers.
+    
+    This protocol ensures that the Persistence Layer (`GraphStorage`) operates agnostically regarding
+    how connections are acquired (e.g., via a Threaded Pool, a Single Process setup, or a Serverless connection).
     """
+
     def get_connection(self) -> Generator[psycopg.Connection, None, None]:
+        """
+        Yields a valid, active `psycopg.Connection` context.
+        The implementation must handle lifecycle management (e.g., checking liveness, returning to pool vs closing).
+        """
         ...
     
     def close(self):
+        """Releases all underlying resources (pools, sockets)."""
         ...
 
 class PooledConnector:
     """
-    Gestisce un pool di connessioni Client-Side.
-    
-    BEST PRACTICE:
-    Usare questo connettore nel Main Process (API, Celery Orchestrator) dove
-    ci sono thread concorrenti che fanno query brevi e frequenti.
+    Client-Side Connection Pooler implementation (via `psycopg_pool`).
+
+    **Use Case**:
+    Designed for the **Main API Process** or **Orchestrator**, where multiple concurrent threads (e.g., Flask/FastAPI requests)
+    need to perform short, frequent queries.
+
+    **Key Features**:
+    *   **Auto-Scaling**: Maintains `min_size` connections and scales up to `max_size` under load.
+    *   **Vector Support**: Automatically registers `pgvector` codecs on new connections.
+    *   **Resilience**: Blocks until a connection is available or the pool is ready.
     """
     def __init__(self, dsn: str, min_size: int = 4, max_size: int = 20):
+        """
+        Initializes the connection pool.
+
+        Args:
+            dsn (str): Libpq connection string (postgres://user:pass@host:port/db).
+            min_size (int): Minimum idle connections to keep open.
+            max_size (int): usage cap to prevent exhausting DB max_connections.
+        """
         self._dsn = dsn
         self.pool = ConnectionPool(
             conninfo=dsn,
@@ -40,11 +60,11 @@ class PooledConnector:
             },
             configure=self._configure
         )
-        # Attendiamo che il pool sia pronto
+        # Block until at least one connection is established to ensure system readiness ("Fail Fast")
         self.pool.wait()
 
     def _configure(self, conn: psycopg.Connection):
-        """Configura ogni nuova connessione del pool (es. pgvector)."""
+        """Callback to configure every new connection in the pool (e.g., ensure pgvector is loaded)."""
         try:
             register_vector(conn)
         except psycopg.ProgrammingError:
@@ -52,19 +72,28 @@ class PooledConnector:
 
     @contextlib.contextmanager
     def get_connection(self):
+        """
+        Borrows a connection from the pool contextually.
+        Automatically returns it to the pool on exit.
+        """
         with self.pool.connection() as conn:
             yield conn
 
     def close(self):
+        """Gracefully shuts down the pool, closing all open sockets."""
         self.pool.close()
 
 class SingleConnector:
     """
-    Gestisce una singola connessione persistente dedicata.
-    
-    BEST PRACTICE:
-    Usare questo connettore nei Worker Process (Multiprocessing) che vivono
-    solo per eseguire Batch Operations (COPY) e non hanno concorrenza interna.
+    Persistent Single-Connection implementation.
+
+    **Use Case**:
+    Designed for **Worker Processes** (multiprocessing spawn) that live to execute long-running, 
+    sequential batch operations (like `COPY` ingestion). Avoids the overhead and complexity of a pool 
+    inside a single-threaded independent worker.
+
+    **Stability Features**:
+    *   **Auto-Reconnect**: Detects broken pipes/closed sockets and transparently reconnects before yielding.
     """
     def __init__(self, dsn: str):
         self.dsn = dsn
@@ -72,7 +101,7 @@ class SingleConnector:
         self._connect()
 
     def _connect(self):
-        """Apre una connessione diretta (TCP socket) verso il DB/PgBouncer."""
+        """Opens a direct TCP socket to PostgreSQL and registers extensions."""
         self.conn = psycopg.connect(
             self.dsn, 
             autocommit=True, 
@@ -85,7 +114,10 @@ class SingleConnector:
 
     @contextlib.contextmanager
     def get_connection(self):
-        # Resilienza: Se la connessione è caduta (es. timeout PgBouncer), riconnettiamo.
+        """
+        Yields the persistent connection.
+        Performs a liveness check and reconnects if necessary to handle network blips or PgBouncer timeouts.
+        """
         if self.conn.closed:
             logger.warning("⚠️ SingleConnector: Connection lost. Reconnecting...")
             self._connect()

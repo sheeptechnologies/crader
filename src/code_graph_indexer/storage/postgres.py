@@ -15,9 +15,31 @@ from .connector import DatabaseConnector  # Importiamo l'interfaccia
 
 
 class PostgresGraphStorage(GraphStorage):
+    """
+    Enterprise-grade Postgres implementation of the GraphStorage interface.
+
+    This class serves as the persistence layer for the Code Property Graph (CPG).
+    It leverages PostgreSQL's advanced features including JSONB for flexible metadata,
+    pgvector for high-dimensional vector search, and Full-Text Search (FTS) for lexical queries.
+
+    **Key Architectures:**
+    *   **Connection Management**: Abducts connection logic via `DatabaseConnector` (Pool vs Single).
+    *   **Atomic Snapshots**: Implements ACID-compliant snapshot creation and activation to ensure read consistency.
+    *   **Bulk Ingestion**: Uses PostgreSQL `COPY` protocol and `executemany` for high-throughput data insertion.
+    *   **Hybrid Search**: Combines `pgvector` (semantic) and `tsvector` (lexical) in optimized SQL queries.
+
+    Attributes:
+        connector (DatabaseConnector): The database connection provider.
+        vector_dim (int): Dimensionality of the embedding vectors (default 1536 for OpenAI).
+    """
+
     def __init__(self, connector: DatabaseConnector, vector_dim: int = 1536):
         """
-        Dependency Injection: The connector decides the strategy (Pool vs Single).
+        Initializes the storage backend.
+
+        Args:
+            connector (DatabaseConnector): The strategy for obtaining DB connections.
+            vector_dim (int): The vector size for the embedding model (e.g., 1536 for text-embedding-3-small).
         """
         self.connector = connector
         self.vector_dim = vector_dim
@@ -34,6 +56,19 @@ class PostgresGraphStorage(GraphStorage):
     # ==========================================
 
     def ensure_repository(self, url: str, branch: str, name: str) -> str:
+        """
+        Registers or updates a repository entry.
+        
+        This operation is idempotent. If the repository (url + branch) exists, it updates the name and timestamp.
+        
+        Args:
+            url (str): The logical URL of the repository (e.g., 'https://github.com/org/repo').
+            branch (str): The branch being tracked.
+            name (str): A human-readable display name.
+            
+        Returns:
+            str: The UUID of the repository.
+        """
         sql = """
             INSERT INTO repositories (id, url, branch, name)
             VALUES (%s, %s, %s, %s)
@@ -47,6 +82,23 @@ class PostgresGraphStorage(GraphStorage):
             return str(res['id'])
             
     def create_snapshot(self, repository_id: str, commit_hash: str, force_new: bool = False) -> Tuple[Optional[str], bool]:
+        """
+        Initializes a new indexing snapshot.
+
+        This method handles the concurrency control for repo indexing.
+        1.  Checks if a valid snapshot already exists for the given commit (unless `force_new` is True).
+        2.  If not, creates a new snapshot record with status 'indexing'.
+        3.  Uses database constraints to prevent duplicate active indexing jobs for the same commit.
+
+        Args:
+            repository_id (str): The target repository ID.
+            commit_hash (str): The specific commit SHA.
+            force_new (bool): If True, ignores existing completed snapshots.
+
+        Returns:
+            Tuple[Optional[str], bool]: A tuple (snapshot_id, is_newly_created).
+                                        Returns (None, False) if the repo is locked/busy.
+        """
         new_id = str(uuid.uuid4())
         
         try:
@@ -91,6 +143,20 @@ class PostgresGraphStorage(GraphStorage):
             return row is not None
     
     def activate_snapshot(self, repository_id: str, snapshot_id: str, stats: Dict[str, Any] = None, manifest: Dict[str, Any] = None):
+        """
+        Promotes a snapshot to 'active' status.
+        
+        This atomic transaction:
+        1.  Updates the snapshot status to 'completed'.
+        2.  Saves the final indexing statistics and file manifest.
+        3.  Updates the `repositories.current_snapshot_id` pointer to this new snapshot.
+        
+        Args:
+            repository_id (str): The repository ID.
+            snapshot_id (str): The snapshot to activate.
+            stats (Dict): Indexing statistics (node count, parse time, etc.).
+            manifest (Dict): The file system structure JSON.
+        """
         with self.connector.get_connection() as conn:
             with conn.transaction():
                 conn.execute("""
@@ -148,7 +214,13 @@ class PostgresGraphStorage(GraphStorage):
 
     def add_nodes(self, nodes: List[Any]):
         """
-        Standard method to insert nodes with conflict handling (safe for retries).
+        Inserts graph nodes with standard conflict handling.
+
+        Use this method when `ON CONFLICT DO NOTHING` is required (e.g., during incremental updates).
+        For bulk initial loads, `add_nodes_fast` is preferred.
+
+        Args:
+            nodes (List[Any]): List of ChunkNode objects.
         """
         if not nodes: return
         with self.connector.get_connection() as conn:
@@ -169,9 +241,19 @@ class PostgresGraphStorage(GraphStorage):
 
     def add_nodes_fast(self, nodes: List[Any]):
         """
-        Optimized version using COPY protocol.
-        Extremely fast for bulk inserts (new snapshots).
-        WARNING: Fails if duplicates exist (does not support ON CONFLICT).
+        Optimized Node Insertion using PostgreSQL `COPY` protocol.
+
+        This method streams data directly into the database table, bypassing the overhead of individual 
+        INSERT statements. It offers 10x-50x performance improvement for bulk operations.
+
+        **WARNING:** This method does NOT support `ON CONFLICT` clauses. It should only be used 
+        when the calling context guarantees uniqueness or is initializing a fresh snapshot (e.g. worker processes).
+        
+        Args:
+            nodes (List[Any]): List of ChunkNode objects using protocol v1.
+            
+        Raises:
+            Exception: If any raw DB error occurs (e.g. UniqueViolation if data is dirty).
         """
         if not nodes: return
         
@@ -248,6 +330,26 @@ class PostgresGraphStorage(GraphStorage):
     # ==========================================
 
     def _build_filter_clause(self, filters: Dict[str, Any], col_map: Dict[str, str]) -> Tuple[str, List[Any]]:
+        """
+        Constructs a dynamic SQL WHERE clause based on abstract filters.
+
+        Translates domain-level filter keys (like 'path_prefix', 'language', 'role') into 
+        concrete SQL conditions mapping to specific table columns.
+
+        Supported Filters:
+        *   `path_prefix`: Matches file paths starting with the given string(s).
+        *   `language`: Exact match on file language.
+        *   `role`: JSON search within the `metadata` column for semantic roles (e.g., 'class', 'function').
+        *   `category`: Filtering by file category (e.g., 'test', 'source').
+        *   `exclude_*`: Negated versions of the above.
+
+        Args:
+            filters (Dict[str, Any]): The filter criteria dictionary.
+            col_map (Dict[str, str]): Mapping from abstract keys ('path', 'lang', 'meta', 'cat') to actual Table.Column names.
+
+        Returns:
+            Tuple[str, List[Any]]: A tuple containing the SQL string (starting with " AND ...") and the list of parameters.
+        """
         if not filters: return "", []
         clauses = []
         params = []
@@ -316,6 +418,21 @@ class PostgresGraphStorage(GraphStorage):
         return " AND " + " AND ".join(clauses), params
 
     def search_vectors(self, query_vector: List[float], limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """
+        Executes a Semantic Vector Search (ANN).
+
+        Uses `pgvector` to find nodes with embeddings closest to the `query_vector`.
+        Applies strict filtering via `snapshot_id` to ensure consistency.
+
+        Args:
+            query_vector (List[float]): The 1536-d embedding vector.
+            limit (int): Max results.
+            snapshot_id (str): The context snapshot.
+            filters (Dict[str, Any]): Additional metadata filters.
+
+        Returns:
+            List[Dict[str, Any]]: Search results containing node content, similarity score (1 - cosine_dist), and metadata.
+        """
 
         if not snapshot_id: raise ValueError("snapshot_id mandatory.")
 
@@ -359,6 +476,21 @@ class PostgresGraphStorage(GraphStorage):
                 return results
 
     def search_fts(self, query: str, limit: int, snapshot_id: str, filters: Dict[str, Any] = None) -> List[Dict[str, Any]]:
+        """
+        Executes a Full-Text Search (Lexical).
+
+        Uses PostgreSQL's built-in `websearch_to_tsquery` to support natural language queries with operators 
+        (e.g., "foo or bar", "-baz") against a pre-computed `tsvector` index.
+
+        Args:
+            query (str): The text query.
+            limit (int): Max results.
+            snapshot_id (str): The context snapshot.
+            filters (Dict[str, Any]): Additional metadata filters.
+
+        Returns:
+            List[Dict[str, Any]]: Ranked results containing snippets and metadata.
+        """
         if not snapshot_id: raise ValueError("snapshot_id mandatory.")
         sql = """
             SELECT fts.node_id, fts.file_path, n.start_line, n.end_line, fts.content, f.snapshot_id, n.metadata, f.language,
@@ -399,6 +531,20 @@ class PostgresGraphStorage(GraphStorage):
     # ==========================================
 
     def find_chunk_id(self, file_path: str, byte_range: List[int], snapshot_id: str) -> Optional[str]:
+        """
+        Locates the specific ChunkNode covering a given byte range in a file.
+        
+        This is crucial for mapping external tool output (e.g., LSPs, linters) which typically provide
+        byte offsets, back to the internal Node IDs used by the graph system.
+
+        Args:
+            file_path (str): Relative path of the file.
+            byte_range (List[int]): A [start_byte, end_byte] pair.
+            snapshot_id (str): The context snapshot.
+
+        Returns:
+            Optional[str]: The UUID of the most specific enclosing node, or None if not found.
+        """
         if not byte_range or not snapshot_id: return None
         sql = """
             SELECT n.id FROM nodes n JOIN files f ON n.file_id = f.id 
@@ -684,9 +830,13 @@ class PostgresGraphStorage(GraphStorage):
 
     def prepare_embedding_staging(self):
         """
-        Creates the staging table.
-        Added DROP TABLE to reset wrong schema (UUID) 
-        and use TEXT for id/chunk_id, matching node_embeddings.
+        Initializes the ephemeral staging table for vector computation.
+        
+        This buffer table `staging_embeddings` allows us to parallelize embedding generation
+        without locking the main `node_embeddings` table. It also serves as the workspace
+        for deduplication logic.
+
+        The table is UNLOGGED for performance, as durability of staging data is not required.
         """
         sql_drop = "DROP TABLE IF EXISTS staging_embeddings"
         
@@ -736,7 +886,19 @@ class PostgresGraphStorage(GraphStorage):
 
     def backfill_staging_vectors(self, snapshot_id: str) -> int:
         """
-        Historical Deduplication.
+        Performs vector deduplication against historical data.
+
+        This method queries the `node_embeddings` table to find if any content in the current 
+        staging buffer has previously been embedded. If a match is found based on `vector_hash` 
+        (a deterministic hash of content + model), the existing embedding vector is copied over.
+
+        This dramatically reduces API costs by avoiding re-embedding unchanged code.
+
+        Args:
+            snapshot_id (str): The current snapshot ID in staging.
+
+        Returns:
+            int: The number of vectors successfully recovered from cache.
         """
         sql = """
             WITH historic_vectors AS (
@@ -760,8 +922,16 @@ class PostgresGraphStorage(GraphStorage):
 
     def flush_staged_hits(self, snapshot_id: str) -> int:
         """
-        Flush Hits.
-        Now types (TEXT vs VARCHAR) match, so DELETE with IN clause won't fail.
+        Promotes fully calculated embeddings from Staging to Production.
+
+        Moves all rows from `staging_embeddings` that have a valid `embedding` (either newly calculated or backfilled) 
+        into the main `node_embeddings` table. Afterwards, it removes them from staging.
+
+        Args:
+            snapshot_id (str): The active snapshot ID.
+
+        Returns:
+            int: Number of rows promoted.
         """
         sql = """
             WITH moved_rows AS (

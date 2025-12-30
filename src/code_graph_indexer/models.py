@@ -3,10 +3,17 @@ from typing import List, Dict, Any, Optional
 import datetime
 
 @dataclass
+@dataclass
 class Repository:
     """
-    Represents the stable identity of a monitored project.
-    Does not contain mutable state (like parsing state), which is delegated to Snapshots.
+    Project Identity Entity.
+
+    Represents a stable "Container" for code versions.
+    
+    **Architectural Role**:
+    *   **Stable Identity**: A repository persists across time, while its code changes constantly.
+    *   **Versioning**: Tracks the `current_snapshot_id` which acts as the "HEAD" pointer for the search engine.
+    *   **Authorization**: Used as a scope for tenant isolation in multi-tenant deployments.
     """
     id: str
     url: str
@@ -14,45 +21,67 @@ class Repository:
     branch: str
     
     # Pointer to the currently "LIVE" snapshot (Ready to serve)
-    # If None, the repo is registered but has no data ready yet.
+    # If None, the repository is registered but has no indexed data yet.
     current_snapshot_id: Optional[str] = None
-    reindex_requested_at: Optional[datetime.datetime] = None # Dirty Flag
+    
+    # Synchronization State
+    reindex_requested_at: Optional[datetime.datetime] = None 
 
     created_at: Optional[datetime.datetime] = None
     updated_at: Optional[datetime.datetime] = None
     
     def to_dict(self) -> Dict[str, Any]:
+        """Serializes the entity to a dictionary for JSON/DB Storage."""
         return asdict(self)
 
 @dataclass
+@dataclass
 class Snapshot:
     """
-    Represents an immutable state of the code at a specific instant (Commit).
-    Manages the indexing lifecycle (indexing -> completed).
+    Immutable Versioning Entity.
+
+    Represents the state of a repository at a specific point in time (Commit SHA).
+    
+    **Lifecycle**:
+    1.  `pending`: Created but empty.
+    2.  `indexing`: Workers are actively parsing/embedding code.
+    3.  `completed`: Fully indexed and ready for activation.
+    4.  `failed`: Terminal error state.
+
+    **Concurrency**:
+    Multiple snapshots can exist for the same repository (e.g. historical analysis), 
+    but only one is usually 'Active' (pointed to by Repository).
     """
     id: str
     repository_id: str
     commit_hash: str
     
-    # Status: 'pending', 'indexing', 'completed', 'failed'
+    # Status Enum: 'pending', 'indexing', 'completed', 'failed'
     status: str
     
     created_at: datetime.datetime
     completed_at: Optional[datetime.datetime] = None
     
-    # Optional metadata for statistics (e.g. {"files_count": 50, "nodes_count": 2000})
+    # Aggregated Metrics (e.g., {"files_count": 50, "nodes_count": 2000, "parse_duration_ms": 1500})
     stats: Dict[str, Any] = field(default_factory=dict)
 
+    # File System manifest for O(1) lookups
     file_manifest: Dict[str, Any] = field(default_factory=dict)
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 @dataclass
+@dataclass
 class FileRecord:
+    """
+    Atomic File Object.
+
+    Represents a single source file within a snapshot.
+    It links the physical content (via `file_hash`) to the logical version (`snapshot_id`).
+    Includes status flags for parsing errors (e.g. syntax errors, minified files).
+    """
     id: str
-    # [CHANGE] Points to the Snapshot, not the generic Repository anymore.
-    # This ensures the file belongs to a SPECIFIC version.
     snapshot_id: str 
     
     commit_hash: str
@@ -71,7 +100,19 @@ class FileRecord:
         return asdict(self)
 
 @dataclass
+@dataclass
 class ChunkNode:
+    """
+    The Fundamental Unit of the Code Graph.
+
+    Also known as a "Symbol" or "Block".
+    A ChunkNode represents a semantically meaningful range of code (e.g., a function, a class, 
+    or a standalone script block).
+
+    **Properties**:
+    *   **chunk_hash**: Content-addressable ID (used to skip re-processing if content is identical).
+    *   **metadata**: JSON bag containing "Tags" (e.g. 'async', 'test') and "Semantic Captures" (e.g. 'role:controller').
+    """
     id: str
     file_id: str
     file_path: str
@@ -85,7 +126,15 @@ class ChunkNode:
         return asdict(self)
 
 @dataclass
+@dataclass
 class ChunkContent:
+    """
+    CAS Blob (Content Addressable Storage).
+
+    Stores the actual text of a code chunk.
+    Separated from `ChunkNode` to allow de-duplication: if 50 snapshots have the same function,
+    we store the text only once.
+    """
     chunk_hash: str
     content: str
     
@@ -93,7 +142,18 @@ class ChunkContent:
         return asdict(self)
 
 @dataclass
+@dataclass
 class CodeRelation:
+    """
+    Directed Edge in the Code Property Graph.
+
+    Represents dependencies between code units:
+    *   **Structural**: `child_of` (Function X is inside Class Y).
+    *   **Semantic**: `calls`, `inherits`, `imports`.
+
+    Can be "Resolved" (pointing to node IDs) or "Unresolved" (pointing to file + byte_range)
+    during the early parsing phase.
+    """
     source_file: str
     target_file: str
     relation_type: str

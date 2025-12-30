@@ -20,8 +20,16 @@ tracer = trace.get_tracer(__name__)
 
 class GitVolumeManager:
     """
-    Gestisce il ciclo di vita delle repository Git per l'indicizzazione.
-    Strumentato con OpenTelemetry per tracciare I/O e Lock Contention.
+    Manages the lifecycle of Git repositories on the local filesystem.
+
+    This class provides precise control over cloning, fetching, and clean-up of Git repositories.
+    It is heavily instrumented with OpenTelemetry to track I/O bottlenecks and lock contention.
+
+    **Key Responsibilities:**
+    *   **Persistent Cache**: Maintains bare mirrors of repositories to speed up subsequent operations (`_get_repo_cache_path`).
+    *   **Concurrency Control**: Uses `fcntl` file locking to prevent race conditions between workers accessing the same repo.
+    *   **Worktree Isolation**: Creates ephemeral git worktrees for read-only parsing, allowing parallel indexing of different commits without checking out files in the main repo.
+    *   **Garbage Collection**: Automatically prunes stale worktrees and zombies.
     """
     def __init__(self):
         self.base_path = STORAGE_ROOT
@@ -37,7 +45,19 @@ class GitVolumeManager:
 
     def ensure_repo_updated(self, url: str) -> str:
         """
-        Garantisce che la Bare Repo locale esista e sia aggiornata.
+        Synchronizes the local bare repository cache with the remote origin.
+
+        This method is thread/process-safe via file locking.
+        1.  Acquires an exclusive lock on the repo path.
+        2.  If the repo is missing, performs `git clone --mirror`.
+        3.  If it exists, performs `git fetch --all --prune`.
+        4.  Releases the lock.
+
+        Args:
+            url (str): The Git remote URL.
+
+        Returns:
+            str: The absolute path to the local bare repository.
         """
         repo_path = self._get_repo_cache_path(url)
         lock_file = f"{repo_path}.lock"
@@ -91,7 +111,14 @@ class GitVolumeManager:
 
     def cleanup_orphaned_workspaces(self, max_age_seconds: int = 3600):
         """
-        GC dei workspace orfani.
+        Garbage Collector (GC) for stalled or orphaned workspaces.
+
+        Scans the `workspaces/` directory for folders older than `max_age_seconds` and removes them.
+        This handles cases where a worker process crashes before it can clean up its ephemeral worktree.
+        Also runs `git worktree prune` on cached repos to remove stale metadata.
+
+        Args:
+            max_age_seconds (int): Threshold for considering a workspace abandoned.
         """
         import time
         now = time.time()
@@ -151,7 +178,17 @@ class GitVolumeManager:
     @contextlib.contextmanager
     def ephemeral_worktree(self, url: str, commit_hash: str) -> str:
         """
-        Crea un worktree temporaneo isolato.
+        Context Manager that provisions a temporary, isolated worktree for a specific commit.
+
+        This mechanism allows concurrent analysis of different commits (or even the same commit)
+        without the overhead of cloning the entire repo again. It uses `git worktree add`, which 
+        is lightweight and shares object storage with the bare repo cache.
+
+        **Yields**:
+            str: The absolute path to the temporary checkout directory.
+
+        **Teardown**:
+            Automatically removes the worktree directory and prunes git metadata upon exit.
         """
         repo_path = self._get_repo_cache_path(url)
         job_id = str(uuid.uuid4())
