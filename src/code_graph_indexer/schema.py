@@ -5,8 +5,12 @@ from typing import Literal
 # ==========================================
 
 # Ruoli funzionali del codice (derivati da analisi semantica .scm)
-# Questi valori devono corrispondere ESATTAMENTE ai tag usati nei file queries/*.scm
-# e ai fallback nel parser.py.
+# SEMANTIC VOCABULARY (Constants)
+# ==========================================
+
+# Functional roles of the code (derived from semantic analysis .scm)
+# These values must EXACTLY match the tags used in queries/*.scm files
+# and the fallbacks in parser.py.
 VALID_ROLES = Literal[
     "entry_point",    # Es: if __name__ == "__main__", func main()
     "api_endpoint",   # Es: @app.get, @router.post
@@ -19,9 +23,9 @@ VALID_ROLES = Literal[
     "module"          # Scope del file/modulo
 ]
 
-# Categorie macroscopiche
-# 1. Derivate dal File System (MetadataProvider): test, config, docs, code
-# 2. Derivate dalla Semantica (Parser): logic, definition
+# Macroscopic categories
+# 1. Derived from File System (MetadataProvider): test, config, docs, code
+# 2. Derived from Semantics (Parser): logic, definition
 VALID_CATEGORIES = Literal[
     "test",           # File di test o chunk di test
     "config",         # File .env/.json o costanti di configurazione

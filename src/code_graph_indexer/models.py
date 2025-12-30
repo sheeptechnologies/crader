@@ -5,18 +5,18 @@ import datetime
 @dataclass
 class Repository:
     """
-    Rappresenta l'identità stabile di un progetto monitorato.
-    Non contiene stato mutevole (come lo stato di parsing), che è delegato agli Snapshots.
+    Represents the stable identity of a monitored project.
+    Does not contain mutable state (like parsing state), which is delegated to Snapshots.
     """
     id: str
     url: str
     name: str
     branch: str
     
-    # Puntatore allo snapshot attualmente "LIVE" (Ready to serve)
-    # Se None, la repo è registrata ma non ha ancora dati pronti.
+    # Pointer to the currently "LIVE" snapshot (Ready to serve)
+    # If None, the repo is registered but has no data ready yet.
     current_snapshot_id: Optional[str] = None
-    reindex_requested_at: Optional[datetime.datetime] = None #Dirty Flag
+    reindex_requested_at: Optional[datetime.datetime] = None # Dirty Flag
 
     created_at: Optional[datetime.datetime] = None
     updated_at: Optional[datetime.datetime] = None
@@ -27,8 +27,8 @@ class Repository:
 @dataclass
 class Snapshot:
     """
-    Rappresenta uno stato immutabile del codice in un preciso istante (Commit).
-    Gestisce il ciclo di vita dell'indicizzazione (indexing -> completed).
+    Represents an immutable state of the code at a specific instant (Commit).
+    Manages the indexing lifecycle (indexing -> completed).
     """
     id: str
     repository_id: str
@@ -40,7 +40,7 @@ class Snapshot:
     created_at: datetime.datetime
     completed_at: Optional[datetime.datetime] = None
     
-    # Metadati opzionali per statistiche (es. {"files_count": 50, "nodes_count": 2000})
+    # Optional metadata for statistics (e.g. {"files_count": 50, "nodes_count": 2000})
     stats: Dict[str, Any] = field(default_factory=dict)
 
     file_manifest: Dict[str, Any] = field(default_factory=dict)
@@ -51,8 +51,8 @@ class Snapshot:
 @dataclass
 class FileRecord:
     id: str
-    # [CHANGE] Punta allo Snapshot, non più alla Repository generica.
-    # Questo garantisce che il file appartenga a UNA versione specifica.
+    # [CHANGE] Points to the Snapshot, not the generic Repository anymore.
+    # This ensures the file belongs to a SPECIFIC version.
     snapshot_id: str 
     
     commit_hash: str
@@ -154,8 +154,8 @@ class RetrievedContext:
         return asdict(self)
 
     def render(self) -> str:
-        # Logica di render invariata (omessa per brevità, è identica a prima)
-        # ... (Mantieni il metodo render esistente)
+        # Render logic unchanged (omitted for brevity, same as before)
+        # ... (Keep existing render method)
         path_str = self.file_path
         if self.nav_hints.get("parent"):
             p_label = self.nav_hints["parent"].get("label", "Container")

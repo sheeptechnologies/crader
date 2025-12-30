@@ -54,17 +54,13 @@ def _compute_prompt_and_hash(node: Dict[str, Any]) -> Tuple[str, str]:
     return full_text, v_hash
 
 def _prepare_batch_for_staging(nodes: List[Dict], model_name: str, snapshot_id: str) -> List[Tuple]:
-    """
-    [FIX] Include snapshot_id nelle tuple raw per isolamento job.
-    """
     prepared_rows = []
     for node in nodes:
         full_text, v_hash = _compute_prompt_and_hash(node)
-        
         row = (
             str(uuid.uuid4()),      # id
             node['id'],             # chunk_id
-            snapshot_id,            # snapshot_id (NEW)
+            snapshot_id,            # snapshot_id
             v_hash,                 # vector_hash
             node.get('file_path'),
             node.get('language'),
@@ -82,18 +78,19 @@ class CodeEmbedder:
     def __init__(self, storage: GraphStorage, provider: EmbeddingProvider):
         self.storage = storage
         self.provider = provider
+        # Executor to offload CPU tasks (hashing and string manipulation)
         self.process_pool = ProcessPoolExecutor(max_workers=min(4, os.cpu_count() or 1))
 
-    async def run_indexing(self, snapshot_id: str, batch_size: int = 1000, mock_api: bool = True) -> AsyncGenerator[Dict[str, Any], None]:
+    async def run_indexing(self, snapshot_id: str, batch_size: int = 1000, mock_api: bool = False) -> AsyncGenerator[Dict[str, Any], None]:
         logger.info(f"🚀 Starting Async Indexing for snapshot {snapshot_id} (Mock={mock_api})")
         
         try:
-            # 1. SETUP STAGING (Global Unlogged Table)
+            # 1. SETUP STAGING
             yield {"status": "init", "message": "Preparing staging environment..."}
             if hasattr(self.storage, 'prepare_embedding_staging'):
                 self.storage.prepare_embedding_staging()
             
-            # 2. PRODUCER PHASE
+            # 2. PRODUCER PHASE (DB -> Staging)
             yield {"status": "staging_start", "message": "Streaming enriched nodes from DB..."}
             
             nodes_iter = self.storage.get_nodes_to_embed(
@@ -133,21 +130,109 @@ class CodeEmbedder:
                 flushed_hits = self.storage.flush_staged_hits(snapshot_id)
             yield {"status": "flushed_hits", "count": flushed_hits}
             
-            # 5. DELTA PHASE
+            # 5. DELTA PHASE (Parallel Workers)
             yield {"status": "embedding_start", "message": "Processing new vectors (Delta)..."}
+            
             delta_processed = 0
             
             if hasattr(self.storage, 'fetch_staging_delta'):
-                delta_gen = self.storage.fetch_staging_delta(snapshot_id, batch_size=500)
+                # Code to manage parallel work
+                # work_queue: contains batches to process
+                work_queue = asyncio.Queue(maxsize=self.provider.max_concurrency * 2)
+                # result_queue: to communicate progress to the main thread
+                result_queue = asyncio.Queue()
                 
-                for batch in delta_gen:
+                # A. Producer Task (DB -> Work Queue)
+                producer_task = asyncio.create_task(
+                    self._delta_producer(snapshot_id, work_queue, batch_size=200) # Optimized batch for API
+                )
+                
+                # B. Consumer Workers (Work Queue -> API -> DB -> Result Queue)
+                num_workers = getattr(self.provider, 'max_concurrency', 5)
+                workers = [
+                    asyncio.create_task(self._delta_worker(snapshot_id, work_queue, result_queue, mock_api))
+                    for _ in range(num_workers)
+                ]
+                
+                # C. Main Loop: Consumes results and yields
+                # Stay listening until all workers are done
+                workers_done_count = 0
+                
+                while workers_done_count < num_workers:
+                    res = await result_queue.get()
+                    
+                    if res is None: # Worker completion signal
+                        workers_done_count += 1
+                    elif isinstance(res, Exception):
+                        logger.error(f"Worker Error: {res}")
+                        # We don't crash everything, but we might want to flag it
+                    else:
+                        # res is an integer (number of items processed)
+                        delta_processed += res
+                        yield {"status": "embedding_progress", "current_batch": res, "total_embedded": delta_processed}
+                    
+                    result_queue.task_done()
+                
+                await producer_task # Ensure the producer finished cleanly
+                
+            yield {
+                "status": "completed", 
+                "total_nodes": total_staged,
+                "recovered_from_history": recovered_count,
+                "newly_embedded": delta_processed
+            }
+
+        finally:
+            # FINAL CLEANUP
+            if hasattr(self.storage, 'cleanup_staging'):
+                self.storage.cleanup_staging(snapshot_id)
+
+    async def _process_and_stage_batch(self, nodes: List[Dict], snapshot_id: str, loop):
+        """Helper for staging phase (CPU + IO)"""
+        prepared_data = await loop.run_in_executor(
+            self.process_pool, 
+            _prepare_batch_for_staging, 
+            nodes, 
+            self.provider.model_name,
+            snapshot_id
+        )
+        if hasattr(self.storage, 'load_staging_data'):
+            await loop.run_in_executor(None, self.storage.load_staging_data, iter(prepared_data))
+
+    async def _delta_producer(self, snapshot_id: str, work_queue: asyncio.Queue, batch_size: int):
+        """Reads from DB (cursor) and feeds the queue."""
+        try:
+            delta_gen = self.storage.fetch_staging_delta(snapshot_id, batch_size=batch_size)
+            for batch in delta_gen:
+                await work_queue.put(batch)
+        except Exception as e:
+            logger.error(f"Producer Error: {e}")
+        finally:
+            # Send stop signal for each worker
+            num_workers = getattr(self.provider, 'max_concurrency', 5)
+            for _ in range(num_workers):
+                await work_queue.put(None)
+
+    async def _delta_worker(self, snapshot_id: str, work_queue: asyncio.Queue, result_queue: asyncio.Queue, mock_api: bool):
+        """Consumes batches, calls API (Async), saves to DB."""
+        try:
+            while True:
+                batch = await work_queue.get()
+                if batch is None:
+                    work_queue.task_done()
+                    break
+                
+                try:
                     prompts = [item['content'] for item in batch]
                     
+                    # REAL ASYNC CALL
                     if mock_api:
                         vectors = await self._mock_embed_async(prompts)
                     else:
-                        vectors = await loop.run_in_executor(None, self.provider.embed, prompts)
-
+                        # Parallel magic happens here
+                        vectors = await self.provider.embed_async(prompts)
+                    
+                    # Preparazione salvataggio
                     records_to_save = []
                     for item, vec in zip(batch, vectors):
                         records_to_save.append({
@@ -157,6 +242,7 @@ class CodeEmbedder:
                             "vector_hash": item['vector_hash'],
                             "model_name": self.provider.model_name,
                             "created_at": datetime.datetime.utcnow(),
+                            # Metadati denormalizzati
                             "file_path": item.get('file_path'),
                             "language": item.get('language'),
                             "category": item.get('category'),
@@ -165,36 +251,23 @@ class CodeEmbedder:
                             "embedding": vec
                         })
                     
+                    # Direct Write to DB (IO Bound but fast in batch)
                     if hasattr(self.storage, 'save_embeddings_direct'):
                         self.storage.save_embeddings_direct(records_to_save)
                     else:
                         self.storage.save_embeddings(records_to_save)
                     
-                    delta_processed += len(records_to_save)
-                    yield {"status": "embedding_progress", "current_batch": len(records_to_save), "total_embedded": delta_processed}
-
-            yield {
-                "status": "completed", 
-                "total_nodes": total_staged,
-                "recovered_from_history": recovered_count,
-                "newly_embedded": delta_processed
-            }
-
+                    # Signal success
+                    await result_queue.put(len(records_to_save))
+                    
+                except Exception as e:
+                    logger.error(f"Error in embedding worker: {e}")
+                    await result_queue.put(e)
+                finally:
+                    work_queue.task_done()
         finally:
-            # CLEANUP FINALE: Rimuove i dati di staging per questo snapshot
-            if hasattr(self.storage, 'cleanup_staging'):
-                self.storage.cleanup_staging(snapshot_id)
-
-    async def _process_and_stage_batch(self, nodes: List[Dict], snapshot_id: str, loop):
-        prepared_data = await loop.run_in_executor(
-            self.process_pool, 
-            _prepare_batch_for_staging, 
-            nodes, 
-            self.provider.model_name,
-            snapshot_id 
-        )
-        if hasattr(self.storage, 'load_staging_data'):
-            await loop.run_in_executor(None, self.storage.load_staging_data, iter(prepared_data))
+            # Signal that this worker is dying
+            await result_queue.put(None)
 
     async def _mock_embed_async(self, texts: List[str]) -> List[List[float]]:
         latency = random.uniform(0.05, 0.2)

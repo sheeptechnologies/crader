@@ -1,27 +1,27 @@
 import os
 import sys
-import uuid
-import json
+import asyncio
+import shutil
 import tempfile
 import subprocess
-import shutil
-import atexit
 import traceback
+import json
+import logging
 from typing import Optional, List, Union
 
-# --- CONFIGURAZIONE PATH ---
-current_dir = os.path.dirname(os.path.abspath(__file__))
-src_dir = os.path.abspath(os.path.join(current_dir, "..", "src"))
-if src_dir not in sys.path:
-    sys.path.insert(0, src_dir)
-
-# --- ENV ---
+# --- ENV & PATH SETUP ---
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.abspath(os.path.join(current_dir, "..", "src"))
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
+
+# --- LIBRARIES ---
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 from langchain_core.tools import tool
@@ -29,302 +29,241 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
-# Import componenti
-from code_graph_indexer import CodebaseIndexer, CodeRetriever, CodeReader, CodeNavigator
-from code_graph_indexer.storage.postgres import PostgresGraphStorage
+# --- SHEEP COMPONENTS ---
+from code_graph_indexer.indexer import CodebaseIndexer
+from code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider
+from code_graph_indexer.storage.connector import PooledConnector
+from code_graph_indexer.retriever import CodeRetriever
+from code_graph_indexer.reader import CodeReader
+from code_graph_indexer.navigator import CodeNavigator
 from code_graph_indexer.schema import VALID_ROLES, VALID_CATEGORIES
 
-try:
-    from code_graph_indexer.providers.openai_emb import OpenAIEmbeddingProvider
-except ImportError:
-    from code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider
-
-# ==============================================================================
-# 1. SETUP SISTEMA (Clone Flask + Postgres)
-# ==============================================================================
-
-# Configurazione DB (Verifica porta e credenziali)
-DB_PORT = "5433" 
-DB_URL = f"postgresql://sheep_user:sheep_password@localhost:{DB_PORT}/sheep_index"
-
-# --- CLONE REPO ---
+# --- CONFIGURAZIONE ---
+DB_URL = os.getenv("DB_URL", "postgresql://sheep_user:sheep_password@localhost:6432/sheep_index")
+OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 REPO_URL = "https://github.com/pallets/flask.git"
-REPO_PATH = tempfile.mkdtemp(prefix="sheep_agent_flask_")
+REPO_BRANCH = "main"
 
-def cleanup_temp_dir():
-    if os.path.exists(REPO_PATH):
-        print(f"\n🧹 Pulizia directory temporanea: {REPO_PATH}")
-        shutil.rmtree(REPO_PATH)
+# Logger
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("AGENT_TEST")
+# Riduciamo il rumore delle librerie esterne
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("code_graph_indexer").setLevel(logging.INFO)
 
-atexit.register(cleanup_temp_dir)
+# ==============================================================================
+# 1. INFRASTRUCTURE SETUP
+# ==============================================================================
 
-print(f"🔄 Cloning Flask ({REPO_URL}) into {REPO_PATH}...")
-try:
+def setup_repo(base_dir: str) -> str:
+    """Clona Flask in una cartella temporanea."""
+    repo_path = os.path.join(base_dir, "flask_repo")
+    if os.path.exists(repo_path):
+        shutil.rmtree(repo_path)
+    
+    logger.info(f"🔄 Cloning Flask ({REPO_URL}) into {repo_path}...")
     subprocess.run(
-        ["git", "clone", "--depth", "1", "--branch", "main", REPO_URL, REPO_PATH],
-        check=True,
-        stdout=subprocess.PIPE, 
-        stderr=subprocess.PIPE
+        ["git", "clone", "--depth", "1", "--branch", REPO_BRANCH, REPO_URL, repo_path],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
-    print("✅ Clone completato.")
-except subprocess.CalledProcessError as e:
-    print(f"❌ Errore durante il clone: {e}")
-    sys.exit(1)
+    return f"file://{repo_path}"
 
-print(f"🐘 Connecting to: {DB_URL}")
+async def main_async():
+    if not OPENAI_KEY:
+        logger.error("❌ OPENAI_API_KEY mancante. Impossibile avviare l'agente.")
+        return
 
-try:
-    storage = PostgresGraphStorage(DB_URL, vector_dim=1536)
-    provider = OpenAIEmbeddingProvider(model="text-embedding-3-small")
-except Exception as e:
-    print(f"❌ Errore Setup Infrastruttura: {e}")
-    sys.exit(1)
-
-# --- GLOBAL SESSION VARIABLES ---
-CURRENT_REPO_ID = None
-CURRENT_SNAPSHOT_ID = None
-
-# --- LOGICA INDEXING & EMBEDDING ---
-try:
-    indexer = CodebaseIndexer(REPO_PATH, storage)
-    repo_meta = indexer.parser.metadata_provider.get_repo_info()
-    print(f"📂 Context: {repo_meta['url']} (Branch: {repo_meta['branch']})")
-
-    # 1. INDEXING (Blue-Green)
-    # index() ora ritorna direttamente lo snapshot_id attivo
-    print("\n🚀 Avvio Indexing (Snapshot Check)...")
+    tmp_dir = tempfile.mkdtemp()
+    indexer_instance = None
+    
     try:
-        # force=False: Se esiste già, usa quello. force=True: Ricrea.
-        CURRENT_SNAPSHOT_ID = indexer.index(force=False) 
-        print(f"✅ Indexing completato. Snapshot ID: {CURRENT_SNAPSHOT_ID}")
-    except Exception as e:
-        print(f"❌ Errore durante Indexing: {e}")
-        traceback.print_exc()
-        sys.exit(1)
-
-    # 2. SESSION PINNING
-    # Recuperiamo anche repo_id per compatibilità (Identity)
-    CURRENT_REPO_ID = storage.ensure_repository(repo_meta['url'], repo_meta['branch'], repo_meta['name'])
-    
-    if not CURRENT_SNAPSHOT_ID:
-        # Fallback di sicurezza
-        CURRENT_SNAPSHOT_ID = storage.get_active_snapshot_id(CURRENT_REPO_ID)
-    
-    if not CURRENT_SNAPSHOT_ID:
-        print("❌ CRITICAL: Nessun snapshot attivo trovato.")
-        sys.exit(1)
+        # 1. CLONE
+        repo_url_local = setup_repo(tmp_dir)
         
-    print(f"🔑 Session Pinned to Snapshot: {CURRENT_SNAPSHOT_ID} (Repo: {CURRENT_REPO_ID})")
-
-    # 3. EMBEDDING
-    print("🤖 Verifica stato Embeddings...")
-    try:
-        for progress in indexer.embed(provider, batch_size=50, force_snapshot_id=CURRENT_SNAPSHOT_ID):
-            if progress.get('status') == 'processing':
-                print(f"\r⚡ Embedding: {progress.get('processed')} nodi...", end="", flush=True)
-            elif progress.get('status') == 'skipped':
-                print(f"\n⏩ {progress.get('message')}")
-        print("\n✅ Embedding sincronizzato.")
-    except Exception as e:
-        print(f"⚠️ Errore non bloccante durante Embedding: {e}")
-
-except Exception as e:
-    print(f"⚠️ Errore critico inizializzazione: {e}")
-    traceback.print_exc()
-    sys.exit(1)
-
-# Inizializzazione Facade
-retriever = CodeRetriever(storage, provider)
-reader = CodeReader(storage) 
-navigator = CodeNavigator(storage)
-
-print(f"✅ Sistema Inizializzato. Pronti.")
-
-# ==============================================================================
-# 2. DEFINIZIONE TOOLS E AGENT
-# ==============================================================================
-
-class SearchFiltersInput(BaseModel):
-    path_prefix: Optional[Union[str, List[str]]] = Field(None, description="Filtra per cartella (es. 'src/core').")
-    language: Optional[Union[str, List[str]]] = Field(None, description="Filtra per linguaggio (es. 'python').")
-    role: Optional[Union[VALID_ROLES, List[VALID_ROLES]]] = Field(None, description="Include ruoli (es. 'entry_point').")
-    category: Optional[Union[VALID_CATEGORIES, List[VALID_CATEGORIES]]] = Field(None, description="Include categorie.")
-
-@tool
-def search_codebase(query: str, filters: Optional[SearchFiltersInput] = None):
-    """
-    Cerca semanticamente nel codice.
-    Usa SEMPRE questo tool per primo per trovare i file rilevanti.
-    """
-    filter_dict = filters.model_dump(exclude_none=True) if filters else None
-    try:
-        results = retriever.retrieve(
-            query, 
-            repo_id=CURRENT_REPO_ID, 
-            snapshot_id=CURRENT_SNAPSHOT_ID, 
-            limit=5, 
-            strategy="hybrid", 
-            filters=filter_dict
-        )
-        return "\n".join([r.render() for r in results]) if results else "Nessun risultato trovato."
-    except Exception as e:
-        return f"Errore ricerca: {e}"
-
-@tool
-def read_file_content(file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None):
-    """
-    Legge il contenuto di un file.
-    Usa 'start_line' e 'end_line' per leggere solo le parti interessanti se il file è grande.
-    """
-    try:
-        data = reader.read_file(CURRENT_SNAPSHOT_ID, file_path, start_line, end_line)
-        return f"File: {data['file_path']}\nContent (L{data['start_line']}-{data['end_line']}):\n{data['content']}"
-    except Exception as e:
-        return f"Errore lettura: {e}"
-
-@tool
-def inspect_node_relationships(node_id: str):
-    """
-    Analizza le relazioni (Genitori, Figli, Chiamate) di un Chunk ID (UUID).
-    Usa l'UUID trovato nell'output di search_codebase.
-    """
-    try:
-        uuid.UUID(node_id)
-    except ValueError:
-        return f"ERRORE: '{node_id}' non è un UUID valido. Usa l'ID che trovi in 'NODE ID:' nei risultati di ricerca."
-
-    report = []
-    try:
-        parent = navigator.read_parent_chunk(node_id)
-        if parent: 
-            report.append(f"⬆️ PARENT: {parent.get('type')} in {parent.get('file_path')}")
-        else:
-            report.append("⬆️ PARENT: None (Top-level node)")
-
-        nxt = navigator.read_neighbor_chunk(node_id, "next")
-        if nxt: 
-            prev = nxt.get('content', '').split('\n')[0][:80]
-            report.append(f"➡️ NEXT: {nxt.get('type')} (ID: {nxt.get('id')})\n   Preview: {prev}...")
-            
-        impact = navigator.analyze_impact(node_id)
-        if impact:
-            report.append(f"⬅️ CALLED BY ({len(impact)} refs):")
-            for i in impact[:5]:
-                report.append(f"   - {i['file']} L{i['line']} ({i['relation']})")
-        else:
-            report.append("⬅️ CALLED BY: None")
-            
-        return "\n".join(report)
-    
-    except Exception as e: 
-        return f"Errore ispezione: {e}"
-    
-@tool
-def find_folder(name_pattern: str):
-    """Cerca il percorso di una cartella dato un nome parziale."""
-    try:
-        dirs = reader.find_directories(CURRENT_SNAPSHOT_ID, name_pattern)
-        if not dirs:
-            return f"Nessuna cartella trovata per '{name_pattern}'."
-        return "Cartelle trovate:\n" + "\n".join([f"- {d}" for d in dirs])
-    except Exception as e:
-        return f"Errore ricerca cartelle: {e}"
-    
-@tool
-def list_repo_structure(path: str = "", max_depth: int = 2):
-    """Elenca file e cartelle nella repository (come 'ls')."""
-    try:
-        items = reader.list_directory(CURRENT_SNAPSHOT_ID, path)
-        output = [f"Listing '{path or '/'}':"]
-        for item in items:
-            icon = "📁" if item['type'] == 'dir' else "📄"
-            output.append(f"{icon} {item['name']}")
-            
-            # Anteprima per depth > 1
-            if item['type'] == 'dir' and max_depth > 1:
-                try:
-                    sub_items = reader.list_directory(CURRENT_SNAPSHOT_ID, item['path'])
-                    for i, sub in enumerate(sub_items):
-                        if i >= 4: 
-                            output.append(f"  └─ ... ({len(sub_items)-4} more)")
-                            break
-                        sub_icon = "  └─ 📁" if sub['type'] == 'dir' else "  └─ 📄"
-                        output.append(f"{sub_icon} {sub['name']}")
-                except: pass
-        return "\n".join(output)
-    except Exception as e: return f"Errore listing: {e}"
-
-
-tools = [search_codebase, read_file_content, inspect_node_relationships, list_repo_structure, find_folder]
-
-# Configurazione LLM
-llm = ChatOpenAI(model="gpt-4o", temperature=0) 
-SYSTEM_PROMPT = f"""
-Sei un Senior Software Engineer esperto.
-Stai lavorando sulla repository 'Flask' (Snapshot: {CURRENT_SNAPSHOT_ID[:8]}).
-
-REGOLE:
-1. Inizia esplorando la struttura con 'list_repo_structure' o cercando funzionalità con 'search_codebase'.
-2. Leggi il codice con 'read_file_content' per confermare le tue ipotesi.
-3. Se l'utente chiede dettagli architetturali, naviga il grafo con 'inspect_node_relationships'.
-4. Rispondi in italiano tecnico.
-"""
-
-checkpointer = MemorySaver()
-agent_executor = create_react_agent(llm, tools, checkpointer=checkpointer)
-
-def chat_loop():
-    print(f"\n🤖 AGENT READY (Snapshot: {CURRENT_SNAPSHOT_ID[:8]}). Type 'exit' to quit.")
-    print("-" * 60)
-    config = {"configurable": {"thread_id": f"session_{CURRENT_SNAPSHOT_ID}"}}
-    
-    while True:
-        try:
-            user_input = input("You: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            break
-        if user_input.lower() in {"exit", "quit"}: break
+        # 2. INIT COMPONENTS
+        logger.info(f"🔌 Connecting to DB: {DB_URL}")
         
-        print("\nThinking...", end="", flush=True)
-        try:
-            events = agent_executor.stream(
-                {"messages": [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_input)]}, 
-                config=config, 
-                stream_mode="values"
-            )
-            print("\r", end="")
-            
-            seen_ids = set()
+        # Indexer (gestisce lo storage internamente con PooledConnector)
+        indexer = CodebaseIndexer(repo_url_local, REPO_BRANCH, db_url=DB_URL)
+        indexer_instance = indexer # Reference for cleanup
+        
+        # Provider (Enterprise Async)
+        provider = OpenAIEmbeddingProvider(model="text-embedding-3-small", max_concurrency=10)
+        
+        # 3. RUN INDEXING PIPELINE (Parsing -> SCIP -> Graph)
+        logger.info("🚀 Phase 1: Parsing & Graph Building...")
+        # force=False: se abbiamo già indicizzato questo commit, riusa lo snapshot
+        snapshot_id = indexer.index(force=False)
+        
+        if snapshot_id == "queued":
+            logger.warning("⏸️  Repo is currently locked/indexing by another process.")
+            return
 
-            for event in events:
-                if "messages" not in event: continue
-                messages = event["messages"]
-                if not messages: continue
-                last_msg = messages[-1]
+        logger.info(f"✅ Snapshot Active: {snapshot_id}")
+
+        # 4. RUN EMBEDDING PIPELINE (Async Staging -> OpenAI)
+        logger.info("💸 Phase 2: Embedding Check (Async Pipeline)...")
+        
+        # Questo consumerà il generatore asincrono
+        async for update in indexer.embed(provider, batch_size=200, mock_api=False):
+            status = update['status']
+            if status == 'embedding_progress':
+                print(f"   ✨ Embedding: {update.get('total_embedded')} vectors...", end='\r')
+            elif status == 'completed':
+                stats = update
+                print(f"\n✅ Embedding Sync Complete. (New: {stats.get('newly_embedded')}, Recovered: {stats.get('recovered_from_history')})")
+
+        # 5. SETUP RETRIEVAL FACADE
+        # Usiamo il connettore dell'indexer per risparmiare risorse, o ne creiamo uno nuovo
+        retriever = CodeRetriever(indexer.storage, provider)
+        reader = CodeReader(indexer.storage)
+        navigator = CodeNavigator(indexer.storage)
+        
+        # Otteniamo repo_id stabile per le query
+        repo_info = indexer.storage.get_repository(indexer.storage.ensure_repository(repo_url_local, REPO_BRANCH, "flask"))
+        repo_id = repo_info['id']
+
+        # ==============================================================================
+        # 6. AGENT TOOLS DEFINITION
+        # ==============================================================================
+        
+        # Definiamo i tool dentro il main per accedere alle istanze (closure)
+        # In un'app reale, useremmo dependency injection o una classe container.
+
+        class SearchFiltersInput(BaseModel):
+            path_prefix: Optional[str] = Field(None, description="Filtra per cartella (es. 'src/').")
+            language: Optional[str] = Field(None, description="Filtra per linguaggio (es. 'python').")
+
+        @tool
+        def search_codebase(query: str, filters: Optional[SearchFiltersInput] = None):
+            """
+            Cerca semanticamente nel codice (Retrieval Augmented Generation).
+            Usa questo per trovare 'dove' si trovano le funzionalità.
+            """
+            f_dict = filters.model_dump(exclude_none=True) if filters else None
+            try:
+                results = retriever.retrieve(
+                    query, 
+                    repo_id=repo_id, 
+                    snapshot_id=snapshot_id, 
+                    limit=5, 
+                    strategy="hybrid",
+                    filters=f_dict
+                )
+                if not results: return "Nessun risultato trovato."
+                return "\n".join([r.render() for r in results])
+            except Exception as e:
+                return f"Errore ricerca: {e}"
+
+        @tool
+        def read_file(file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None):
+            """Legge il contenuto di un file."""
+            try:
+                data = reader.read_file(snapshot_id, file_path, start_line, end_line)
+                if not data: return "File non trovato o vuoto."
+                return f"File: {data['file_path']}\nContent:\n{data['content']}"
+            except Exception as e:
+                return f"Errore lettura: {e}"
+
+        @tool
+        def inspect_node(node_id: str):
+            """
+            Esamina le relazioni di un nodo specifico (UUID).
+            Fornisce: Parent (File/Class), Next Sibling, e Callers (chi lo usa).
+            """
+            try:
+                report = []
+                # 1. Impatto (Chi mi chiama?)
+                refs = navigator.analyze_impact(node_id)
+                if refs:
+                    report.append(f"⬅️ CALLED BY ({len(refs)}):")
+                    for r in refs[:5]: report.append(f"   - {r['file']} L{r['line']} ({r['relation']})")
+                else:
+                    report.append("⬅️ CALLED BY: None detected.")
                 
-                msg_id = getattr(last_msg, "id", str(hash(str(last_msg))))
-                if msg_id in seen_ids: continue
-                seen_ids.add(msg_id)
+                # 2. Contesto (Dove sono?)
+                parent = navigator.read_parent_chunk(node_id)
+                if parent:
+                    report.append(f"⬆️ PARENT: {parent.get('type')} in {parent.get('file_path')}")
 
-                if last_msg.type == "ai" and getattr(last_msg, "tool_calls", None):
-                    for tc in last_msg.tool_calls:
-                        print(f"\n🛠️  CALLING: {tc.get('name')}")
-                        print(f"    Args: {json.dumps(tc.get('args'), indent=2)}")
+                return "\n".join(report)
+            except Exception as e:
+                return f"Errore ispezione: {e}"
 
-                elif last_msg.type == "tool":
-                    print(f"\n📄 RESULT ({last_msg.name}):")
-                    content = last_msg.content
-                    preview = content[:500].replace("\n", "\n    ")
-                    print(f"    {preview}")
-                    if len(content) > 500: print("    ... (truncated)")
+        tools = [search_codebase, read_file, inspect_node]
 
-                elif last_msg.type == "ai" and last_msg.content:
-                    if not getattr(last_msg, "tool_calls", None):
-                        print(f"\n🤖 AGENT:\n{last_msg.content}\n")
+        # ==============================================================================
+        # 7. CHAT LOOP
+        # ==============================================================================
+        
+        llm = ChatOpenAI(model="gpt-4o", temperature=0)
+        
+        SYSTEM_PROMPT = f"""
+        Sei un Senior Software Engineer che analizza la repository 'Flask'.
+        Hai accesso a un Knowledge Graph avanzato.
+        
+        SNAPSHOT ID: {snapshot_id}
+        
+        Usa 'search_codebase' per trovare punti di ingresso.
+        Usa 'read_file' per leggere il codice.
+        Usa 'inspect_node' sugli UUID trovati per capire le dipendenze (Graph RAG).
+        
+        Rispondi in modo conciso e tecnico.
+        """
 
-        except Exception as e:
-            print(f"\n❌ Errore agente: {e}")
-            traceback.print_exc()
+        checkpointer = MemorySaver()
+        agent_executor = create_react_agent(llm, tools, checkpointer=checkpointer)
+        
+        config = {"configurable": {"thread_id": "test_session_1"}}
+
+        print("\n" + "="*60)
+        print(f"🤖 AGENT READY ON FLASK REPO")
+        print("="*60)
+
+        while True:
+            try:
+                user_input = input("\nUser: ").strip()
+                if user_input.lower() in ["exit", "quit"]: break
+                
+                print("Thinking...", end="", flush=True)
+                
+                # Stream degli eventi dell'agente
+                # Nota: create_react_agent è sync o async? LangGraph supporta entrambi.
+                # Qui usiamo ainvoke (async invoke)
+                
+                async for event in agent_executor.astream(
+                    {"messages": [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_input)]},
+                    config=config
+                ):
+                    # Parsing semplificato dell'output streaming
+                    if 'agent' in event:
+                        msg = event['agent']['messages'][-1]
+                        if msg.content:
+                            print(f"\r🤖 Agent: {msg.content}")
+                        if msg.tool_calls:
+                            for tc in msg.tool_calls:
+                                print(f"\n🛠️  Call: {tc['name']} {tc['args']}")
+                    
+                    if 'tools' in event:
+                        msg = event['tools']['messages'][-1]
+                        print(f"📄 Result: {msg.content[:200]}...")
+
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                print(f"❌ Error: {e}")
+                traceback.print_exc()
+
+    except Exception as e:
+        logger.error(f"❌ Critical Error: {e}", exc_info=True)
+    finally:
+        logger.info("🧹 Cleanup...")
+        if indexer_instance:
+            indexer_instance.close()
+        if os.path.exists(tmp_dir):
+            shutil.rmtree(tmp_dir)
 
 if __name__ == "__main__":
-    chat_loop()
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.run(main_async())

@@ -1,19 +1,19 @@
 import os
 from pathlib import Path
 
-# --- CONFIGURAZIONE STORAGE ---
+# --- STORAGE CONFIGURATION ---
 
-# 1. Cerchiamo la variabile d'ambiente 'REPO_VOLUME' (settata da Docker/Kubernetes o .env)
-# 2. Se manca, usiamo una cartella locale './sheep_data/repositories' relativa alla CWD.
+# 1. Look for 'REPO_VOLUME' environment variable (set by Docker/Kubernetes or .env)
+# 2. If missing, use a local folder './sheep_data/repositories' relative to CWD.
 DEFAULT_LOCAL_PATH = os.path.join(os.getcwd(), "sheep_data", "repositories")
 STORAGE_ROOT = os.getenv("REPO_VOLUME", DEFAULT_LOCAL_PATH)
 
-# Garantiamo che il path sia assoluto
+# Ensure the path is absolute
 STORAGE_ROOT = os.path.abspath(STORAGE_ROOT)
 
-# Assicuriamoci che la root esista (Fail-fast se non abbiamo permessi)
+# Ensure the root exists (Fail-fast if we don't have permissions)
 try:
     os.makedirs(STORAGE_ROOT, exist_ok=True)
 except OSError as e:
-    # Logghiamo ma non crashiamo qui, crasha chi prova a scriverci
-    print(f"⚠️ Warning: Impossibile creare STORAGE_ROOT in {STORAGE_ROOT}: {e}")
+    # Log the warning but do not crash here; let the writer handle the crash
+    print(f"⚠️ Warning: Unable to create STORAGE_ROOT at {STORAGE_ROOT}: {e}")

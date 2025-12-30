@@ -200,19 +200,23 @@ def embed_repo(repo_id: str, req: EmbedRequest, background_tasks: BackgroundTask
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to initialize provider: {e}")
 
-    def _run_embed():
+    async def _run_embed():
         try:
+            # We must use the loop compatible with the async provider
             indexer = CodebaseIndexer(repo_url, branch, db_url=DB_URL)
             try:
-                # Consume generator
-                count = 0
+                # Consume generator (Async)
                 # Resolve active snapshot automatically inside embed if not passed
-                for item in indexer.embed(provider, batch_size=req.batch_size, debug=True):
-                    count += 1
-                    if count % 10 == 0:
-                        logger.info(f"🤖 Embedding progress: {count} items processed...")
-                
-                logger.info(f"✅ Embedding finished. Total items: {count}")
+                # mock_api=False means we use the real provider (Async)
+                async for update in indexer.embed(provider, batch_size=req.batch_size, mock_api=False):
+                    status = update['status']
+                    if status == 'embedding_progress':
+                        count = update.get('total_embedded', 0)
+                        if count % 10 == 0:
+                            logger.info(f"🤖 Embedding progress: {count} items processed...")
+                    elif status == 'completed':
+                        stats = update
+                        logger.info(f"✅ Embedding finished. Stats: {stats}")
             finally:
                 indexer.close()
         except Exception as e:

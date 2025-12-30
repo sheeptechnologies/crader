@@ -17,12 +17,12 @@ from .connector import DatabaseConnector  # Importiamo l'interfaccia
 class PostgresGraphStorage(GraphStorage):
     def __init__(self, connector: DatabaseConnector, vector_dim: int = 1536):
         """
-        Dependency Injection: Il connettore decide la strategia (Pool vs Single).
+        Dependency Injection: The connector decides the strategy (Pool vs Single).
         """
         self.connector = connector
         self.vector_dim = vector_dim
         
-        # Logghiamo solo il fatto che siamo pronti, non i dettagli del pool
+        # We only log that we are ready, not the pool details
         logger.info(f"🐘 PostgresStorage initialized (Vector Dim: {vector_dim})")
 
     def close(self):
@@ -59,7 +59,7 @@ class PostgresGraphStorage(GraphStorage):
                     """, (repository_id, commit_hash)).fetchone()
                     
                     if row:
-                        logger.info(f"✅ Snapshot esistente trovato: {row['id']}")
+                        logger.info(f"✅ Existing snapshot found: {row['id']}")
                         return str(row['id']), False
 
                 conn.execute("""
@@ -71,7 +71,7 @@ class PostgresGraphStorage(GraphStorage):
                 return new_id, True
 
         except psycopg.errors.UniqueViolation:
-            logger.info(f"⏳ Repo occupata. Imposto dirty flag per {repository_id}")
+            logger.info(f"⏳ Repo busy. Setting dirty flag for {repository_id}")
             with self.connector.get_connection() as conn:
                 conn.execute("""
                     UPDATE repositories 
@@ -148,7 +148,7 @@ class PostgresGraphStorage(GraphStorage):
 
     def add_nodes(self, nodes: List[Any]):
         """
-        Metodo standard per inserire nodi con gestione conflitti (sicuro per retries).
+        Standard method to insert nodes with conflict handling (safe for retries).
         """
         if not nodes: return
         with self.connector.get_connection() as conn:
@@ -169,9 +169,9 @@ class PostgresGraphStorage(GraphStorage):
 
     def add_nodes_fast(self, nodes: List[Any]):
         """
-        [NEW] Versione ottimizzata usando il protocollo COPY.
-        Estremamente veloce per bulk inserts (nuovi snapshot).
-        ATTENZIONE: Fallisce se ci sono duplicati (non supporta ON CONFLICT).
+        Optimized version using COPY protocol.
+        Extremely fast for bulk inserts (new snapshots).
+        WARNING: Fails if duplicates exist (does not support ON CONFLICT).
         """
         if not nodes: return
         
@@ -180,7 +180,7 @@ class PostgresGraphStorage(GraphStorage):
                 d = n.to_dict()
                 meta = json.dumps(d.get('metadata', {}))
                 bs, be = d['byte_range']
-                # Deve rispettare l'ordine delle colonne nel comando COPY sotto
+                # Must respect the column order in the COPY command below
                 yield (
                     d['id'], d.get('file_id'), d['file_path'], 
                     d['start_line'], d['end_line'], bs, be, 
@@ -346,7 +346,7 @@ class PostgresGraphStorage(GraphStorage):
 
             with self.connector.get_connection() as conn:
                 results = []
-                # Qui misuriamo implicitamente anche il tempo di esecuzione della query
+                # Here we implicitly measure query execution time as well
                 for row in conn.execute(sql, params).fetchall():
                     results.append({
                         "id": str(row['chunk_id']), "file_path": row['file_path'], 
@@ -553,7 +553,7 @@ class PostgresGraphStorage(GraphStorage):
     # ==========================================
 
     def add_files_raw(self, files_tuples: List[Tuple]):
-        """Inserimento massivo files."""
+        """Massive files insertion."""
         if not files_tuples: return
         with self.connector.get_connection() as conn:
             with conn.cursor() as cur:
@@ -565,7 +565,7 @@ class PostgresGraphStorage(GraphStorage):
                 """, files_tuples)
 
     def add_nodes_raw(self, nodes_tuples: List[Tuple]):
-        """Inserimento massivo nodi via COPY (Velocissimo)."""
+        """Massive nodes insertion via COPY (Extremely fast)."""
         if not nodes_tuples: return
         sql = """
             COPY nodes (id, file_id, file_path, start_line, end_line, byte_start, byte_end, chunk_hash, size, metadata)
@@ -590,14 +590,14 @@ class PostgresGraphStorage(GraphStorage):
                 raise e
 
     def add_contents_raw(self, contents_tuples: List[Tuple]):
-        """Inserimento massivo contenuti."""
+        """Massive contents insertion."""
         if not contents_tuples: return
         with self.connector.get_connection() as conn:
             with conn.cursor() as cur:
                 cur.executemany("INSERT INTO contents (chunk_hash, content) VALUES (%s, %s) ON CONFLICT (chunk_hash) DO NOTHING", contents_tuples)
 
     def add_relations_raw(self, rels_tuples: List[Tuple]):
-        """Inserimento massivo relazioni."""
+        """Massive relations insertion."""
         if not rels_tuples: return
         with self.connector.get_connection() as conn:
             with conn.cursor() as cur:
@@ -605,19 +605,19 @@ class PostgresGraphStorage(GraphStorage):
 
     def ingest_scip_relations(self, relations_tuples: List[Tuple], snapshot_id: str):
         """
-        Ingestion ad alte prestazioni delle relazioni SCIP.
+        High-performance ingestion of SCIP relations.
         
-        Risolve gli ID dei nodi direttamente nel DB usando JOIN spaziali sui range di byte.
-        Trova automaticamente il nodo 'più specifico' (più piccolo) che contiene il range della relazione.
+        Resolves node IDs directly in the DB using spatial JOINs on byte ranges.
+        Automatically finds the 'most specific' (smallest) node containing the relation range.
         
         Args:
-            relations_tuples: Lista di tuple nel formato:
+            relations_tuples: List of tuples in format:
             (source_path, s_start, s_end, target_path, t_start, t_end, rel_type, meta_json)
-            snapshot_id: ID dello snapshot corrente per limitare i join.
+            snapshot_id: Current snapshot ID to limit joins.
         """
         if not relations_tuples: return
 
-        # Usiamo ON COMMIT DROP: la tabella vive solo finché la transazione è aperta.
+        # We use ON COMMIT DROP: the table lives only as long as the transaction is open.
         ddl_temp = """
             CREATE TEMP TABLE IF NOT EXISTS temp_scip_staging (
                 s_path TEXT, s_start INT, s_end INT,
@@ -644,10 +644,10 @@ class PostgresGraphStorage(GraphStorage):
                      ns.size ASC, nt.size ASC
         """
 
-        # CRUCIALE: Usiamo conn.transaction()
-        # Questo disabilita temporaneamente l'autocommit per questo blocco.
-        # Garantisce che la TEMP table sopravviva tra il CREATE e il COPY,
-        # e venga eliminata automaticamente (ON COMMIT DROP) all'uscita del blocco.
+        # CRITICAL: We use conn.transaction()
+        # This temporarily disables autocommit for this block.
+        # Ensures the TEMP table survives between CREATE and COPY,
+        # and is automatically deleted (ON COMMIT DROP) when exiting the block.
         with tracer.start_as_current_span("db.scip.ingest_transaction") as span:
             span.set_attribute("db.batch_size", len(relations_tuples))
             span.set_attribute("snapshot.id", snapshot_id)
@@ -658,14 +658,14 @@ class PostgresGraphStorage(GraphStorage):
                         with conn.cursor() as cur:
                             cur.execute(ddl_temp)
                             
-                            # [OTEL] Fase 1: Caricamento Dati Raw (I/O Bound)
+                            # [OTEL] Phase 1: Raw Data Loading (I/O Bound)
                             with tracer.start_as_current_span("db.scip.copy_temp") as copy_span:
                                 copy_span.set_attribute("row.count", len(relations_tuples))
                                 with cur.copy("COPY temp_scip_staging FROM STDIN") as copy:
                                     for row in relations_tuples:
                                         copy.write_row(row)
                             
-                            # [OTEL] Fase 2: Risoluzione Relazionale (CPU/Join Bound)
+                            # [OTEL] Phase 2: Relational Resolution (CPU/Join Bound)
                             with tracer.start_as_current_span("db.scip.resolve_query") as resolve_span:
                                 cur.execute(sql_resolve, (snapshot_id, snapshot_id))
                                 resolve_span.set_attribute("edges.created", cur.rowcount)
@@ -684,16 +684,16 @@ class PostgresGraphStorage(GraphStorage):
 
     def prepare_embedding_staging(self):
         """
-        Crea la tabella di staging.
-        [FIX CRITICO]: Aggiunto DROP TABLE per resettare lo schema errato (UUID) 
-        e usare TEXT per id/chunk_id, così da matchare node_embeddings.
+        Creates the staging table.
+        Added DROP TABLE to reset wrong schema (UUID) 
+        and use TEXT for id/chunk_id, matching node_embeddings.
         """
         sql_drop = "DROP TABLE IF EXISTS staging_embeddings"
         
         sql_create = """
             CREATE UNLOGGED TABLE IF NOT EXISTS staging_embeddings (
-                id TEXT PRIMARY KEY,        -- FIX: TEXT (non UUID) per compatibilità con node_embeddings.id
-                chunk_id TEXT NOT NULL,     -- FIX: TEXT (non UUID) per compatibilità con nodes.id
+                id TEXT PRIMARY KEY,        -- FIX: TEXT (not UUID) for compatibility with node_embeddings.id
+                chunk_id TEXT NOT NULL,     -- FIX: TEXT (not UUID) for compatibility with nodes.id
                 snapshot_id TEXT NOT NULL,
                 vector_hash TEXT NOT NULL,
                 embedding VECTOR(1536),
@@ -707,14 +707,14 @@ class PostgresGraphStorage(GraphStorage):
             );
         """ 
         with self.connector.get_connection() as conn:
-            # Droppiamo la tabella vecchia per assicurarci che quella nuova abbia i tipi corretti (TEXT)
+            # We drop the old table to ensure the new one has the correct types (TEXT)
             conn.execute(sql_drop)
             conn.execute(sql_create)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_staging_snap_vhash ON staging_embeddings(snapshot_id, vector_hash)")
 
     def load_staging_data(self, data_generator: Iterator[Tuple]):
         """
-        Caricamento via COPY.
+        Loading via COPY.
         """
         sql = """
             COPY staging_embeddings (id, chunk_id, snapshot_id, vector_hash, file_path, language, category, start_line, end_line, model_name, content)
@@ -736,7 +736,7 @@ class PostgresGraphStorage(GraphStorage):
 
     def backfill_staging_vectors(self, snapshot_id: str) -> int:
         """
-        Deduplica Storica.
+        Historical Deduplication.
         """
         sql = """
             WITH historic_vectors AS (
@@ -761,7 +761,7 @@ class PostgresGraphStorage(GraphStorage):
     def flush_staged_hits(self, snapshot_id: str) -> int:
         """
         Flush Hits.
-        Ora i tipi (TEXT vs VARCHAR) combaciano, quindi il DELETE con IN clause non fallirà.
+        Now types (TEXT vs VARCHAR) match, so DELETE with IN clause won't fail.
         """
         sql = """
             WITH moved_rows AS (
@@ -808,7 +808,7 @@ class PostgresGraphStorage(GraphStorage):
 
     def cleanup_staging(self, snapshot_id: str):
         """
-        Pulizia finale dei dati di staging per questo snapshot.
+        Final cleanup of staging data for this snapshot.
         """
         sql = "DELETE FROM staging_embeddings WHERE snapshot_id = %s"
         with self.connector.get_connection() as conn:
@@ -816,7 +816,7 @@ class PostgresGraphStorage(GraphStorage):
 
     def save_embeddings_direct(self, records: List[Dict[str, Any]]):
         """
-        Scrittura diretta.
+        Direct writing.
         """
         if not records: return
         sql = """

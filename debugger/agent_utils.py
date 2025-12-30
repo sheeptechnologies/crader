@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class SearchFiltersInput(BaseModel):
     path_prefix: Optional[Union[str, List[str]]] = Field(None, description="Filtra per cartella.")
     language: Optional[Union[str, List[str]]] = Field(None, description="Filtra per linguaggio.")
-    role: Optional[Union[VALID_ROLES, List[VALID_ROLES]]] = Field(None, description="Include ruoli specifici.")
+    role: Optional[Union[VALID_ROLES, List[VALID_ROLES]]] = Field(None, description="Include ruoli specifici (SOLO se esplicitamente richiesto/noto).")
     exclude_role: Optional[Union[VALID_ROLES, List[VALID_ROLES]]] = Field(None, description="Esclude ruoli.")
     category: Optional[Union[VALID_CATEGORIES, List[VALID_CATEGORIES]]] = Field(None, description="Include categorie.")
     exclude_category: Optional[Union[VALID_CATEGORIES, List[VALID_CATEGORIES]]] = Field(None, description="Esclude categorie.")
@@ -37,33 +37,30 @@ class RepoAgent:
         # Initialize providers - assuming OpenAI is configured via env vars
         self.provider = OpenAIEmbeddingProvider(model="text-embedding-3-small")
         
+        # We initialize facade components but tools will use them
         self.retriever = CodeRetriever(self.storage, self.provider)
         self.reader = CodeReader(self.storage)
         self.navigator = CodeNavigator(self.storage)
         
         self.tools = self._create_tools()
         self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-        self.system_prompt = """
-            Sei un Senior Software Engineer esperto. 
-            Rispondi usando SOLO i tool per esplorare la codebase.
-
-            MANIFESTO:
-            Noi crediamo nell'efficienza, fare meno passaggi/richieste possibili per giungere allo scopo richiesto ci permette di risparmiare energia elettrica e non inquinare
-            
-            STRATEGIA DI RICERCA OTTIMALE:
-            1. 🧠 **Usa SEMPRE `search_codebase` PRIMA di esplorare file/cartelle.**
-               - Se cerchi "dove inizia l'app", cerca "app" o "main" con filtro `role='entry_point'`.
-               - Se cerchi definizioni di classi/funzioni, usa i filtri `role` o `type`.
-               - NON usare `list_repo_structure` o `find_folder` a meno che la ricerca semantica non fallisca o tu debba esplorare la struttura fisica.
-            
-            2. 🔍 **Usa i Filtri di Ricerca**
-
-            LINEE GUIDA:
-            - Se devi sapere CHI CHIAMA una funzione/classe, o cosa essa chiama, DEVI usare `inspect_node_relationships` con l'UUID del nodo. NON affidarti solo alla ricerca testuale per le relazioni.
-            - Se devi leggere l'implementazione completa, usa `read_file_content`.
-            - Sii preciso. Se non trovi esattamente ciò che viene chiesto, riporta ciò che hai trovato e chiedi chiarimenti.
-            - NON ripetere la stessa chiamata tool con gli stessi argomenti.
-            """
+        
+        self.system_prompt = f"""
+        Sei un Senior Software Engineer che analizza la repository.
+        Hai accesso a un Knowledge Graph avanzato.
+        
+        REPO ID: {self.repo_id}
+        
+        Usa 'search_codebase' per trovare punti di ingresso.
+        Usa 'read_file' per leggere il codice.
+        Usa 'inspect_node' sugli UUID trovati per capire le dipendenze (Graph RAG).
+        
+        IMPORTANTE: 
+        - Usa `search_codebase` SENZA filtri inizialmente, a meno che l'utente non specifichi "classe", "funzione", ecc.
+        - Se la ricerca non trova nulla, riprova con query più generiche.
+        
+        Rispondi in modo conciso e tecnico.
+        """
         
         # In-memory checkpointer for this session
         self.checkpointer = MemorySaver()
@@ -77,186 +74,126 @@ class RepoAgent:
         return snap
 
     def _create_tools(self):
-        # We need to bind the repo_id to the tools or use a closure/method approach.
-        # Since LangChain tools are functions, we can define them inside here or use partials.
-        # Defining them as methods wrapped with @tool might be tricky with 'self'.
-        # Let's define them as closures.
-
+        # Closure to access self
+        
         @tool
         def search_codebase(query: str, filters: Optional[SearchFiltersInput] = None):
-            """Cerca semanticamente nel codice."""
-            filter_dict = filters.model_dump(exclude_none=True) if filters else None
+            """
+            Cerca semanticamente nel codice (Retrieval Augmented Generation).
+            Usa questo per trovare 'dove' si trovano le funzionalità.
+            EVITA filtri se non sei sicuro (es. non mettere role='class' se cerchi testo generico).
+            """
+            f_dict = filters.model_dump(exclude_none=True) if filters else None
+            logger.info(f"🔎 Agent Search: query='{query}' filters={f_dict}")
             try:
-                results = self.retriever.retrieve(query, repo_id=self.repo_id, limit=5, strategy="hybrid", filters=filter_dict)
-                return "\n".join([r.render() for r in results]) if results else "Nessun risultato trovato."
+                # Use active snapshot implicitly via retriever or pass it
+                snap_id = self.active_snapshot_id
+                results = self.retriever.retrieve(
+                    query, 
+                    repo_id=self.repo_id, 
+                    snapshot_id=snap_id,
+                    limit=5, 
+                    strategy="hybrid", 
+                    filters=f_dict
+                )
+                
+                # FALLBACK LOGIC: If filters were used and no results found, try without filters
+                if not results and f_dict:
+                    logger.info(f"🔎 Agent Search: No results with filters {f_dict}. Retrying raw...")
+                    results = self.retriever.retrieve(
+                        query, 
+                        repo_id=self.repo_id, 
+                        snapshot_id=snap_id,
+                        limit=5, 
+                        strategy="hybrid", 
+                        filters=None
+                    )
+                    if results:
+                        return f"⚠️ Nessun risultato con i filtri {f_dict}, ma ho trovato questi risultati generali:\n" + "\n".join([r.render() for r in results])
+
+                if not results:
+                    logger.info("🔎 Agent Search: No results found.")
+                    return "Nessun risultato trovato."
+                
+                logger.info(f"🔎 Agent Search: Found {len(results)} results.")
+                return "\n".join([r.render() for r in results])
             except Exception as e:
+                logger.error(f"🔎 Agent Search Error: {e}")
                 return f"Errore ricerca: {e}"
 
         @tool
-        def read_file_content(file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None):
-            """Legge contenuto file."""
+        def read_file(file_path: str, start_line: Optional[int] = None, end_line: Optional[int] = None):
+            """Legge il contenuto di un file."""
             try:
-                # Use active snapshot
                 snap_id = self.active_snapshot_id
                 data = self.reader.read_file(snap_id, file_path, start_line, end_line)
+                if not data: return "File non trovato o vuoto."
                 return f"File: {data['file_path']}\nContent:\n{data['content']}"
             except Exception as e:
                 return f"Errore lettura: {e}"
 
         @tool
-        def inspect_node_relationships(node_id: str):
+        def inspect_node(node_id: str):
             """
-            Analizza le relazioni (Parent, Next, Callers, Calls) di un Chunk ID.
-            Usa questo dopo aver trovato un ID con la ricerca.
-            
-            IMPORTANTE: node_id DEVE essere un UUID (es. '3fa85f64-5717...'), NON un file path.
-            Trovi l'UUID nell'output di `search_codebase`.
+            Esamina le relazioni di un nodo specifico (UUID).
+            Fornisce: Parent (File/Class), Next Sibling, e Callers (chi lo usa).
             """
             try:
-                uuid.UUID(node_id)
-            except ValueError:
-                return (
-                    f"ERRORE: '{node_id}' non è un ID valido. "
-                    "Hai passato un file path? Devi passare il 'node_id' (UUID) "
-                    "che trovi nei risultati di `search_codebase` (es. 'a1b2c3d4-....')."
-                )
-
-            report = []
-            try:
-                # 1. Parent
+                report = []
+                # 1. Impatto (Chi mi chiama?)
+                refs = self.navigator.analyze_impact(node_id)
+                if refs:
+                    report.append(f"⬅️ CALLED BY ({len(refs)}):")
+                    for r in refs[:5]: report.append(f"   - {r['file']} L{r['line']} ({r['relation']})")
+                else:
+                    report.append("⬅️ CALLED BY: None detected.")
+                
+                # 2. Contesto (Dove sono?)
                 parent = self.navigator.read_parent_chunk(node_id)
-                if parent: 
+                if parent:
                     report.append(f"⬆️ PARENT: {parent.get('type')} in {parent.get('file_path')}")
-                else:
-                    report.append("⬆️ PARENT: None (Top-level node)")
 
-                # 2. Next
-                nxt = self.navigator.read_neighbor_chunk(node_id, "next")
-                if nxt: 
-                    prev = nxt.get('content', '').split('\n')[0][:80]
-                    report.append(f"➡️ NEXT: {nxt.get('type')} (ID: {nxt.get('id')})\n   Preview: {prev}...")
-                    
-                # 3. Impact
-                impact = self.navigator.analyze_impact(node_id)
-                if impact:
-                    report.append(f"⬅️ CALLED BY ({len(impact)} refs):")
-                    for i in impact[:5]:
-                        report.append(f"   - {i['file']} L{i['line']} ({i['relation']})")
-                else:
-                    report.append("⬅️ CALLED BY: None")
-                    
-                # 4. Pipeline
-                pipe = self.navigator.visualize_pipeline(node_id)
-                if pipe and pipe.get("call_graph"):
-                    report.append(f"⤵️ CALLS: {json.dumps(pipe['call_graph'], indent=2)}")
-                else:
-                    report.append("⤵️ CALLS: None")
-                    
                 return "\n".join(report)
-            
-            except Exception as e: 
-                return f"Errore interno ispezione: {e}"
-
-        @tool
-        def find_folder(name_pattern: str):
-            """
-            Cerca il percorso di una cartella dato un nome parziale.
-            Usa questo se `list_repo_structure` fallisce perché non trovi la cartella prevista.
-            Es: cerchi "flask" -> trova "src/flask".
-            """
-            try:
-                snap_id = self.active_snapshot_id
-                dirs = self.reader.find_directories(snap_id, name_pattern)
-                if not dirs:
-                    return f"Nessuna cartella trovata contenente '{name_pattern}'."
-                return "Cartelle trovate:\n" + "\n".join([f"- {d}" for d in dirs])
             except Exception as e:
-                return f"Errore ricerca cartelle: {e}"
+                return f"Errore ispezione: {e}"
 
-        @tool
-        def list_repo_structure(path: str = "", max_depth: int = 2):
-            """
-            Elenca file e cartelle nella repository. 
-            Usa questo tool per capire com'è organizzato il progetto (es. dove sono i source file, dove sono i test).
-            """
-            try:
-                snap_id = self.active_snapshot_id
-                items = self.reader.list_directory(snap_id, path)
-                output = [f"Listing '{path or '/'}':"]
-                for item in items:
-                    icon = "📁" if item['type'] == 'dir' else "📄"
-                    output.append(f"{icon} {item['name']}")
-                    
-                    # Mini-esplorazione per profondità 2
-                    if item['type'] == 'dir' and max_depth > 1:
-                        try:
-                            sub_items = self.reader.list_directory(snap_id, item['path'])
-                            # Mostra solo i primi 5 file per non intasare
-                            for i, sub in enumerate(sub_items):
-                                if i >= 5: 
-                                    output.append(f"  └─ ... ({len(sub_items)-5} more)")
-                                    break
-                                sub_icon = "  └─ 📁" if sub['type'] == 'dir' else "  └─ 📄"
-                                output.append(f"{sub_icon} {sub['name']}")
-                        except: pass
-                return "\n".join(output)
-            except Exception as e: return f"Errore listing: {e}"
+        return [search_codebase, read_file, inspect_node]
 
-        return [search_codebase, read_file_content, inspect_node_relationships, list_repo_structure, find_folder]
-
-    def stream_chat(self, message: str, thread_id: str):
+    async def stream_chat(self, message: str, thread_id: str):
         config = {"configurable": {"thread_id": thread_id}}
         inputs = {"messages": [SystemMessage(content=self.system_prompt), HumanMessage(content=message)]}
         
-        # We use stream_mode="values" to get the full state, but for streaming to frontend we might want updates.
-        # Actually, let's use the generator to yield events.
-        # We want to yield:
-        # 1. Tool calls (input)
-        # 2. Tool outputs (results)
-        # 3. Final answer chunks (or full answer)
-        
-        # LangGraph stream yields state updates.
-        # Let's iterate and extract what we need.
-        
-        num_processed = 0
         try:
-            for event in self.agent_executor.stream(inputs, config=config, stream_mode="values"):
-                if "messages" not in event: continue
-                current_messages = event["messages"]
+            # Unlike the test which prints, here we yield ndjson events for the frontend
+            async for event in self.agent_executor.astream(inputs, config=config):
                 
-                if len(current_messages) > num_processed:
-                    new_msgs = current_messages[num_processed:]
-                    num_processed = len(current_messages)
+                # 'agent' event contains the AI message (thought or final answer)
+                if 'agent' in event:
+                    msg = event['agent']['messages'][-1]
+                    if msg.content:
+                        yield json.dumps({
+                            "type": "message",
+                            "content": msg.content
+                        }) + "\n"
                     
-                    for msg in new_msgs:
-                        # Check if it's an AI message
-                        if getattr(msg, "type", None) == "ai":
-                            if getattr(msg, "tool_calls", None):
-                                # It's a tool call
-                                for tc in msg.tool_calls:
-                                    logger.info(f"Yielding tool_call: {tc.get('name')} ID: {tc.get('id')}")
-                                    yield json.dumps({
-                                        "type": "tool_call",
-                                        "name": tc.get('name'),
-                                        "args": tc.get('args'),
-                                        "id": tc.get('id')
-                                    }) + "\n"
-                            else:
-                                # It's the final answer (or a thought)
-                                yield json.dumps({
-                                    "type": "message",
-                                    "content": msg.content
-                                }) + "\n"
-                        
-                        # Check if it's a Tool message (output)
-                        elif getattr(msg, "type", None) == "tool":
-                             logger.info(f"Yielding tool_output for ID: {msg.tool_call_id}")
-                             yield json.dumps({
-                                "type": "tool_output",
-                                "name": msg.name,
-                                "content": msg.content,
-                                "tool_call_id": msg.tool_call_id
+                    if getattr(msg, 'tool_calls', None):
+                        for tc in msg.tool_calls:
+                            yield json.dumps({
+                                "type": "tool_call",
+                                "name": tc.get('name'),
+                                "args": tc.get('args'),
+                                "id": tc.get('id')
                             }) + "\n"
+
+                # 'tools' event contains the output of tool execution
+                if 'tools' in event:
+                    msg = event['tools']['messages'][-1]
+                    yield json.dumps({
+                        "type": "tool_output",
+                        "name": msg.name,
+                        "content": msg.content,
+                        "tool_call_id": msg.tool_call_id
+                    }) + "\n"
 
         except Exception as e:
             logger.error(f"Agent error: {e}")
