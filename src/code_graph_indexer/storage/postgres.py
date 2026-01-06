@@ -40,6 +40,7 @@ class PostgresGraphStorage(GraphStorage):
         Args:
             connector (DatabaseConnector): The strategy for obtaining DB connections.
             vector_dim (int): The vector size for the embedding model (e.g., 1536 for text-embedding-3-small).
+            (to do: vector_dim should depend on the embedding model, so we should have a vector table for every embedding model/provider)
         """
         self.connector = connector
         self.vector_dim = vector_dim

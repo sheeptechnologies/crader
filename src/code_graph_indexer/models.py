@@ -3,7 +3,6 @@ from typing import List, Dict, Any, Optional
 import datetime
 
 @dataclass
-@dataclass
 class Repository:
     """
     Project Identity Entity.
@@ -34,7 +33,6 @@ class Repository:
         """Serializes the entity to a dictionary for JSON/DB Storage."""
         return asdict(self)
 
-@dataclass
 @dataclass
 class Snapshot:
     """
@@ -72,7 +70,6 @@ class Snapshot:
         return asdict(self)
 
 @dataclass
-@dataclass
 class FileRecord:
     """
     Atomic File Object.
@@ -100,7 +97,6 @@ class FileRecord:
         return asdict(self)
 
 @dataclass
-@dataclass
 class ChunkNode:
     """
     The Fundamental Unit of the Code Graph.
@@ -126,7 +122,6 @@ class ChunkNode:
         return asdict(self)
 
 @dataclass
-@dataclass
 class ChunkContent:
     """
     CAS Blob (Content Addressable Storage).
@@ -141,7 +136,6 @@ class ChunkContent:
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
-@dataclass
 @dataclass
 class CodeRelation:
     """

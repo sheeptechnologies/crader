@@ -46,7 +46,7 @@ class SearchExecutor:
         try:
             query_vec = embedder.embed([query])[0]
             
-            # [FIX] Removed call with repo_id
+            # Removed call with repo_id
             results = storage.search_vectors(
                 query_vector=query_vec, 
                 limit=limit, 
@@ -82,7 +82,7 @@ class SearchExecutor:
         """
         if candidates is None: candidates = {}
         try:
-            # [FIX] Removed call with repo_id
+            # Removed call with repo_id
             # Note: search_fts in postgres.py now explicitly requires snapshot_id
             results = storage.search_fts(
                 query=query, 

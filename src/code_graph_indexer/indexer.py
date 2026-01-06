@@ -367,7 +367,7 @@ class CodebaseIndexer:
         inject(carrier)
 
         total_cpus = multiprocessing.cpu_count()
-        num_workers = 5
+        num_workers = 5 #[TODO] Adjust based on system resources
         mp_context = multiprocessing.get_context('spawn')
         file_chunks = list(_chunked_iterable(all_files, 50))
         
