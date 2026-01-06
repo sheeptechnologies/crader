@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 _worker_parser = None
 _worker_storage = None
 
-def _init_worker_process(worktree_path: str, db_url: str):
+def _init_worker_process(worktree_path: str, snapshot_id: str, commit_hash: str, repo_url: str, branch: str, db_url: str,worker_init_fn: Optional[Callable]):
     """
     Bootstrap entry point for worker processes in the indexing pipeline.
     
