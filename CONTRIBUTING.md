@@ -47,6 +47,44 @@ Run the test suite:
 pytest
 ```
 
+## Writing & Contributing Tests
+
+We aim for enterprise-grade coverage across indexing, embedding, retrieval, and storage layers. Please follow these guidelines when adding or updating tests:
+
+### Where to add tests
+
+- Place new tests in `tests/` using the `test_*.py` naming convention.
+- Keep unit tests focused on a single module and use test doubles to isolate external dependencies.
+- Add integration-style tests only when they can run reliably in CI (no network, no external DB requirements).
+
+### Test structure & style
+
+- Prefer small, explicit fixtures or inline test doubles over heavy mocks.
+- Avoid network calls and real database connections; use in-memory fakes or harnesses.
+- Use `pytest` assertions and keep checks explicit and deterministic.
+
+### Coverage expectations
+
+- Exercise core workflows: parsing → indexing → embedding → retrieval.
+- Validate edge cases (filters, error handling, and boundary conditions).
+- Cover both sync and async execution paths where applicable.
+
+### Running targeted tests
+
+```bash
+# Run a single file
+pytest tests/test_workflow.py
+
+# Run a single test
+pytest tests/test_workflow.py::test_workflow_index_embed_retrieve
+```
+
+### Reference scripts
+
+The `tests_files/` directory contains ad-hoc validation scripts used during development.
+When a script reveals a regression or important behavior, port it into a `tests/` module
+as a deterministic, automated test.
+
 ## Project Structure
 
 -   `src/code_graph_indexer`: Main package source code.
