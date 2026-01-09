@@ -58,23 +58,30 @@ extra_javascript:
 nav:
   - Home: index.md
   - Getting Started:
-    - Installation: getting-started/installation.md
-    - Quickstart: getting-started/quickstart.md
-  - Architecture Guides:
-    - Core Concepts: guides/architecture.md
-    - Data Model: guides/data_model.md
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+  - Guides:
+      - Architecture: guides/architecture.md
+      - Data Model: guides/data_model.md
+      - Indexing Pipeline: guides/indexing-pipeline.md
+      - Embedding Strategy: guides/embedding-strategy.md
+      - Retrieval Strategies: guides/retrieval-strategies.md
   - API Reference:
-    - Indexer: reference/indexer.md
-    - Parsing: reference/parsing.md
-    - Embedding: reference/embedding.md
-    - Storage: reference/storage.md
-    - Retrieval: reference/retrieval.md
-    - Navigation (Graph Walk): reference/navigation.md
-    - Reading (Virtual FS): reference/reading.md
-    - Data Models: reference/models.md
+      - Indexer: reference/indexer.md
+      - Storage: reference/storage.md
+      - Retrieval: reference/retrieval.md
+      - Parsing: reference/parsing.md
+      - Embedding: reference/embedding.md
+      - Models: reference/models.md
+      - Reader: reference/reading.md
+      - Navigator: reference/navigation.md
+  - Deployment:
+      - Production Guide: deployment/production.md
+  - Testing:
+      - Unit Tests Guide: testing/unit-tests-guide.md
   - Examples:
-    - Advanced Usage: examples/advanced_usage.md
+      - Advanced Usage: examples/advanced_usage.md
   - Contributing:
-    - Development Setup: contributing/development-setup.md
-    - Code of Conduct: contributing/code-of-conduct.md
+      - Development Setup: contributing/development-setup.md
+      - Code of Conduct: contributing/code-of-conduct.md
   - FAQs: faqs.md

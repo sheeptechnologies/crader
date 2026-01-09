@@ -26,3 +26,8 @@ testpaths = [
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
+
+[tool.coverage.run]
+omit = [
+    "src/code_graph_indexer/storage/sqlite.py",
+]

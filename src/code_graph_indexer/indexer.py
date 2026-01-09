@@ -308,7 +308,6 @@ class CodebaseIndexer:
                             parser_worktree=parser_worktree,
                             scip_worktree=scip_worktree
                         )
-
                     if self.storage.check_and_reset_reindex_flag(repo_id):
                         logger.info("🔁 Rilevata nuova richiesta pendente. Riavvio loop...")
                         force = True

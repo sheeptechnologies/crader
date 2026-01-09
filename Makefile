@@ -1,7 +1,7 @@
 .PHONY: test test-unit test-integration test-e2e coverage
 
 export PYTHONPATH=src
-PYTEST=.venv/bin/pytest
+PYTEST=.venv/bin/python -m pytest
 
 test:
 	$(PYTEST)
@@ -16,4 +16,4 @@ test-e2e:
 	$(PYTEST) tests/e2e
 
 coverage:
-	$(PYTEST) --cov=src/code_graph_indexer --cov-report=html
+	$(PYTEST) tests/unit tests/integration --cov=src/code_graph_indexer --cov-report=html

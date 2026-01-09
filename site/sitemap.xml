@@ -2,70 +2,90 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
          <loc>https://example.com/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/faqs/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/contributing/code-of-conduct/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/contributing/development-setup/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
+    </url>
+    <url>
+         <loc>https://example.com/deployment/production/</loc>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/examples/advanced_usage/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/getting-started/installation/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/getting-started/quickstart/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/guides/architecture/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/guides/data_model/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
+    </url>
+    <url>
+         <loc>https://example.com/guides/embedding-strategy/</loc>
+         <lastmod>2026-01-09</lastmod>
+    </url>
+    <url>
+         <loc>https://example.com/guides/indexing-pipeline/</loc>
+         <lastmod>2026-01-09</lastmod>
+    </url>
+    <url>
+         <loc>https://example.com/guides/retrieval-strategies/</loc>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/reference/embedding/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/reference/indexer/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/reference/models/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/reference/navigation/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/reference/parsing/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/reference/reading/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/reference/retrieval/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
     </url>
     <url>
          <loc>https://example.com/reference/storage/</loc>
-         <lastmod>2026-01-06</lastmod>
+         <lastmod>2026-01-09</lastmod>
+    </url>
+    <url>
+         <loc>https://example.com/testing/unit-tests-guide/</loc>
+         <lastmod>2026-01-09</lastmod>
     </url>
 </urlset>
