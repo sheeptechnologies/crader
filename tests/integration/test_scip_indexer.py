@@ -1,6 +1,6 @@
 import os
 
-from code_graph_indexer.graph.indexers.scip import (
+from crader.graph.indexers.scip import (
     DiskSymbolTable,
     SCIPIndexer,
     SCIPRunner,

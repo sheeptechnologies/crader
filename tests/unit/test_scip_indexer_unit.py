@@ -11,7 +11,7 @@ about symbols and relationships in code. These tests verify:
 
 import unittest
 from unittest.mock import MagicMock, patch, mock_open
-from code_graph_indexer.graph.indexers.scip import SCIPIndexer, SCIPRunner, DiskSymbolTable
+from crader.graph.indexers.scip import SCIPIndexer, SCIPRunner, DiskSymbolTable
 
 class TestSCIPIndexerUnit(unittest.TestCase):
     """Test suite for SCIPIndexer class that processes SCIP indices."""
@@ -21,7 +21,7 @@ class TestSCIPIndexerUnit(unittest.TestCase):
         self.indexer = SCIPIndexer("/tmp/repo")
         self.runner = SCIPRunner("/tmp/repo")
 
-    @patch("code_graph_indexer.graph.indexers.scip.SCIPIndexer._clean_symbol")
+    @patch("crader.graph.indexers.scip.SCIPIndexer._clean_symbol")
     def test_clean_symbol(self, mock_clean):
         # Call the real method if we didn't mock side_effect, or copy logic
         # Actually I want to test the logic, so I shouldn't patch it! 
@@ -46,7 +46,7 @@ class TestSCIPIndexerUnit(unittest.TestCase):
         # Verify the method name is present in the cleaned result
         self.assertTrue("method" in cleaned)
 
-    @patch("code_graph_indexer.graph.indexers.scip.SCIPIndexer._lines")
+    @patch("crader.graph.indexers.scip.SCIPIndexer._lines")
     def test_bytes_conversion(self, mock_lines):
         """Test conversion from line/column coordinates to byte offsets.
         
@@ -67,7 +67,7 @@ class TestSCIPIndexerUnit(unittest.TestCase):
         r = self.indexer._bytes("f.py", [1, 0, 1, 5])
         self.assertEqual(r, [6, 11])
 
-    @patch("code_graph_indexer.graph.indexers.scip.SCIPIndexer._get_file_content_cached")
+    @patch("crader.graph.indexers.scip.SCIPIndexer._get_file_content_cached")
     def test_extract_symbol_name(self, mock_content):
         """Test symbol name extraction from source code.
         

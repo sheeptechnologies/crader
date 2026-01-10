@@ -174,10 +174,18 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         Leverages `httpx` via `AsyncOpenAI` client.
         Note: The caller is responsible for semaphore management using `max_concurrency`.
         """
-        # OpenAI raccomanda di sostituire newline con spazi per embedding migliori
+        # OpenAI recommended cleanup
         clean_texts = [t.replace("\n", " ") for t in texts]
-        # Evitiamo stringhe vuote che causano 400 Bad Request
-        clean_texts = [t if t.strip() else "empty" for t in clean_texts]
+        
+        # PROACTIVE TRUNCATION (Safety Net)
+        # Model Limit: 8192 tokens. 
+        # Approx: 1 token ~= 4 chars. Safe Max Chars ~= 8192 * 3.5 ~= 28,000 chars.
+        # We clamp at 25,000 characters to be extremely safe including metadata overhead.
+        MAX_CHARS = 25000 
+        clean_texts = [t[:MAX_CHARS] if len(t) > MAX_CHARS else t for t in clean_texts]
+
+        # Prevent empty strings
+        clean_texts = [t if t.strip() else "empty_node_content" for t in clean_texts]
         
         try:
             # AsyncOpenAI gestisce pool e retries internamente

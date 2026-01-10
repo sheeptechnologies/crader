@@ -1,4 +1,4 @@
-from code_graph_indexer.models import RetrievedContext, Repository
+from crader.models import RetrievedContext, Repository
 
 
 def test_repository_to_dict():

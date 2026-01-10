@@ -11,11 +11,11 @@ import git
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.code_graph_indexer.indexer import CodebaseIndexer
-from src.code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider, DummyEmbeddingProvider
+from src.crader.indexer import CodebaseIndexer
+from src.crader.providers.embedding import OpenAIEmbeddingProvider, DummyEmbeddingProvider
 from fastapi.responses import StreamingResponse
-from src.code_graph_indexer.retriever import CodeRetriever
-from src.code_graph_indexer.navigator import CodeNavigator
+from src.crader.retriever import CodeRetriever
+from src.crader.navigator import CodeNavigator
 from debugger.agent_utils import get_agent
 from debugger.database import get_storage, DB_URL
 
@@ -26,7 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("DebuggerServer")
 # Ensure our library logs are shown
-logging.getLogger("src.code_graph_indexer").setLevel(logging.INFO)
+logging.getLogger("src.crader").setLevel(logging.INFO)
 
 from dotenv import load_dotenv
 load_dotenv()

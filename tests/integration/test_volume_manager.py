@@ -1,7 +1,7 @@
 import os
 import time
 
-from code_graph_indexer.volume_manager import git_volume_manager as gvm_module
+from crader.volume_manager import git_volume_manager as gvm_module
 
 
 def test_volume_manager_cache_path(tmp_path, monkeypatch):

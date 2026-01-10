@@ -15,8 +15,8 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 try:
-    from code_graph_indexer.parsing.parser import TreeSitterRepoParser
-    from code_graph_indexer.models import ChunkNode, ParsingResult
+    from crader.parsing.parser import TreeSitterRepoParser
+    from crader.models import ChunkNode, ParsingResult
 except ImportError as e:
     print(f"[FATAL] Errore importazione: {e}")
     sys.exit(1)

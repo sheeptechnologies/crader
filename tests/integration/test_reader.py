@@ -1,6 +1,6 @@
 import pytest
 
-from code_graph_indexer.reader import CodeReader
+from crader.reader import CodeReader
 
 
 class FakeStorage:

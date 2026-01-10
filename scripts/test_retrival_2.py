@@ -20,9 +20,9 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 try:
-    from code_graph_indexer import CodebaseIndexer, CodeRetriever
-    from code_graph_indexer.providers.embedding import FastEmbedProvider
-    from code_graph_indexer.storage.sqlite import SqliteGraphStorage
+    from crader import CodebaseIndexer, CodeRetriever
+    from crader.providers.embedding import FastEmbedProvider
+    from crader.storage.sqlite import SqliteGraphStorage
 except ImportError as e:
     print(f"❌ Errore importazione: {e}")
     sys.exit(1)

@@ -1,6 +1,6 @@
 import pytest
 
-from code_graph_indexer.navigator import CodeNavigator
+from crader.navigator import CodeNavigator
 
 
 class FakeStorage:

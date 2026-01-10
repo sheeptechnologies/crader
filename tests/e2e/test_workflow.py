@@ -2,11 +2,11 @@ import asyncio
 import json
 from typing import Dict, Any, Generator, List
 
-from code_graph_indexer.embedding.embedder import CodeEmbedder
-from code_graph_indexer.graph.builder import KnowledgeGraphBuilder
-from code_graph_indexer.models import ChunkNode, ChunkContent, RetrievedContext
-from code_graph_indexer.providers.embedding import DummyEmbeddingProvider
-from code_graph_indexer.retriever import CodeRetriever
+from crader.embedding.embedder import CodeEmbedder
+from crader.graph.builder import KnowledgeGraphBuilder
+from crader.models import ChunkNode, ChunkContent, RetrievedContext
+from crader.providers.embedding import DummyEmbeddingProvider
+from crader.retriever import CodeRetriever
 
 
 class InMemoryStorage:

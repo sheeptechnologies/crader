@@ -10,11 +10,11 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
 if src_dir not in sys.path: sys.path.insert(0, src_dir)
 
-from code_graph_indexer import CodebaseIndexer, CodeRetriever
-from code_graph_indexer.storage.sqlite import SqliteGraphStorage
+from crader import CodebaseIndexer, CodeRetriever
+from crader.storage.sqlite import SqliteGraphStorage
 # Usiamo DummyProvider per essere deterministici e veloci nel test, 
 # ma la logica di flow è identica a FastEmbed.
-from code_graph_indexer.providers.embedding import DummyEmbeddingProvider 
+from crader.providers.embedding import DummyEmbeddingProvider 
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("ASSURANCE_TEST")

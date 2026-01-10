@@ -10,9 +10,9 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
 if src_dir not in sys.path: sys.path.insert(0, src_dir)
 
-from code_graph_indexer import CodebaseIndexer, CodeNavigator
-from code_graph_indexer.storage.sqlite import SqliteGraphStorage
-from code_graph_indexer.parsing.parser import TreeSitterRepoParser
+from crader import CodebaseIndexer, CodeNavigator
+from crader.storage.sqlite import SqliteGraphStorage
+from crader.parsing.parser import TreeSitterRepoParser
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("NAV_TEST")

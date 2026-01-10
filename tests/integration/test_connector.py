@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 
-import code_graph_indexer.storage.connector as connector_module
+import crader.storage.connector as connector_module
 
 
 class FakeConn:

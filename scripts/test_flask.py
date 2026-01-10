@@ -26,13 +26,13 @@ except ImportError:
 
 # Import componenti
 try:
-    from code_graph_indexer import CodebaseIndexer, CodeRetriever, CodeReader, CodeNavigator
-    from code_graph_indexer.storage.postgres import PostgresGraphStorage
+    from crader import CodebaseIndexer, CodeRetriever, CodeReader, CodeNavigator
+    from crader.storage.postgres import PostgresGraphStorage
     # Fallback import per provider
     try:
-        from code_graph_indexer.providers.openai_emb import OpenAIEmbeddingProvider
+        from crader.providers.openai_emb import OpenAIEmbeddingProvider
     except ImportError:
-        from code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider
+        from crader.providers.embedding import OpenAIEmbeddingProvider
 except ImportError as e:
     logger.error(f"Import Error: {e}. Assicurati di aver installato il pacchetto o settato PYTHONPATH.")
     sys.exit(1)

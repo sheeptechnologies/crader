@@ -11,9 +11,9 @@ src_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from code_graph_indexer import CodebaseIndexer
-from code_graph_indexer.storage.connector import PooledConnector
-from code_graph_indexer.storage.postgres import PostgresGraphStorage
+from crader import CodebaseIndexer
+from crader.storage.connector import PooledConnector
+from crader.storage.postgres import PostgresGraphStorage
 
 from opentelemetry import trace
 from opentelemetry.trace import ProxyTracerProvider
@@ -66,7 +66,7 @@ DB_DSN = f"postgresql://{DB_USER}:{DB_PASS}@localhost:{DB_PORT}/{DB_NAME}"
 logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger("BENCHMARK")
 logger.setLevel(logging.INFO)
-logging.getLogger("code_graph_indexer").setLevel(logging.INFO)
+logging.getLogger("crader").setLevel(logging.INFO)
 
 def clean_database():
     """Pulisce il DB usando un connettore di servizio."""

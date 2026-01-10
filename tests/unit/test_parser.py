@@ -1,7 +1,7 @@
 import os
 
-from code_graph_indexer.parsing import parser as parser_module
-from code_graph_indexer.providers.metadata import LocalMetadataProvider
+from crader.parsing import parser as parser_module
+from crader.providers.metadata import LocalMetadataProvider
 
 
 class DummyParser(parser_module.TreeSitterRepoParser):

@@ -15,9 +15,9 @@ from datetime import datetime
 import uuid
 from psycopg.errors import UniqueViolation
 
-from code_graph_indexer.storage.postgres import PostgresGraphStorage
-from code_graph_indexer.storage.connector import DatabaseConnector
-from code_graph_indexer.models import ChunkNode, FileRecord
+from crader.storage.postgres import PostgresGraphStorage
+from crader.storage.connector import DatabaseConnector
+from crader.models import ChunkNode, FileRecord
 
 class TestPostgresGraphStorage(unittest.TestCase):
     """Test suite for PostgresGraphStorage class that manages the database."""

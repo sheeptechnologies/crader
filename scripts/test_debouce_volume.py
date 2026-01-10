@@ -11,8 +11,8 @@ src_dir = os.path.abspath(os.path.join(current_dir, "..", "src"))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from code_graph_indexer import CodebaseIndexer
-from code_graph_indexer.storage.postgres import PostgresGraphStorage
+from crader import CodebaseIndexer
+from crader.storage.postgres import PostgresGraphStorage
 
 # Configurazione Logging
 logging.basicConfig(

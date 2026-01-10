@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch, mock_open, ANY
 import os
-from code_graph_indexer.volume_manager.git_volume_manager import GitVolumeManager
+from crader.volume_manager.git_volume_manager import GitVolumeManager
 
 class TestGitVolumeManager(unittest.TestCase):
     def setUp(self):
@@ -9,8 +9,8 @@ class TestGitVolumeManager(unittest.TestCase):
         with patch("os.makedirs"):
             self.vm = GitVolumeManager()
         
-    @patch("code_graph_indexer.volume_manager.git_volume_manager.subprocess.run")
-    @patch("code_graph_indexer.volume_manager.git_volume_manager.fcntl")
+    @patch("crader.volume_manager.git_volume_manager.subprocess.run")
+    @patch("crader.volume_manager.git_volume_manager.fcntl")
     @patch("builtins.open", new_callable=mock_open)    
     @patch("os.path.exists")
     @patch("os.makedirs")
@@ -29,8 +29,8 @@ class TestGitVolumeManager(unittest.TestCase):
         self.assertIn("--mirror", cmd)
         self.assertIn("https://github.com/org/repo.git", cmd)
 
-    @patch("code_graph_indexer.volume_manager.git_volume_manager.subprocess.run")
-    @patch("code_graph_indexer.volume_manager.git_volume_manager.fcntl")
+    @patch("crader.volume_manager.git_volume_manager.subprocess.run")
+    @patch("crader.volume_manager.git_volume_manager.fcntl")
     @patch("builtins.open", new_callable=mock_open)
     @patch("os.path.exists")
     def test_ensure_repo_updated_fetch(self, mock_exists, mock_file, mock_fcntl, mock_subprocess):
@@ -47,7 +47,7 @@ class TestGitVolumeManager(unittest.TestCase):
         self.assertIn("fetch", cmd)
         self.assertIn("--all", cmd)
 
-    @patch("code_graph_indexer.volume_manager.git_volume_manager.subprocess.run")
+    @patch("crader.volume_manager.git_volume_manager.subprocess.run")
     def test_get_head_commit(self, mock_run):
         """Test retrieving HEAD commit hash."""
         mock_run.return_value.stdout = b"abcdef123456\n"
@@ -96,7 +96,7 @@ class TestGitVolumeManager(unittest.TestCase):
         pass # placeholder for replacement
     
     # Correct replacement:
-    @patch("code_graph_indexer.volume_manager.git_volume_manager.subprocess.run")
+    @patch("crader.volume_manager.git_volume_manager.subprocess.run")
     def test_get_head_commit(self, mock_run):
         """Test retrieving HEAD commit hash."""
         mock_run.return_value.stdout = b"abcdef123456\n"

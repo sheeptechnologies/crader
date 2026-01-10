@@ -1,7 +1,7 @@
 import json
 
-from code_graph_indexer import indexer as indexer_module
-from code_graph_indexer.models import FileRecord, ChunkNode, ChunkContent, CodeRelation
+from crader import indexer as indexer_module
+from crader.models import FileRecord, ChunkNode, ChunkContent, CodeRelation
 
 
 class FakeParser:
@@ -87,15 +87,15 @@ def test_init_worker_process(monkeypatch, tmp_path):
             self.connector = connector
 
     monkeypatch.setattr(
-        "code_graph_indexer.parsing.parser.TreeSitterRepoParser",
+        "crader.parsing.parser.TreeSitterRepoParser",
         DummyParser,
     )
     monkeypatch.setattr(
-        "code_graph_indexer.storage.postgres.PostgresGraphStorage",
+        "crader.storage.postgres.PostgresGraphStorage",
         DummyStorage,
     )
     monkeypatch.setattr(
-        "code_graph_indexer.storage.connector.SingleConnector",
+        "crader.storage.connector.SingleConnector",
         lambda dsn: f"connector:{dsn}",
     )
 

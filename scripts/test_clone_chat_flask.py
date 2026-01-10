@@ -30,13 +30,13 @@ from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
 # --- SHEEP COMPONENTS ---
-from code_graph_indexer.indexer import CodebaseIndexer
-from code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider
-from code_graph_indexer.storage.connector import PooledConnector
-from code_graph_indexer.retriever import CodeRetriever
-from code_graph_indexer.reader import CodeReader
-from code_graph_indexer.navigator import CodeNavigator
-from code_graph_indexer.schema import VALID_ROLES, VALID_CATEGORIES
+from crader.indexer import CodebaseIndexer
+from crader.providers.embedding import OpenAIEmbeddingProvider
+from crader.storage.connector import PooledConnector
+from crader.retriever import CodeRetriever
+from crader.reader import CodeReader
+from crader.navigator import CodeNavigator
+from crader.schema import VALID_ROLES, VALID_CATEGORIES
 
 # --- CONFIGURAZIONE ---
 DB_URL = os.getenv("DB_URL", "postgresql://sheep_user:sheep_password@localhost:6432/sheep_index")
@@ -49,7 +49,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("AGENT_TEST")
 # Riduciamo il rumore delle librerie esterne
 logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("code_graph_indexer").setLevel(logging.INFO)
+logging.getLogger("crader").setLevel(logging.INFO)
 
 # ==============================================================================
 # 1. INFRASTRUCTURE SETUP

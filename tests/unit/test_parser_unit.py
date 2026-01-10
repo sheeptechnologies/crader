@@ -10,8 +10,8 @@ These tests verify:
 
 import unittest
 from unittest.mock import MagicMock, patch, PropertyMock
-from code_graph_indexer.parsing.parser import TreeSitterRepoParser
-from code_graph_indexer.models import ChunkNode
+from crader.parsing.parser import TreeSitterRepoParser
+from crader.models import ChunkNode
 
 class TestTreeSitterRepoParser(unittest.TestCase):
     """Test suite for TreeSitterRepoParser class that processes source code."""
@@ -20,7 +20,7 @@ class TestTreeSitterRepoParser(unittest.TestCase):
         """Initialize parser with mocks to avoid filesystem dependencies."""
         with patch('os.path.isdir', return_value=True):
             with patch('os.path.exists', return_value=True):
-                 with patch("code_graph_indexer.parsing.parser.GitMetadataProvider") as mock_meta:
+                 with patch("crader.parsing.parser.GitMetadataProvider") as mock_meta:
                      self.parser = TreeSitterRepoParser("/tmp/repo")
 
     def test_chunking_with_overlap(self):
@@ -130,7 +130,7 @@ class TestTreeSitterRepoParser(unittest.TestCase):
         self.parser.all_ignore_dirs = {".git", "node_modules"}
         self.parser.EXT_TO_LANG_CONFIG = {".py": "python"}
         
-        with patch("code_graph_indexer.parsing.parser.LANGUAGE_SPECIFIC_FILTERS", { "python": {"exclude_extensions": {".pyc"}} }):
+        with patch("crader.parsing.parser.LANGUAGE_SPECIFIC_FILTERS", { "python": {"exclude_extensions": {".pyc"}} }):
             self.assertTrue(self.parser._should_process_file("src/main.py"))
             self.assertFalse(self.parser._should_process_file("node_modules/pkg/index.js"))
             self.assertFalse(self.parser._should_process_file(".git/config"))

@@ -20,9 +20,9 @@ src_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from code_graph_indexer.indexer import CodebaseIndexer
-from code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider
-from code_graph_indexer.storage.connector import PooledConnector
+from crader.indexer import CodebaseIndexer
+from crader.providers.embedding import OpenAIEmbeddingProvider
+from crader.storage.connector import PooledConnector
 
 # --- CONFIGURAZIONE ---
 DB_DSN = os.getenv("DB_URL", "postgresql://sheep_user:sheep_password@localhost:6432/sheep_index")
@@ -31,7 +31,7 @@ OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 # Logger Setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("REAL_TEST")
-logging.getLogger("code_graph_indexer").setLevel(logging.INFO)
+logging.getLogger("crader").setLevel(logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING) 
 
 def create_mini_repo(base_dir: str) -> str:

@@ -1,6 +1,6 @@
 import hashlib
 
-from code_graph_indexer.providers.metadata import GitMetadataProvider, LocalMetadataProvider
+from crader.providers.metadata import GitMetadataProvider, LocalMetadataProvider
 
 
 class FakeGit:

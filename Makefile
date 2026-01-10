@@ -16,4 +16,4 @@ test-e2e:
 	$(PYTEST) tests/e2e
 
 coverage:
-	$(PYTEST) tests/unit tests/integration --cov=src/code_graph_indexer --cov-report=html
+	$(PYTEST) tests/unit tests/integration --cov=src/crader --cov-report=html

@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("TEST")
 
 try:
-    from code_graph_indexer import CodebaseIndexer
+    from crader import CodebaseIndexer
 except ImportError as e:
     logger.error(f"❌ Errore importazione: {e}")
     sys.exit(1)

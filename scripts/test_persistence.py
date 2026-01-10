@@ -16,12 +16,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 try:
-    from code_graph_indexer.indexer import CodebaseIndexer
-    from code_graph_indexer.providers.embedding import DummyEmbeddingProvider
+    from crader.indexer import CodebaseIndexer
+    from crader.providers.embedding import DummyEmbeddingProvider
 except ImportError:
     sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-    from code_graph_indexer.indexer import CodebaseIndexer
-    from code_graph_indexer.providers.embedding import DummyEmbeddingProvider
+    from crader.indexer import CodebaseIndexer
+    from crader.providers.embedding import DummyEmbeddingProvider
 
 def create_dummy_repo(base_path: str) -> str:
     repo_path = os.path.join(base_path, "dummy-finance-repo")

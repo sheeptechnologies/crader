@@ -139,8 +139,8 @@ Here is a complete script to index a repository and perform a semantic search.
 
 ```python
 import os
-from code_graph_indexer import CodebaseIndexer, CodeRetriever
-from code_graph_indexer.storage.connector import PooledConnector
+from crader import CodebaseIndexer, CodeRetriever
+from crader.storage.connector import PooledConnector
 
 # 1. Setup Database Connection
 db_url = os.getenv("DB_URL", "postgresql://user:pass@localhost:5432/codebase")
@@ -190,7 +190,7 @@ for i, result in enumerate(results, 1):
 Beyond search, you can traverse the knowledge graph to understand dependencies.
 
 ```python
-from code_graph_indexer import CodeNavigator
+from crader import CodeNavigator
 
 navigator = CodeNavigator(connector)
 

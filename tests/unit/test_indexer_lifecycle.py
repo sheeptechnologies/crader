@@ -1,50 +1,50 @@
 import unittest
 import asyncio
 from unittest.mock import MagicMock, patch, AsyncMock, ANY
-from code_graph_indexer.indexer import CodebaseIndexer
-from code_graph_indexer import indexer as indexer_module
-from code_graph_indexer.storage.base import GraphStorage
-from code_graph_indexer.volume_manager.git_volume_manager import GitVolumeManager
-from code_graph_indexer.providers.embedding import EmbeddingProvider
-import code_graph_indexer.indexer
+from crader.indexer import CodebaseIndexer
+from crader import indexer as indexer_module
+from crader.storage.base import GraphStorage
+from crader.volume_manager.git_volume_manager import GitVolumeManager
+from crader.providers.embedding import EmbeddingProvider
+import crader.indexer
 
 class TestCodebaseIndexerLifecycle(unittest.TestCase):
     def setUp(self):
         # Manual Patching for indexer module
-        self.pg_patcher = patch("code_graph_indexer.storage.postgres.PostgresGraphStorage")
+        self.pg_patcher = patch("crader.storage.postgres.PostgresGraphStorage")
         self.mock_storage_cls = self.pg_patcher.start()
         
         # INJECT into indexer namespace manually
-        self.original_pg = getattr(code_graph_indexer.indexer, "PostgresGraphStorage", None)
-        code_graph_indexer.indexer.PostgresGraphStorage = self.mock_storage_cls
+        self.original_pg = getattr(crader.indexer, "PostgresGraphStorage", None)
+        crader.indexer.PostgresGraphStorage = self.mock_storage_cls
         
         # Patch others
-        self.vm_patcher = patch("code_graph_indexer.indexer.GitVolumeManager") 
+        self.vm_patcher = patch("crader.indexer.GitVolumeManager") 
         self.mock_vm_cls = self.vm_patcher.start()
         
         # Patch PooledConnector (DatabaseConnector is not imported)
-        self.conn_patcher = patch("code_graph_indexer.indexer.PooledConnector")
+        self.conn_patcher = patch("crader.indexer.PooledConnector")
         self.mock_connector = self.conn_patcher.start()
         
-        self.parser_patcher = patch("code_graph_indexer.indexer.TreeSitterRepoParser")
+        self.parser_patcher = patch("crader.indexer.TreeSitterRepoParser")
         self.mock_parser_cls = self.parser_patcher.start()
         
         # Patch Executors to prevent hanging
-        self.ppe_patcher = patch("code_graph_indexer.indexer.concurrent.futures.ProcessPoolExecutor")
+        self.ppe_patcher = patch("crader.indexer.concurrent.futures.ProcessPoolExecutor")
         self.mock_ppe = self.ppe_patcher.start()
         
-        self.tpe_patcher = patch("code_graph_indexer.indexer.concurrent.futures.ThreadPoolExecutor")
+        self.tpe_patcher = patch("crader.indexer.concurrent.futures.ThreadPoolExecutor")
         self.mock_tpe = self.tpe_patcher.start()
         
         # Patch as_completed because it hangs on Mocks
-        self.as_completed_patcher = patch("code_graph_indexer.indexer.concurrent.futures.as_completed")
+        self.as_completed_patcher = patch("crader.indexer.concurrent.futures.as_completed")
         self.mock_as_completed = self.as_completed_patcher.start()
         self.mock_as_completed.side_effect = lambda futures: list(futures) 
 
     def tearDown(self):
         self.pg_patcher.stop()
         if self.original_pg:
-            code_graph_indexer.indexer.PostgresGraphStorage = self.original_pg
+            crader.indexer.PostgresGraphStorage = self.original_pg
         self.vm_patcher.stop()
         self.conn_patcher.stop()
         self.parser_patcher.stop()

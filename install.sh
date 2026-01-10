@@ -96,7 +96,7 @@ else
 fi
 
 # Check for Virtual Environment
-if [[ -z "$VIRTUAL_ENV" ]]; then
+if [[ -z "$VIRTUAL_ENV" ]] || [[ ! -d "$VIRTUAL_ENV" ]]; then
     echo -e "${BLUE}ℹ️  No active virtual environment detected.${NC}"
     
     CREATE_NEW_VENV=false
@@ -133,7 +133,7 @@ else
 fi
 
 # Upgrade pip just in case
-pip install --upgrade pip -q
+python3 -m pip install --upgrade pip -q
 
 echo -e "\n${GREEN}🐍 Installing Python dependencies...${NC}"
 python3 -m pip install -r requirements.txt
@@ -144,5 +144,5 @@ if [ "$PROMPT_TO_ACTIVATE" = true ]; then
     echo -e "\n${BLUE}👉 To start using the library, run:${NC}"
     echo -e "   source .venv/bin/activate"
 fi
-echo -e "\n   Usage: python3 -m code_graph_indexer --help"
+echo -e "\n   Usage: python3 -m crader --help"
 echo -e "==========================================${NC}\n"

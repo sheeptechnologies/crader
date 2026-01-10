@@ -27,15 +27,15 @@ from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
 # --- IMPORT LIBRERIA ---
-from code_graph_indexer import CodebaseIndexer, CodeRetriever, CodeReader, CodeNavigator
-from code_graph_indexer.storage.postgres import PostgresGraphStorage
-from code_graph_indexer.schema import VALID_ROLES, VALID_CATEGORIES
+from crader import CodebaseIndexer, CodeRetriever, CodeReader, CodeNavigator
+from crader.storage.postgres import PostgresGraphStorage
+from crader.schema import VALID_ROLES, VALID_CATEGORIES
 
 # Import dinamico provider
 try:
-    from code_graph_indexer.providers.openai_emb import OpenAIEmbeddingProvider
+    from crader.providers.openai_emb import OpenAIEmbeddingProvider
 except ImportError:
-    from code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider
+    from crader.providers.embedding import OpenAIEmbeddingProvider
 
 # ==============================================================================
 # 1. SETUP SISTEMA (Enterprise: Postgres + OpenAI)

@@ -29,12 +29,12 @@ src_dir = os.path.abspath(os.path.join(current_dir, "..", "..", "src"))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from code_graph_indexer.indexer import CodebaseIndexer
-from code_graph_indexer.providers.embedding import DummyEmbeddingProvider
-from code_graph_indexer.storage.connector import PooledConnector
-from code_graph_indexer.retriever import CodeRetriever
-from code_graph_indexer.reader import CodeReader
-from code_graph_indexer.navigator import CodeNavigator
+from crader.indexer import CodebaseIndexer
+from crader.providers.embedding import DummyEmbeddingProvider
+from crader.storage.connector import PooledConnector
+from crader.retriever import CodeRetriever
+from crader.reader import CodeReader
+from crader.navigator import CodeNavigator
 
 
 # Test configuration
@@ -62,7 +62,7 @@ def db_connector():
 def embedding_provider():
     """Create embedding provider (dummy for tests)."""
     if USE_REAL_EMBEDDINGS:
-        from code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider
+        from crader.providers.embedding import OpenAIEmbeddingProvider
         return OpenAIEmbeddingProvider(model="text-embedding-3-small")
     else:
         return DummyEmbeddingProvider()

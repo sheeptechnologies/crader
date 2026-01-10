@@ -14,11 +14,11 @@ src_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from code_graph_indexer.storage.connector import PooledConnector
-from code_graph_indexer.storage.postgres import PostgresGraphStorage
-from code_graph_indexer.embedding.embedder import CodeEmbedder
-from code_graph_indexer.providers.embedding import EmbeddingProvider
-from code_graph_indexer.models import ChunkNode, FileRecord, ChunkContent
+from crader.storage.connector import PooledConnector
+from crader.storage.postgres import PostgresGraphStorage
+from crader.embedding.embedder import CodeEmbedder
+from crader.providers.embedding import EmbeddingProvider
+from crader.models import ChunkNode, FileRecord, ChunkContent
 
 # --- CONFIGURAZIONE DB ---
 DB_PORT = "6432" 

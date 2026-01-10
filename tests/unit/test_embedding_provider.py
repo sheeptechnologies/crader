@@ -1,7 +1,7 @@
 import asyncio
 import os
 
-from code_graph_indexer.providers.embedding import DummyEmbeddingProvider, OpenAIEmbeddingProvider
+from crader.providers.embedding import DummyEmbeddingProvider, OpenAIEmbeddingProvider
 
 
 class FakeEmbeddings:

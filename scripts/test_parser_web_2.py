@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("VisualDebugger")
 
 try:
-    from code_graph_indexer import CodebaseIndexer
+    from crader import CodebaseIndexer
 except ImportError as e:
     logger.error(f"[FATAL] Errore importazione libreria: {e}")
     sys.exit(1)

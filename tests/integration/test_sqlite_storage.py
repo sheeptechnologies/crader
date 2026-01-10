@@ -1,7 +1,7 @@
 import os
 import uuid
 
-from code_graph_indexer.storage.sqlite import SqliteGraphStorage
+from crader.storage.sqlite import SqliteGraphStorage
 
 
 class SqliteStorageHarness(SqliteGraphStorage):

@@ -17,11 +17,11 @@ src_dir = os.path.abspath(os.path.join(current_dir, "..", "..", "src"))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from code_graph_indexer.indexer import CodebaseIndexer
-from code_graph_indexer.retriever import CodeRetriever
-from code_graph_indexer.reader import CodeReader
-from code_graph_indexer.navigator import CodeNavigator
-from code_graph_indexer.models import RetrievedContext
+from crader.indexer import CodebaseIndexer
+from crader.retriever import CodeRetriever
+from crader.reader import CodeReader
+from crader.navigator import CodeNavigator
+from crader.models import RetrievedContext
 
 
 @pytest.fixture
@@ -84,9 +84,9 @@ class TestPythonWorkflow:
     
     def test_index_python_repository(self, mock_storage):
         """Test: Index Python repository (Flask-like)."""
-        with patch('code_graph_indexer.indexer.GitVolumeManager') as mock_git, \
-             patch('code_graph_indexer.indexer.TreeSitterRepoParser') as mock_parser, \
-             patch('code_graph_indexer.indexer.SCIPRunner') as mock_scip:
+        with patch('crader.indexer.GitVolumeManager') as mock_git, \
+             patch('crader.indexer.TreeSitterRepoParser') as mock_parser, \
+             patch('crader.indexer.SCIPRunner') as mock_scip:
             
             # Setup mocks
             mock_git.return_value.ensure_repo_updated.return_value = None
@@ -106,8 +106,8 @@ class TestPythonWorkflow:
             mock_scip.return_value.stream_documents.return_value = iter([])
             
             # Create indexer with patched dependencies
-            with patch('code_graph_indexer.indexer.PooledConnector'), \
-                 patch('code_graph_indexer.indexer.PostgresGraphStorage', return_value=mock_storage), \
+            with patch('crader.indexer.PooledConnector'), \
+                 patch('crader.indexer.PostgresGraphStorage', return_value=mock_storage), \
                  patch.object(CodebaseIndexer, 'index', return_value="snapshot_456") as mock_index:
                 
                 indexer = CodebaseIndexer(
@@ -175,8 +175,8 @@ class TestTypeScriptWorkflow:
     
     def test_index_typescript_repository(self, mock_storage):
         """Test: Index TypeScript repository (React-like)."""
-        with patch('code_graph_indexer.indexer.GitVolumeManager') as mock_git, \
-             patch('code_graph_indexer.indexer.TreeSitterRepoParser') as mock_parser:
+        with patch('crader.indexer.GitVolumeManager') as mock_git, \
+             patch('crader.indexer.TreeSitterRepoParser') as mock_parser:
             
             mock_git.return_value.files.return_value = [
                 "src/App.tsx",
@@ -189,8 +189,8 @@ class TestTypeScriptWorkflow:
                 []
             )
             
-            with patch('code_graph_indexer.indexer.PooledConnector'), \
-                 patch('code_graph_indexer.indexer.PostgresGraphStorage', return_value=mock_storage), \
+            with patch('crader.indexer.PooledConnector'), \
+                 patch('crader.indexer.PostgresGraphStorage', return_value=mock_storage), \
                  patch.object(CodebaseIndexer, 'index', return_value="snapshot_456"):
                 indexer = CodebaseIndexer(
                     repo_url="https://github.com/facebook/react.git",
@@ -232,8 +232,8 @@ class TestGoWorkflow:
     
     def test_index_go_repository(self, mock_storage):
         """Test: Index Go repository."""
-        with patch('code_graph_indexer.indexer.GitVolumeManager') as mock_git, \
-             patch('code_graph_indexer.indexer.TreeSitterRepoParser') as mock_parser:
+        with patch('crader.indexer.GitVolumeManager') as mock_git, \
+             patch('crader.indexer.TreeSitterRepoParser') as mock_parser:
             
             mock_git.return_value.files.return_value = [
                 "main.go",
@@ -246,8 +246,8 @@ class TestGoWorkflow:
                 []
             )
             
-            with patch('code_graph_indexer.indexer.PooledConnector'), \
-                 patch('code_graph_indexer.indexer.PostgresGraphStorage', return_value=mock_storage), \
+            with patch('crader.indexer.PooledConnector'), \
+                 patch('crader.indexer.PostgresGraphStorage', return_value=mock_storage), \
                  patch.object(CodebaseIndexer, 'index', return_value="snapshot_456"):
                 indexer = CodebaseIndexer(
                     repo_url="https://github.com/gohugoio/hugo.git",

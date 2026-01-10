@@ -1,7 +1,7 @@
 import asyncio
 
-from code_graph_indexer.embedding.embedder import _compute_prompt_and_hash, _prepare_batch_for_staging, CodeEmbedder
-from code_graph_indexer.providers.embedding import DummyEmbeddingProvider
+from crader.embedding.embedder import _compute_prompt_and_hash, _prepare_batch_for_staging, CodeEmbedder
+from crader.providers.embedding import DummyEmbeddingProvider
 
 
 class FakeStorage:

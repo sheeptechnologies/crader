@@ -1,7 +1,7 @@
 import importlib
 import os
 
-import code_graph_indexer.config as config
+import crader.config as config
 
 
 def test_config_uses_env_path(monkeypatch, tmp_path):

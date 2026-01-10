@@ -11,10 +11,10 @@ src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from code_graph_indexer import CodebaseIndexer
-from code_graph_indexer.storage.sqlite import SqliteGraphStorage
-# Importiamo direttamente il reader (assicurati di aver creato il file src/code_graph_indexer/reader.py)
-from code_graph_indexer.reader import CodeReader 
+from crader import CodebaseIndexer
+from crader.storage.sqlite import SqliteGraphStorage
+# Importiamo direttamente il reader (assicurati di aver creato il file src/crader/reader.py)
+from crader.reader import CodeReader 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger("TEST_READER")

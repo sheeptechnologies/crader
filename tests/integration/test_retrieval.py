@@ -1,11 +1,11 @@
 import json
 import pytest
 
-from code_graph_indexer.retrieval.rankers import reciprocal_rank_fusion
-from code_graph_indexer.retrieval.searcher import SearchExecutor
-from code_graph_indexer.retrieval.graph_walker import GraphWalker
-from code_graph_indexer.retriever import CodeRetriever
-from code_graph_indexer.models import RetrievedContext
+from crader.retrieval.rankers import reciprocal_rank_fusion
+from crader.retrieval.searcher import SearchExecutor
+from crader.retrieval.graph_walker import GraphWalker
+from crader.retriever import CodeRetriever
+from crader.models import RetrievedContext
 
 
 class FakeStorage:

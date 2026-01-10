@@ -3,10 +3,15 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "code_graph_indexer"
+name = "crader"
 version = "0.1.0"
 description = "Crader - Memory-efficient library to index codebases into a Knowledge Graph using Tree-sitter and SCIP."
+readme = "README.md"
 requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [
+  {name = "Crader Contributors"}
+]
 dependencies = [
     "networkx>=3.0",
     "tree-sitter==0.21.3",
@@ -20,12 +25,29 @@ dependencies = [
     "tenacity>=8.0.0"
 ]
 
+[project.scripts]
+crader = "crader.__main__:cli"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+    "build>=1.0.0",
+    "twine>=4.0.0",
+    "types-requests",
+    "types-PyYAML",
+    "alembic>=1.7.0",
+    "psycopg2-binary>=2.9.0"
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = "-ra -q"
+addopts = "-ra -q --cov=src/crader --cov-report=term-missing"
 testpaths = [
     "tests",
 ]
@@ -35,5 +57,17 @@ markers = [
 
 [tool.coverage.run]
 omit = [
-    "src/code_graph_indexer/storage/sqlite.py",
+    "src/crader/storage/sqlite.py",
 ]
+
+[tool.ruff]
+line-length = 120
+select = ["E", "F", "I", "W"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true

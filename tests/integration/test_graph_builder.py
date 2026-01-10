@@ -1,5 +1,5 @@
-from code_graph_indexer.graph.builder import KnowledgeGraphBuilder
-from code_graph_indexer.models import ChunkNode, ChunkContent, CodeRelation
+from crader.graph.builder import KnowledgeGraphBuilder
+from crader.models import ChunkNode, ChunkContent, CodeRelation
 
 
 class FakeStorage:

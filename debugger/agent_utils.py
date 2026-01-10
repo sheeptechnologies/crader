@@ -9,12 +9,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
 from langgraph.checkpoint.memory import MemorySaver
 
-from src.code_graph_indexer.retriever import CodeRetriever
-from src.code_graph_indexer.reader import CodeReader
-from src.code_graph_indexer.navigator import CodeNavigator
-from src.code_graph_indexer.schema import VALID_ROLES, VALID_CATEGORIES
+from src.crader.retriever import CodeRetriever
+from src.crader.reader import CodeReader
+from src.crader.navigator import CodeNavigator
+from src.crader.schema import VALID_ROLES, VALID_CATEGORIES
 from debugger.database import get_storage
-from src.code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider
+from src.crader.providers.embedding import OpenAIEmbeddingProvider
 
 logger = logging.getLogger(__name__)
 

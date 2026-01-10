@@ -1,7 +1,7 @@
 import subprocess
 
-from code_graph_indexer.utils.hashing import compute_file_hash
-from code_graph_indexer.utils.git import GitClient
+from crader.utils.hashing import compute_file_hash
+from crader.utils.git import GitClient
 
 
 def test_compute_file_hash_is_deterministic():

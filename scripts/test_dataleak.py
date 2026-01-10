@@ -12,9 +12,9 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
 if src_dir not in sys.path: sys.path.insert(0, src_dir)
 
-from code_graph_indexer import CodebaseIndexer, CodeRetriever
-from code_graph_indexer.storage.postgres import PostgresGraphStorage
-from code_graph_indexer.providers.embedding import FastEmbedProvider
+from crader import CodebaseIndexer, CodeRetriever
+from crader.storage.postgres import PostgresGraphStorage
+from crader.providers.embedding import FastEmbedProvider
 
 # Configurazione Logging (Thread-safe format)
 logging.basicConfig(

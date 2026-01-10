@@ -6,7 +6,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 sys.modules['tree_sitter'] = type('Mock', (object,), {'Parser': None, 'Node': None})
 sys.modules['tree_sitter_languages'] = type('Mock', (object,), {'get_language': None})
 
-from src.code_graph_indexer.storage.postgres import PostgresGraphStorage
+from src.crader.storage.postgres import PostgresGraphStorage
 
 DB_URL = os.getenv("SHEEP_DB_URL", "postgresql://sheep_user:sheep_password@localhost:5433/sheep_index")
 

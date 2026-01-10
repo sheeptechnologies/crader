@@ -21,12 +21,12 @@ src_dir = os.path.abspath(os.path.join(current_dir, "..", "..", "src"))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from code_graph_indexer.indexer import CodebaseIndexer
-from code_graph_indexer.providers.embedding import DummyEmbeddingProvider
-from code_graph_indexer.storage.connector import PooledConnector
-from code_graph_indexer.retriever import CodeRetriever
-from code_graph_indexer.reader import CodeReader
-from code_graph_indexer.navigator import CodeNavigator
+from crader.indexer import CodebaseIndexer
+from crader.providers.embedding import DummyEmbeddingProvider
+from crader.storage.connector import PooledConnector
+from crader.retriever import CodeRetriever
+from crader.reader import CodeReader
+from crader.navigator import CodeNavigator
 
 
 DB_URL = os.getenv("TEST_DB_URL", "postgresql://sheep_user:sheep_password@localhost:6432/sheep_test")

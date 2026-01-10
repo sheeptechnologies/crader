@@ -11,9 +11,9 @@ src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from code_graph_indexer import CodebaseIndexer, CodeRetriever
-from code_graph_indexer.storage.sqlite import SqliteGraphStorage
-from code_graph_indexer.providers.embedding import DummyEmbeddingProvider
+from crader import CodebaseIndexer, CodeRetriever
+from crader.storage.sqlite import SqliteGraphStorage
+from crader.providers.embedding import DummyEmbeddingProvider
 
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')

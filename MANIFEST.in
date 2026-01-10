@@ -1,0 +1,15 @@
+include LICENSE
+include README.md
+include pyproject.toml
+include requirements.txt
+include install.sh
+
+recursive-include src/crader *.py
+recursive-include src/crader *.typed
+
+exclude tests
+recursive-exclude tests *
+recursive-exclude scripts *
+recursive-exclude debugger *
+recursive-exclude site *
+recursive-exclude docs *
