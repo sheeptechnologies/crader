@@ -1,17 +1,15 @@
 
 import os
+
 # [FIX 1] Disabilita parallelismo dei tokenizer per evitare warning/deadlock
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-import sys
-import json
-import shutil
-import tempfile
 import logging
+import shutil
 import sqlite3
-import argparse
 import subprocess
-from typing import List, Dict, Any
+import sys
+import tempfile
 
 # --- SETUP PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -42,7 +40,7 @@ def commit_file(repo_path: str, filename: str, content: str, message: str):
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, "w") as f:
         f.write(content)
-    
+
     subprocess.run(["git", "add", filename], cwd=repo_path, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "commit", "-m", message], cwd=repo_path, stdout=subprocess.DEVNULL)
 
@@ -62,7 +60,7 @@ def force_update_branch_in_db(db_path: str, file_pattern: str, new_branch: str):
     conn = sqlite3.connect(db_path)
     # Aggiorna node_embeddings dove il contenuto corrisponde al pattern (per simulare l'indicizzazione corretta)
     conn.execute(
-        "UPDATE node_embeddings SET branch = ? WHERE text_content LIKE ?", 
+        "UPDATE node_embeddings SET branch = ? WHERE text_content LIKE ?",
         (new_branch, f"%{file_pattern}%")
     )
     conn.commit()
@@ -76,14 +74,14 @@ def run_advanced_tests():
 
     try:
         setup_git_repo(repo_path)
-        
+
         # --- SCENARIO 1: DIVERGENZA SEMANTICA TRA BRANCH ---
         logger.info("\n🧪 SCENARIO 1: Divergenza Semantica (Sorting Algorithms)")
-        
+
         # 1.1 Branch 'main': Implementazione lenta (Bubble Sort)
         logger.info("   -> Creating 'main' with Bubble Sort...")
         checkout_branch(repo_path, "main", create=True)
-        
+
         bubble_sort_code = """
             def sort_algorithm(arr):
                 # Standard Bubble Sort implementation
@@ -96,18 +94,18 @@ def run_advanced_tests():
                 return arr
         """
         commit_file(repo_path, "src/algo.py", bubble_sort_code, "Add bubble sort")
-        
+
         # Indexing Main
         storage = SqliteGraphStorage(db_path=db_path)
         indexer = CodebaseIndexer(repo_path,storage=storage)
         indexer.index()
         provider = FastEmbedProvider(model_name="jinaai/jina-embeddings-v2-base-code")
         list(indexer.embed(provider, batch_size=10)) # Consuma generatore
-        
+
         # 1.2 Branch 'feature/fast': Implementazione veloce (Quick Sort)
         logger.info("   -> Creating 'feature/fast' with Quick Sort...")
         checkout_branch(repo_path, "feature/fast", create=True)
-        
+
         quick_sort_code = """
         def sort_algorithm(arr):
             # Optimized Quick Sort implementation
@@ -120,12 +118,12 @@ def run_advanced_tests():
             return sort_algorithm(left) + middle + sort_algorithm(right)
         """
         commit_file(repo_path, "src/algo.py", quick_sort_code, "Upgrade to quick sort")
-        
+
         # Indexing Feature Branch
         # Nota: L'indexer deve essere re-istanziato o rieseguito sulla nuova repo checkoutata
-        indexer.index(force=True) 
+        indexer.index(force=True)
         list(indexer.embed(provider, batch_size=10))
-        
+
         # [FIX TEST] Forziamo il branch nel DB per assicurarci che il retrieval test sia valido
         # anche se l'embedder sottostante ha ancora "main" hardcoded.
         force_update_branch_in_db(db_path, "pivot", "feature/fast")
@@ -133,7 +131,7 @@ def run_advanced_tests():
         # 1.3 Testing Retrieval
         retriever = CodeRetriever(indexer.storage, provider)
         repo_id = indexer.parser.repo_id # Id stabile
-        
+
         # Query A: "bubble sort slow" su MAIN -> Dovrebbe trovare risultati
         logger.info("   -> Query: 'bubble sort slow' on branch='main'")
         res_main = retriever.retrieve("bubble sort slow", repo_id=repo_id, branch="main", limit=1)
@@ -162,7 +160,7 @@ def run_advanced_tests():
         # --- SCENARIO 2: ROBUSTEZZA FTS (Special Chars) ---
         logger.info("\n🧪 SCENARIO 2: FTS Robustness (Legacy Code)")
         checkout_branch(repo_path, "main") # Torniamo al main
-        
+
         complex_code = """
 class _Legacy$Handler_v99:
     def __init__(self):
@@ -173,18 +171,18 @@ class _Legacy$Handler_v99:
         pass
 """
         commit_file(repo_path, "src/legacy.py", complex_code, "Add legacy junk")
-        
+
         indexer.index(force=True)
         list(indexer.embed(provider, batch_size=10))
-        
+
         # Test Keywords difficili
         keywords = ["_Legacy$Handler_v99", "DATA_$$_CACHE", "exec_cmd_#42"]
-        
+
         for kw in keywords:
             logger.info(f"   -> Testing Keyword: '{kw}'")
             # Usiamo strategy='keyword' per forzare FTS
             res = retriever.retrieve(kw, repo_id=repo_id, branch="main", strategy="keyword", limit=1)
-            
+
             if res and kw in res[0].content:
                 logger.info(f"      ✅ FOUND: {kw}")
             else:

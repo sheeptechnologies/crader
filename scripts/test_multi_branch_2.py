@@ -1,9 +1,8 @@
-import os
-import sys
-import shutil
 import logging
+import os
+import shutil
 import subprocess
-import time
+import sys
 
 # --- SETUP PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -12,8 +11,8 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 from crader import CodebaseIndexer, CodeRetriever
-from crader.storage.sqlite import SqliteGraphStorage
 from crader.providers.embedding import DummyEmbeddingProvider
+from crader.storage.sqlite import SqliteGraphStorage
 
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')
@@ -42,20 +41,20 @@ def run_lifecycle_test():
     # Scriviamo versione 1 del codice su MAIN
     with open(os.path.join(repo_path, "logic.py"), "w") as f:
         f.write("def calculate():\n    return 'OLD_LOGIC_MAIN'\n")
-    
+
     commit_v1 = git_commit(repo_path, "Initial commit")
     logger.info(f"📌 Commit V1 (Main): {commit_v1[:7]}")
 
     # 2. INDEXING V1 (MAIN)
     storage = SqliteGraphStorage(db_path)
     # Nota: Usiamo Dummy per velocità, ma la logica di retrieval è identica
-    embedder = DummyEmbeddingProvider(dim=384) 
-    
+    embedder = DummyEmbeddingProvider(dim=384)
+
     logger.info("\n--- STEP 1: Indexing Main V1 ---")
     indexer = CodebaseIndexer(repo_path, storage)
     indexer.index()
     list(indexer.embed(embedder)) # Genera vettori
-    
+
     # Recuperiamo l'ID univoco per Main
     id_main = indexer.parser.repo_id
     logger.info(f"🆔 ID Main: {id_main}")
@@ -63,10 +62,10 @@ def run_lifecycle_test():
     # 3. CREAZIONE BRANCH FEATURE & MODIFICA
     logger.info("\n--- STEP 2: Creating Feature Branch ---")
     subprocess.run(["git", "checkout", "-b", "feature/new-calc"], cwd=repo_path, stdout=subprocess.DEVNULL)
-    
+
     with open(os.path.join(repo_path, "logic.py"), "w") as f:
         f.write("def calculate():\n    return 'NEW_FEATURE_LOGIC'\n")
-    
+
     commit_feat = git_commit(repo_path, "Update logic in feature")
     logger.info(f"📌 Commit Feature: {commit_feat[:7]}")
 
@@ -76,7 +75,7 @@ def run_lifecycle_test():
     indexer_feat = CodebaseIndexer(repo_path, storage)
     indexer_feat.index()
     list(indexer_feat.embed(embedder))
-    
+
     id_feat = indexer_feat.parser.repo_id
     logger.info(f"🆔 ID Feature: {id_feat}")
 
@@ -86,10 +85,10 @@ def run_lifecycle_test():
     # 5. TEST ISOLAMENTO RETRIEVAL
     logger.info("\n--- STEP 3: Verifying Semantic Isolation ---")
     retriever = CodeRetriever(storage, embedder)
-    
+
     # Cerchiamo "NEW_FEATURE_LOGIC"
     # Ci aspettiamo di trovarlo SOLO usando id_feat, NON id_main
-    
+
     # Test su Main (Non deve trovare la feature)
     res_main = retriever.retrieve("NEW_FEATURE_LOGIC", repo_id=id_main, limit=1, strategy="keyword")
     if res_main:
@@ -107,11 +106,11 @@ def run_lifecycle_test():
     # 6. TEST AGGIORNAMENTO INCREMENTALE (MAIN)
     logger.info("\n--- STEP 4: Incremental Update on Main ---")
     subprocess.run(["git", "checkout", "master"], cwd=repo_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
+
     # Modifichiamo Main (simuliamo merge o fix)
     with open(os.path.join(repo_path, "logic.py"), "w") as f:
         f.write("def calculate():\n    return 'UPDATED_MAIN_V2'\n")
-    
+
     commit_v2 = git_commit(repo_path, "Update main to V2")
     logger.info(f"📌 Commit V2 (Main): {commit_v2[:7]}")
 
@@ -119,12 +118,12 @@ def run_lifecycle_test():
     indexer_main_v2 = CodebaseIndexer(repo_path, storage)
     indexer_main_v2.index() # Dovrebbe rilevare il nuovo commit e aggiornare
     list(indexer_main_v2.embed(embedder))
-    
+
     # L'ID dovrebbe essere LO STESSO di prima (stesso url, stesso branch), ma i dati aggiornati
     id_main_v2 = indexer_main_v2.parser.repo_id
     if id_main_v2 != id_main:
         logger.warning(f"⚠️ Nota: L'ID è cambiato ({id_main} -> {id_main_v2}). Questo è accettabile se l'implementazione rigenera l'UUID, ma ideale se stabile.")
-    
+
     # Verifica che il vecchio contenuto 'OLD_LOGIC_MAIN' sia sparito
     res_v2_old = retriever.retrieve("OLD_LOGIC_MAIN", repo_id=id_main_v2, strategy="keyword")
     if res_v2_old:

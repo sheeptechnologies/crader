@@ -1,11 +1,10 @@
-import os
-import sys
-import shutil
-import tempfile
-import subprocess
 import atexit
 import logging
-from typing import List
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 
 # Configurazione Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -26,7 +25,7 @@ except ImportError:
 
 # Import componenti
 try:
-    from crader import CodebaseIndexer, CodeRetriever, CodeReader, CodeNavigator
+    from crader import CodebaseIndexer, CodeNavigator, CodeReader, CodeRetriever
     from crader.storage.postgres import PostgresGraphStorage
     # Fallback import per provider
     try:
@@ -38,7 +37,7 @@ except ImportError as e:
     sys.exit(1)
 
 # --- CONFIGURAZIONE ---
-DB_PORT = "5433" 
+DB_PORT = "5433"
 DB_URL = f"postgresql://sheep_user:sheep_password@localhost:{DB_PORT}/sheep_index"
 REPO_URL = "https://github.com/pallets/flask.git"
 
@@ -54,11 +53,11 @@ atexit.register(cleanup)
 
 def main():
     logger.info("🚀 AVVIO TEST COMPLETO STACK (Reader & Navigator)")
-    
+
     # 1. SETUP AMBIENTE
     logger.info(f"⬇️  Cloning Flask in {REPO_PATH}...")
     subprocess.run(["git", "clone", "--depth", "1", REPO_URL, REPO_PATH], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
+
     try:
         storage = PostgresGraphStorage(DB_URL)
         provider = OpenAIEmbeddingProvider(model="text-embedding-3-small")
@@ -68,7 +67,7 @@ def main():
 
     indexer = CodebaseIndexer(REPO_PATH, storage)
     repo_meta = indexer.parser.metadata_provider.get_repo_info()
-    
+
     # 2. INDEXING & SNAPSHOT
     logger.info("🔨 Esecuzione Indexing...")
     try:
@@ -103,11 +102,11 @@ def main():
     logger.info("\n--- TEST 4: RETRIEVER ---")
     query = "Flask application entry point"
     results = retriever.retrieve(query, repo_id=repo_id, snapshot_id=snapshot_id, limit=1)
-    
+
     if not results:
         logger.error("❌ Retriever non ha trovato nulla! Impossibile proseguire i test sui nodi.")
         return
-    
+
     target_node = results[0]
     logger.info(f"✅ Retriever OK. Trovato nodo: {target_node.node_id}")
     logger.info(f"   File: {target_node.file_path} (Score: {target_node.score:.4f})")
@@ -116,19 +115,19 @@ def main():
     # TEST 5: CODE READER (Virtual Filesystem)
     # ---------------------------------------------------------
     logger.info("\n--- TEST 5: CODE READER ---")
-    
+
     # A. List Directory
     try:
         root_items = reader.list_directory(snapshot_id, "")
         logger.info(f"📂 ls / -> {[i['name'] for i in root_items[:5]]}...")
-        
+
         # Verifica banale: Flask ha una cartella 'src'
         has_src = any(i['name'] == 'src' and i['type'] == 'dir' for i in root_items)
         if has_src:
             logger.info("   ✅ list_directory: OK (Trovata 'src')")
         else:
             logger.error("   ❌ list_directory: FAIL ('src' non trovata)")
-            
+
         # Test subfolder se esiste src
         if has_src:
             src_items = reader.list_directory(snapshot_id, "src")
@@ -152,10 +151,10 @@ def main():
         # Leggiamo il file trovato dal retriever
         target_path = target_node.file_path
         logger.info(f"📖 Reading file: {target_path} (Lines 1-20)")
-        
+
         file_data = reader.read_file(snapshot_id, target_path, start_line=1, end_line=20)
         content_preview = file_data['content'].replace('\n', '\\n')[:100]
-        
+
         logger.info(f"   Content Preview: {content_preview}...")
         if len(file_data['content']) > 0:
             logger.info("   ✅ read_file: OK")
@@ -169,7 +168,7 @@ def main():
     # ---------------------------------------------------------
     logger.info("\n--- TEST 6: CODE NAVIGATOR ---")
     node_id = target_node.node_id
-    
+
     # A. Parent
     try:
         parent = navigator.read_parent_chunk(node_id)

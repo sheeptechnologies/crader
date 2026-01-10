@@ -1,8 +1,7 @@
-import os
-import sys
-import shutil
 import logging
-import time
+import os
+import shutil
+import sys
 
 # --- SETUP PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -11,7 +10,6 @@ if src_dir not in sys.path: sys.path.insert(0, src_dir)
 
 from crader import CodebaseIndexer
 from crader.storage.postgres import PostgresGraphStorage
-from crader.providers.embedding import FastEmbedProvider
 
 # Configurazione Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
@@ -27,7 +25,7 @@ def setup_toxic_repo(path):
     if os.path.exists(path): shutil.rmtree(path)
     os.makedirs(path)
     os.makedirs(os.path.join(path, "src"), exist_ok=True)
-    
+
     # 1. GOOD FILE (Il controllo)
     with open(os.path.join(path, "src", "good.py"), "w") as f:
         f.write("def hello_world(): print('I survived the chaos!')")
@@ -38,11 +36,11 @@ def setup_toxic_repo(path):
 
     # 3. BINARY MASKED (Encoding Crash)
     with open(os.path.join(path, "src", "binary_fake.py"), "wb") as f:
-        f.write(b'\x00\x01\x02' * 100) 
+        f.write(b'\x00\x01\x02' * 100)
 
     # 4. GHOST ENCODING (Decode Error - Latin-1)
     with open(os.path.join(path, "src", "encoding_error.py"), "wb") as f:
-        f.write(b"print('caf\xe9')") 
+        f.write(b"print('caf\xe9')")
 
     # 5. HEAVYWEIGHT (OOM / Timeout Risk)
     # File 15MB su una riga.
@@ -78,10 +76,10 @@ def verify_db_state(storage, repo_id):
     results = {}
     with storage.pool.connection() as conn:
         rows = conn.execute(
-            "SELECT path, parsing_status, parsing_error FROM files WHERE repo_id=%s", 
+            "SELECT path, parsing_status, parsing_error FROM files WHERE repo_id=%s",
             (repo_id,)
         ).fetchall()
-        
+
         for r in rows:
             results[r['path']] = {
                 'status': r['parsing_status'],
@@ -92,21 +90,21 @@ def verify_db_state(storage, repo_id):
 def run_chaos_test():
     test_repo_path = os.path.abspath("temp_chaos_repo")
     setup_toxic_repo(test_repo_path)
-    
+
     storage = PostgresGraphStorage(DB_URL, vector_dim=768)
     indexer = CodebaseIndexer(test_repo_path, storage)
-    
+
     logger.info("🚀 STARTING CHAOS MONKEY TEST...")
-    
+
     try:
         # EXECUTION
         # Questo NON deve lanciare eccezioni
         indexer.index(force=True)
         logger.info("✅ Indexing completato senza crash (Survival passed).")
-        
+
         repo_id = indexer.parser.repo_id
         db_files = verify_db_state(storage, repo_id)
-        
+
         # ASSERT 1: GOOD FILE
         good = db_files.get("src/good.py")
         if good and good['status'] == 'success':
@@ -133,7 +131,7 @@ def run_chaos_test():
         bad_syntax = db_files.get("src/bad_syntax.py")
         if bad_syntax:
             logger.info(f"ℹ️ Info: Bad Syntax file status: {bad_syntax['status']} (Tree-sitter handles errors gracefully)")
-        
+
         logger.info("\n🎉 CHAOS TEST PASSED: Il sistema è resiliente!")
 
     except Exception as e:

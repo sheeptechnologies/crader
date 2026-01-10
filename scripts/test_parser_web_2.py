@@ -1,15 +1,14 @@
-import os
-import sys
-import json
 import argparse
 import html
-import webbrowser
+import json
 import logging
-import socket
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
-from typing import List, Dict, Any
+import os
+import sys
+import webbrowser
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any, Dict, List
+from urllib.parse import urlparse
 
 # --- CONFIGURAZIONE PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -36,7 +35,7 @@ class DbAdapter:
     """
     Converte i dizionari grezzi di SQLite in oggetti strutturati per il frontend.
     """
-    
+
     @dataclass
     class NodeView:
         id: str
@@ -68,7 +67,7 @@ class DbAdapter:
 
             res.append(DbAdapter.NodeView(
                 id=n['id'],
-                file_path=n.get('file_path'), 
+                file_path=n.get('file_path'),
                 chunk_hash=n.get('chunk_hash', ''),
                 type=n['type'],
                 start_line=n.get('start_line', 0),
@@ -83,11 +82,11 @@ class DbAdapter:
         for e in db_edges:
             src = nodes_map.get(e['source_id'])
             tgt = nodes_map.get(e['target_id'])
-            
+
             # Risoluzione nomi file per visualizzazione
             s_file = src.file_path if src and src.file_path else "EXTERNAL"
             t_file = tgt.file_path if tgt and tgt.file_path else "EXTERNAL"
-            
+
             # Fallback per metadati SCIP (external symbols)
             if not src and e.get('metadata', {}).get('is_external'): s_file = "EXTERNAL_LIB"
             if not tgt and e.get('metadata', {}).get('is_external'): t_file = "EXTERNAL_LIB"
@@ -104,7 +103,7 @@ class DbAdapter:
 
 class HtmlGenerator:
     """Genera l'interfaccia HTML/JS."""
-    
+
     TEMPLATE = """
     <!DOCTYPE html>
     <html>
@@ -311,11 +310,11 @@ class HtmlGenerator:
         # --- FIX CRITICO: Filtro rigoroso per Path Relativo ---
         # Calcoliamo il path relativo esatto come lo calcola il Parser
         target_rel_path = os.path.relpath(target_file_abs, repo_root)
-        
+
         # Filtriamo i nodi che hanno ESATTAMENTE questo path relativo
         file_nodes = [n for n in nodes if n.file_path == target_rel_path]
         file_nodes.sort(key=lambda x: x.byte_range[0])
-        
+
         # Mappa Relazioni
         rel_map = {n.id: {"incoming": [], "outgoing": []} for n in file_nodes}
         node_ids = set(n.id for n in file_nodes)
@@ -335,7 +334,7 @@ class HtmlGenerator:
         for n in file_nodes:
             events.append((n.byte_range[0], 1, n))  # Start
             events.append((n.byte_range[1], -1, n)) # End
-        
+
         # Ordinamento robusto per nesting
         def sort_key(evt):
             pos, type, node = evt
@@ -356,12 +355,12 @@ class HtmlGenerator:
             if idx > last_idx:
                 segment = source_bytes[last_idx:idx].decode('utf-8', errors='replace')
                 html_parts.append(html.escape(segment))
-            
+
             if type == 1: # Start
                 cls = "chunk"
                 if "class" in node.type: cls += " type-class"
                 elif "function" in node.type or "method" in node.type: cls += " type-func"
-                
+
                 html_parts.append(f'<span id="chunk-{node.id}" class="{cls}" onclick="selectChunk(\'{node.id}\'); event.stopPropagation();">')
                 nodes_json.append({"id": node.id, "type": node.type})
             else: # End
@@ -378,7 +377,7 @@ class HtmlGenerator:
                 "incoming": [dataclasses.asdict(r) for r in rels["incoming"]],
                 "outgoing": [dataclasses.asdict(r) for r in rels["outgoing"]]
             }
-        
+
         data_payload = {
             "file": target_rel_path,
             "html": "".join(html_parts),
@@ -390,27 +389,27 @@ class HtmlGenerator:
 class DebugHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
-        
+
         if parsed.path == '/':
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
             self.end_headers()
-            
+
             print(f"🔄 Indexing Repo: {repo_root_abs}...")
             indexer = CodebaseIndexer(repo_root_abs)
             indexer.index()
-            
+
             raw_nodes = list(indexer.get_nodes())
             raw_rels = list(indexer.get_edges())
-            
+
             nodes = DbAdapter.adapt_nodes(raw_nodes)
             nodes_map = {n.id: n for n in nodes}
             rels = DbAdapter.adapt_relations(raw_rels, nodes_map)
-            
+
             # Passiamo target_file_abs E repo_root_abs per il calcolo corretto
             json_data = HtmlGenerator.prepare_payload(target_file_abs, repo_root_abs, nodes, {}, rels)
             page = HtmlGenerator.TEMPLATE.replace('__DATA_JSON__', json_data)
-            
+
             self.wfile.write(page.encode('utf-8'))
             indexer.close()
             print("✅ Page Served.")
@@ -430,7 +429,7 @@ def main():
     if not os.path.isfile(target_file_abs):
         print(f"❌ File non trovato: {target_file_abs}")
         sys.exit(1)
-        
+
     repo_root_abs = os.path.dirname(target_file_abs)
     curr = repo_root_abs
     while len(curr) > 1:
@@ -439,11 +438,11 @@ def main():
             break
         curr = os.path.dirname(curr)
 
-    print(f"\n🐑 SHEEP VISUAL DEBUGGER")
+    print("\n🐑 SHEEP VISUAL DEBUGGER")
     print(f"   File: {target_file_abs}")
     print(f"   Repo: {repo_root_abs}")
     print(f"   URL:  http://localhost:{SERVER_PORT}")
-    
+
     try:
         webbrowser.open(f"http://localhost:{SERVER_PORT}")
         HTTPServer(('localhost', SERVER_PORT), DebugHandler).serve_forever()

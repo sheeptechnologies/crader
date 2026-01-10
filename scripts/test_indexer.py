@@ -1,10 +1,9 @@
+import argparse
+import json
+import logging
 import os
 import sys
 import time
-import argparse
-import logging
-import json
-from typing import List, Dict, Any
 
 # --- FIX IMPORT ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -40,36 +39,36 @@ def test_indexing_full(repo_path: str, output_json: str = None):
 
     # 2. RECUPERO DATI
     logger.info("\n--- RECUPERO DATI ---")
-    
+
     files = list(indexer.get_files())       # <--- NUOVO
     nodes = list(indexer.get_nodes())
     edges = list(indexer.get_edges())
     contents = list(indexer.get_contents())
-    
+
     stats = indexer.get_stats()
-    
+
     logger.info(f"📂 File:       {len(files)}")
     logger.info(f"📦 Nodi:       {len(nodes)}")
     logger.info(f"📄 Contenuti:  {len(contents)}")
     logger.info(f"🔗 Archi:      {len(edges)}")
 
     # 3. DEBUG ANTEPRIMA
-    logger.info(f"\n--- ANTEPRIMA FILE ---")
+    logger.info("\n--- ANTEPRIMA FILE ---")
     if files:
         f = files[0]
         print(f"[FILE] {f['path']} (Lang: {f['language']}, Size: {f['size_bytes']}b)")
         print(f"       Repo: {f['repo_id']}")
         print(f"       Commit: {f['commit_hash']}")
 
-    logger.info(f"\n--- ANTEPRIMA CHUNK ---")
+    logger.info("\n--- ANTEPRIMA CHUNK ---")
     content_map = {c['chunk_hash']: c['content'] for c in contents}
-    
+
     count = 0
     for node in nodes:
         if count >= 3: break
         raw_content = content_map.get(node.get('chunk_hash', ''), "[NO CONTENT]")
         preview = raw_content[:100].replace('\n', ' ↵ ')
-        
+
         print(f"[{count+1}] {node['file_path']} (L{node['start_line']}-{node['end_line']})")
         print(f"    Type: {node['type']}")
         print(f"    Code: \"{preview}...\"")
@@ -78,7 +77,7 @@ def test_indexing_full(repo_path: str, output_json: str = None):
 
     # 4. EXPORT JSON COMPLETO
     if output_json:
-        logger.info(f"\n--- EXPORT JSON ---")
+        logger.info("\n--- EXPORT JSON ---")
         try:
             export_data = {
                 "meta": {
@@ -93,13 +92,13 @@ def test_indexing_full(repo_path: str, output_json: str = None):
                     "contents": contents
                 }
             }
-            
+
             with open(output_json, 'w', encoding='utf-8') as f:
                 json.dump(export_data, f, indent=2, ensure_ascii=False)
-            
+
             size_mb = os.path.getsize(output_json) / (1024 * 1024)
             logger.info(f"✅ Dump salvato in: {output_json} ({size_mb:.2f} MB)")
-            
+
         except Exception as e:
             logger.error(f"❌ Errore export: {e}")
 

@@ -1,11 +1,10 @@
-import os
-import sys
 import asyncio
 import logging
+import os
 import shutil
-import tempfile
 import subprocess
-import uuid
+import sys
+import tempfile
 
 # --- ENV ---
 try:
@@ -32,17 +31,17 @@ OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("REAL_TEST")
 logging.getLogger("crader").setLevel(logging.INFO)
-logging.getLogger("httpx").setLevel(logging.WARNING) 
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 def create_mini_repo(base_dir: str) -> str:
     """Crea una repo minima per testare OpenAI senza spendere troppo."""
     repo_path = os.path.join(base_dir, "openai-mini-test")
     os.makedirs(repo_path, exist_ok=True)
-    
+
     subprocess.run(["git", "init"], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "config", "user.email", "ai@test.com"], cwd=repo_path, check=True)
     subprocess.run(["git", "config", "user.name", "AI"], cwd=repo_path, check=True)
-    
+
     # Un solo file Python con un po' di semantica
     with open(os.path.join(repo_path, "calculator.py"), "w") as f:
         f.write("""
@@ -58,12 +57,12 @@ class AdvancedMath:
     def power(self, base, exp):
         return base ** exp
 """)
-    
+
     subprocess.run(["git", "add", "."], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "commit", "-m", "Initial"], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
     # Forza nome branch
     subprocess.run(["git", "branch", "-m", "main"], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
-    
+
     return repo_path
 
 def clean_db():
@@ -82,31 +81,31 @@ async def run_real_indexing():
         return
 
     tmp_dir = tempfile.mkdtemp()
-    
+
     try:
         clean_db()
-        
+
         logger.info("📂 Creating Mini Repo for OpenAI Test...")
         repo_path = create_mini_repo(tmp_dir)
         repo_url = f"file://{repo_path}"
-        
+
         # 1. INIT INDEXER & PROVIDER
         indexer = CodebaseIndexer(repo_url, "main", db_url=DB_DSN)
-        
+
         # Usiamo text-embedding-3-small (molto economico ed efficiente)
         provider = OpenAIEmbeddingProvider(
-            model="text-embedding-3-small", 
+            model="text-embedding-3-small",
             max_concurrency=5
         )
-        
+
         # 2. RUN INDEXING (CPU Phase)
         logger.info("🚀 Phase 1: Parsing & Graph Building...")
         snapshot_id = indexer.index(force=True)
         logger.info(f"✅ Snapshot Created: {snapshot_id}")
-        
+
         # 3. RUN EMBEDDING (Network Phase - REAL OPENAI)
         logger.info("💸 Phase 2: Calling OpenAI API (Async Pipeline)...")
-        
+
         total_vectors = 0
         async for update in indexer.embed(provider, batch_size=10, mock_api=False):
             status = update['status']
@@ -117,7 +116,7 @@ async def run_real_indexing():
                 # [FIX] Qui usiamo 'newly_embedded' (o recovered) perché è il payload finale
                 total_vectors = update.get('newly_embedded', 0) + update.get('recovered_from_history', 0)
                 logger.info(f"\n✅ Embedding Completed. Stats: {update}")
-        
+
         if total_vectors == 0:
             logger.warning("⚠️ Zero vectors embedded! Something might be wrong.")
         else:
@@ -128,8 +127,8 @@ async def run_real_indexing():
     finally:
         shutil.rmtree(tmp_dir)
         if 'indexer' in locals():
-            # Questo chiude il pool. Se l'embedder sta ancora girando (es. nel suo finally), 
-            # potrebbe causare PoolClosed error. In un test script è accettabile, 
+            # Questo chiude il pool. Se l'embedder sta ancora girando (es. nel suo finally),
+            # potrebbe causare PoolClosed error. In un test script è accettabile,
             # in produzione l'app lifecycle è più lungo.
             indexer.close()
 

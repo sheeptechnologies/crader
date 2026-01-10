@@ -1,11 +1,8 @@
-import os
-import sys
-import json
-import shutil
-import tempfile
 import logging
-import argparse
-from typing import List, Dict, Any
+import os
+import shutil
+import sys
+import tempfile
 
 # --- SETUP PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -34,7 +31,7 @@ def create_dummy_repo(base_path: str) -> str:
 class DatabaseManager:
     def connect(self): print("Connecting...")
 """)
-    
+
     # Init git rapido
     import subprocess
     subprocess.run(["git", "init"], cwd=repo_path, stdout=subprocess.DEVNULL)
@@ -43,7 +40,7 @@ class DatabaseManager:
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_path)
     subprocess.run(["git", "add", "."], cwd=repo_path, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "commit", "-m", "init"], cwd=repo_path, stdout=subprocess.DEVNULL)
-    
+
     return repo_path
 
 def test_retrieval_pipeline():
@@ -55,7 +52,7 @@ def test_retrieval_pipeline():
         # 1. Indexing
         indexer = CodebaseIndexer(repo_path, db_path=db_path)
         indexer.index()
-        
+
         # RECUPERIAMO IL REPO ID REALE (Fondamentale!)
         real_repo_id = indexer.parser.repo_id
         logger.info(f"🔑 Repo ID Reale: {real_repo_id}")

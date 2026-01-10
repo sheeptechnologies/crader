@@ -1,10 +1,9 @@
 import os
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-import sys
-import shutil
 import logging
-import time
-from typing import List, Dict, Any
+import shutil
+import sys
 
 try:
     from dotenv import load_dotenv
@@ -18,8 +17,8 @@ src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
 if src_dir not in sys.path: sys.path.insert(0, src_dir)
 
 from crader import CodebaseIndexer, CodeRetriever
+from crader.providers.embedding import OpenAIEmbeddingProvider
 from crader.storage.postgres import PostgresGraphStorage
-from crader.providers.embedding import FastEmbedProvider,OpenAIEmbeddingProvider
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
@@ -37,7 +36,7 @@ def setup_complex_repo(path):
     os.makedirs(os.path.join(path, "src", "backend"), exist_ok=True)
     os.makedirs(os.path.join(path, "src", "frontend"), exist_ok=True)
     os.makedirs(os.path.join(path, "tests"), exist_ok=True)
-    
+
     # 1. Python Logic (Backend) - Entry Point & Function
     with open(os.path.join(path, "src", "backend", "server.py"), "w") as f:
         f.write("""
@@ -92,7 +91,7 @@ def assert_retrieval(retriever, repo_id, name, query, filters, expect_files=[], 
     """Helper per eseguire assert sui risultati di ricerca."""
     print(f"\n🧪 TEST: {name}")
     print(f"   Query: '{query}' | Filters: {filters}")
-    
+
     try:
         results = retriever.retrieve(query, repo_id, limit=10, strategy="hybrid", filters=filters)
     except Exception as e:
@@ -101,13 +100,13 @@ def assert_retrieval(retriever, repo_id, name, query, filters, expect_files=[], 
 
     found_files = [r.file_path for r in results]
     found_labels = [l for r in results for l in r.semantic_labels]
-    
+
     # Check Files Expected
     for f in expect_files:
         if not any(f in path for path in found_files):
             logger.error(f"❌ FAIL: File atteso '{f}' NON trovato. Trovati: {found_files}")
             return False
-            
+
     # Check Files Forbidden
     for f in forbid_files:
         if any(f in path for path in found_files):
@@ -126,26 +125,26 @@ def assert_retrieval(retriever, repo_id, name, query, filters, expect_files=[], 
 
 def run_rigorous_test():
     setup_complex_repo(REPO_DIR)
-    
+
     try:
-        logger.info(f"🐘 Connecting to DB...")
+        logger.info("🐘 Connecting to DB...")
 
         storage = PostgresGraphStorage(DB_URL, vector_dim=1536)
         provider = OpenAIEmbeddingProvider(model="text-embedding-3-small")
         indexer = CodebaseIndexer(REPO_DIR, storage)
-        
+
         # --- 1. IDEMPOTENZA & STABILITA' ---
         logger.info("🚀 Round 1 Indexing...")
         indexer.index(force=True)
         list(indexer.embed(provider)) # Consuma generatore
-        
+
         stats1 = storage.get_stats()
         logger.info(f"📊 Stats 1: {stats1}")
 
         logger.info("🚀 Round 2 Indexing (Check Duplicati)...")
         indexer.index(force=True)
         list(indexer.embed(provider))
-        
+
         stats2 = storage.get_stats()
         if stats1['total_nodes'] != stats2['total_nodes']:
             raise AssertionError(f"❌ FAIL Idempotenza: Nodi cambiati {stats1['total_nodes']} -> {stats2['total_nodes']}")
@@ -169,13 +168,13 @@ def run_rigorous_test():
         assert_retrieval(
             retriever, repo_id, "Filter JS Only",
             query="logic",
-            filters={"language": ["javascript"]}, 
+            filters={"language": ["javascript"]},
             expect_files=["utils.js"],
             forbid_files=["server.py"]
         )
 
         # --- 3. ESCLUSIONE CATEGORIA (Ibrido File/Chunk) ---
-        # Deve escludere sia 'test_server.py' (file category) 
+        # Deve escludere sia 'test_server.py' (file category)
         # sia 'config.json' (file category) se richiesto
         assert_retrieval(
             retriever, repo_id, "Exclude Test & Config",

@@ -1,10 +1,7 @@
+import logging
 import os
 import sys
 import time
-import logging
-import random
-import uuid
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- SETUP PATH ---
@@ -25,7 +22,7 @@ logging.basicConfig(
 logger = logging.getLogger("RIGOROUS_TEST")
 
 # --- CONFIG ---
-DB_PORT = "5433" 
+DB_PORT = "5433"
 DB_URL = f"postgresql://sheep_user:sheep_password@localhost:{DB_PORT}/sheep_index"
 REPO_URL = "https://github.com/pallets/flask.git"
 REPO_PATH = "/tmp/flask_rigorous_test"
@@ -53,17 +50,17 @@ def worker_read_task(storage, snapshot_id):
     try:
         # Cerchiamo la cartella src/flask
         items = reader.list_directory(snapshot_id, "src/flask")
-        if not items: 
+        if not items:
             logger.warning(f"⚠️  READ FAIL: Directory src/flask vuota o non trovata in {snapshot_id}")
             return False
-        
+
         # [FIX CRITICO] Cerchiamo un FILE, non una cartella
         target_file = None
         for item in items:
             if item['type'] == 'file' and item['name'].endswith('.py'):
                 target_file = item['path']
                 break
-        
+
         if not target_file:
             # Fallback se non ci sono py file
             target_file = next((i['path'] for i in items if i['type'] == 'file'), None)
@@ -74,13 +71,13 @@ def worker_read_task(storage, snapshot_id):
 
         # Leggiamo il file trovato
         data = reader.read_file(snapshot_id, target_file, start_line=1, end_line=5)
-        
+
         if len(data['content']) > 0:
             return True
         else:
             logger.warning(f"⚠️  READ FAIL: File {target_file} vuoto.")
             return False
-            
+
     except Exception as e:
         logger.error(f"❌ READ EXCEPTION: {e}")
         return False
@@ -92,23 +89,23 @@ def worker_read_task(storage, snapshot_id):
 def test_1_stampede(storage):
     """SCENARIO: 20 utenti cliccano 'Index' contemporaneamente."""
     logger.info("\n🧪 TEST 1: THE STAMPEDE (Idempotenza & Locking)")
-    
+
     start_time = time.time()
     snapshots = []
-    
+
     with ThreadPoolExecutor(max_workers=20) as executor:
         futures = [executor.submit(worker_index_task, storage, False) for _ in range(20)]
         for f in as_completed(futures):
             res = f.result()
             if res: snapshots.append(res)
-            
+
     elapsed = time.time() - start_time
     unique_snaps = set(snapshots)
-    
+
     print(f"   ⏱️  Tempo Totale: {elapsed:.2f}s")
     print(f"   📊 Risultati: {len(snapshots)}/20 completati.")
     print(f"   🔑 IDs univoci: {len(unique_snaps)} -> {unique_snaps}")
-    
+
     if len(unique_snaps) == 1 and len(snapshots) == 20:
         logger.info("✅ PASS: Stampede gestito.")
         return list(unique_snaps)[0]
@@ -119,9 +116,9 @@ def test_1_stampede(storage):
 def test_3_pool_stress(storage, snap_id):
     """SCENARIO: 50 lettori concorrenti su pool da 20."""
     logger.info("\n🧪 TEST 3: CONNECTION POOL SATURATION")
-    
+
     logger.info(f"   🔍 Verifica preliminare Snapshot {snap_id}...")
-    
+
     # Verifichiamo se ci sono file leggendo davvero
     if not worker_read_task(storage, snap_id):
         logger.warning("   ⚠️ Snapshot corrotto/vuoto (o errore lettura). Tentativo di ripristino...")
@@ -132,16 +129,16 @@ def test_3_pool_stress(storage, snap_id):
     logger.info("   🚀 Lancio 50 letture concorrenti...")
     start = time.time()
     successes = 0
-    
+
     with ThreadPoolExecutor(max_workers=50) as executor:
         futures = [executor.submit(worker_read_task, storage, snap_id) for _ in range(50)]
         for f in as_completed(futures):
             if f.result(): successes += 1
-            
+
     elapsed = time.time() - start
     print(f"   ⏱️  Tempo: {elapsed:.2f}s")
     print(f"   📊 Successi: {successes}/50")
-    
+
     if successes == 50:
         logger.info("✅ PASS: Pool stress test superato.")
     else:
@@ -149,20 +146,20 @@ def test_3_pool_stress(storage, snap_id):
 
 def main():
     logger.info("🚀 STARTING RIGOROUS VALIDATION SUITE (DEBUG MODE)")
-    
+
     try:
         storage = setup_env()
-        
+
         # Test 1
         snap_id = test_1_stampede(storage)
-        
+
         if snap_id:
             # Test 3
             test_3_pool_stress(storage, snap_id)
-            
+
         logger.info("\n🏁 ALL TESTS COMPLETED.")
         storage.close()
-        
+
     except Exception as e:
         logger.critical(f"🔥 CRITICAL FAILURE: {e}")
         import traceback

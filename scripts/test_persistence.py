@@ -1,15 +1,13 @@
-import os
-import sys
 import json
-import shutil
-import tempfile
-import subprocess
-import struct
 import logging
-from typing import Dict, Any
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
 
 logging.basicConfig(
-    level=logging.INFO, 
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%H:%M:%S'
 )
@@ -28,7 +26,7 @@ def create_dummy_repo(base_path: str) -> str:
     if os.path.exists(repo_path):
         shutil.rmtree(repo_path)
     os.makedirs(repo_path)
-    
+
     src_path = os.path.join(repo_path, "src")
     os.makedirs(src_path)
 
@@ -84,10 +82,10 @@ if __name__ == "__main__":
         subprocess.run(["git", "init"], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
         subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_path, check=False)
         subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_path, check=False)
-        
+
         # [FIX] Aggiungiamo un remote esplicito per evitare di ereditare config strani
         subprocess.run(["git", "remote", "add", "origin", "https://github.com/test-org/dummy-finance.git"], cwd=repo_path, check=False)
-        
+
         subprocess.run(["git", "add", "."], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
     except Exception as e:
@@ -97,7 +95,7 @@ if __name__ == "__main__":
 
 def run_test(target_repo_path=None):
     temp_dir = tempfile.mkdtemp()
-    
+
     try:
         if target_repo_path:
             repo_path = target_repo_path
@@ -111,11 +109,11 @@ def run_test(target_repo_path=None):
         print("\n1️⃣  Avvio INDEXING...")
         indexer = CodebaseIndexer(repo_path)
         indexer.index()
-        
+
         # --- EMBEDDING ---
         print("\n2️⃣  Avvio EMBEDDING...")
         provider = DummyEmbeddingProvider(dim=1536)
-        
+
         generated_docs = []
         for item in indexer.embed(provider, batch_size=5, debug=True):
             if "status" not in item:
@@ -125,7 +123,7 @@ def run_test(target_repo_path=None):
         if generated_docs:
             doc = generated_docs[0]
             print(f"\n✅ Verifica Repo ID: {doc['repo_id']}")
-            
+
             # Verifica che l'URL nel DB sia pulito (accedendo allo storage)
             repo_info = indexer.storage.get_repository(doc['repo_id'])
             if repo_info:

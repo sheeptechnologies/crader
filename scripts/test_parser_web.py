@@ -1,12 +1,12 @@
-import os
-import sys
-import json
 import argparse
 import html
+import json
+import os
+import sys
 import webbrowser
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any, Dict, List
 from urllib.parse import urlparse
-from typing import List, Dict, Any
 
 # --- CONFIG PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -15,8 +15,8 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 try:
-    from crader.parsing.parser import TreeSitterRepoParser
     from crader.models import ChunkNode, ParsingResult
+    from crader.parsing.parser import TreeSitterRepoParser
 except ImportError as e:
     print(f"[FATAL] Errore importazione: {e}")
     sys.exit(1)
@@ -28,7 +28,7 @@ current_repo_root = ""
 
 class HtmlVisualizer:
     """Genera il contenuto HTML per la UI."""
-    
+
     TEMPLATE = """
     <!DOCTYPE html>
     <html>
@@ -183,15 +183,15 @@ class HtmlVisualizer:
         current_nodes.sort(key=lambda x: x.byte_range[0])
 
         relations_map = {n.id: {"parents": [], "children": [], "others": []} for n in current_nodes}
-        
+
         # 1. Aggiungi relazioni geometriche (Fallback)
         for child in current_nodes:
             for possible_parent in current_nodes:
                 if child.id == possible_parent.id: continue
-                if (possible_parent.byte_range[0] <= child.byte_range[0] and 
+                if (possible_parent.byte_range[0] <= child.byte_range[0] and
                     possible_parent.byte_range[1] >= child.byte_range[1]):
                     # Solo se non c'è già una relazione esplicita più forte
-                    pass 
+                    pass
 
         # 2. Aggiungi relazioni ESPLICITE (Parser generated)
         # Queste vincono su tutto e permettono relazioni tra chunk disgiunti (Header Flow-Down)
@@ -200,7 +200,7 @@ class HtmlVisualizer:
                 src = getattr(rel, 'source_id', None)
                 tgt = getattr(rel, 'target_id', None)
                 rtype = getattr(rel, 'relation_type', 'related')
-                
+
                 # Se entrambi i nodi sono in questo file
                 if src in relations_map and tgt in relations_map:
                     if rtype == 'child_of':
@@ -222,7 +222,7 @@ class HtmlVisualizer:
         for n in current_nodes:
             events.append((n.byte_range[0], 1, n))  # Start
             events.append((n.byte_range[1], -1, n)) # End
-        
+
         # Ordinamento eventi per annidamento corretto HTML
         # 1. Posizione
         # 2. Tipo: End (-1) prima di Start (1) a parità di posizione (chiudi tag prima di aprirne nuovi)
@@ -230,14 +230,14 @@ class HtmlVisualizer:
         def event_priority(evt):
             idx, type, node = evt
             length = node.byte_range[1] - node.byte_range[0]
-            
+
             # End (-1) deve venire prima di Start (1)
             type_rank = 0 if type == -1 else 1
-            
+
             # Per Start (1): Lunghezza decrescente (Outer first) => -length
             # Per End (-1): Lunghezza crescente (Inner first) => length
             len_rank = -length if type == 1 else length
-            
+
             return (idx, type_rank, len_rank)
 
         events.sort(key=event_priority)
@@ -250,14 +250,14 @@ class HtmlVisualizer:
             if idx > last_idx:
                 txt = source_bytes[last_idx:idx].decode('utf-8', errors='replace')
                 html_buffer.append(html.escape(txt))
-            
+
             if evt_type == 1:
                 bg = "rgba(255,255,255,0.05)"
                 if "class" in node.type: bg = "rgba(78, 201, 176, 0.1)"
                 elif "function" in node.type: bg = "rgba(220, 220, 170, 0.1)"
-                
+
                 html_buffer.append(f'<span id="{node.id}" class="code-chunk" style="background:{bg}" title="{node.type}">')
-                
+
                 c_obj = contents.get(node.chunk_hash)
                 c_txt = c_obj.content if hasattr(c_obj, 'content') else str(c_obj)
                 chunk_json_list.append({

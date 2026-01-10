@@ -1,13 +1,12 @@
-import os
-import sys
 import asyncio
-import shutil
-import tempfile
-import subprocess
-import traceback
-import json
 import logging
-from typing import Optional, List, Union
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import traceback
+from typing import Optional
 
 # --- ENV & PATH SETUP ---
 try:
@@ -22,21 +21,19 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 # --- LIBRARIES ---
-from pydantic import BaseModel, Field
-from langchain_openai import ChatOpenAI
-from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.prebuilt import create_react_agent
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import create_react_agent
+from pydantic import BaseModel, Field
 
 # --- SHEEP COMPONENTS ---
 from crader.indexer import CodebaseIndexer
-from crader.providers.embedding import OpenAIEmbeddingProvider
-from crader.storage.connector import PooledConnector
-from crader.retriever import CodeRetriever
-from crader.reader import CodeReader
 from crader.navigator import CodeNavigator
-from crader.schema import VALID_ROLES, VALID_CATEGORIES
+from crader.providers.embedding import OpenAIEmbeddingProvider
+from crader.reader import CodeReader
+from crader.retriever import CodeRetriever
 
 # --- CONFIGURAZIONE ---
 DB_URL = os.getenv("DB_URL", "postgresql://sheep_user:sheep_password@localhost:6432/sheep_index")
@@ -60,7 +57,7 @@ def setup_repo(base_dir: str) -> str:
     repo_path = os.path.join(base_dir, "flask_repo")
     if os.path.exists(repo_path):
         shutil.rmtree(repo_path)
-    
+
     logger.info(f"🔄 Cloning Flask ({REPO_URL}) into {repo_path}...")
     subprocess.run(
         ["git", "clone", "--depth", "1", "--branch", REPO_BRANCH, REPO_URL, repo_path],
@@ -75,26 +72,26 @@ async def main_async():
 
     tmp_dir = tempfile.mkdtemp()
     indexer_instance = None
-    
+
     try:
         # 1. CLONE
         repo_url_local = setup_repo(tmp_dir)
-        
+
         # 2. INIT COMPONENTS
         logger.info(f"🔌 Connecting to DB: {DB_URL}")
-        
+
         # Indexer (gestisce lo storage internamente con PooledConnector)
         indexer = CodebaseIndexer(repo_url_local, REPO_BRANCH, db_url=DB_URL)
         indexer_instance = indexer # Reference for cleanup
-        
+
         # Provider (Enterprise Async)
         provider = OpenAIEmbeddingProvider(model="text-embedding-3-small", max_concurrency=10)
-        
+
         # 3. RUN INDEXING PIPELINE (Parsing -> SCIP -> Graph)
         logger.info("🚀 Phase 1: Parsing & Graph Building...")
         # force=False: se abbiamo già indicizzato questo commit, riusa lo snapshot
         snapshot_id = indexer.index(force=False)
-        
+
         if snapshot_id == "queued":
             logger.warning("⏸️  Repo is currently locked/indexing by another process.")
             return
@@ -103,7 +100,7 @@ async def main_async():
 
         # 4. RUN EMBEDDING PIPELINE (Async Staging -> OpenAI)
         logger.info("💸 Phase 2: Embedding Check (Async Pipeline)...")
-        
+
         # Questo consumerà il generatore asincrono
         async for update in indexer.embed(provider, batch_size=200, mock_api=False):
             status = update['status']
@@ -118,7 +115,7 @@ async def main_async():
         retriever = CodeRetriever(indexer.storage, provider)
         reader = CodeReader(indexer.storage)
         navigator = CodeNavigator(indexer.storage)
-        
+
         # Otteniamo repo_id stabile per le query
         repo_info = indexer.storage.get_repository(indexer.storage.ensure_repository(repo_url_local, REPO_BRANCH, "flask"))
         repo_id = repo_info['id']
@@ -126,7 +123,7 @@ async def main_async():
         # ==============================================================================
         # 6. AGENT TOOLS DEFINITION
         # ==============================================================================
-        
+
         # Definiamo i tool dentro il main per accedere alle istanze (closure)
         # In un'app reale, useremmo dependency injection o una classe container.
 
@@ -143,10 +140,10 @@ async def main_async():
             f_dict = filters.model_dump(exclude_none=True) if filters else None
             try:
                 results = retriever.retrieve(
-                    query, 
-                    repo_id=repo_id, 
-                    snapshot_id=snapshot_id, 
-                    limit=5, 
+                    query,
+                    repo_id=repo_id,
+                    snapshot_id=snapshot_id,
+                    limit=5,
                     strategy="hybrid",
                     filters=f_dict
                 )
@@ -180,7 +177,7 @@ async def main_async():
                     for r in refs[:5]: report.append(f"   - {r['file']} L{r['line']} ({r['relation']})")
                 else:
                     report.append("⬅️ CALLED BY: None detected.")
-                
+
                 # 2. Contesto (Dove sono?)
                 parent = navigator.read_parent_chunk(node_id)
                 if parent:
@@ -195,9 +192,9 @@ async def main_async():
         # ==============================================================================
         # 7. CHAT LOOP
         # ==============================================================================
-        
+
         llm = ChatOpenAI(model="gpt-4o", temperature=0)
-        
+
         SYSTEM_PROMPT = f"""
         Sei un Senior Software Engineer che analizza la repository 'Flask'.
         Hai accesso a un Knowledge Graph avanzato.
@@ -213,24 +210,24 @@ async def main_async():
 
         checkpointer = MemorySaver()
         agent_executor = create_react_agent(llm, tools, checkpointer=checkpointer)
-        
+
         config = {"configurable": {"thread_id": "test_session_1"}}
 
         print("\n" + "="*60)
-        print(f"🤖 AGENT READY ON FLASK REPO")
+        print("🤖 AGENT READY ON FLASK REPO")
         print("="*60)
 
         while True:
             try:
                 user_input = input("\nUser: ").strip()
                 if user_input.lower() in ["exit", "quit"]: break
-                
+
                 print("Thinking...", end="", flush=True)
-                
+
                 # Stream degli eventi dell'agente
                 # Nota: create_react_agent è sync o async? LangGraph supporta entrambi.
                 # Qui usiamo ainvoke (async invoke)
-                
+
                 async for event in agent_executor.astream(
                     {"messages": [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_input)]},
                     config=config
@@ -243,7 +240,7 @@ async def main_async():
                         if msg.tool_calls:
                             for tc in msg.tool_calls:
                                 print(f"\n🛠️  Call: {tc['name']} {tc['args']}")
-                    
+
                     if 'tools' in event:
                         msg = event['tools']['messages'][-1]
                         print(f"📄 Result: {msg.content[:200]}...")

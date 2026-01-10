@@ -85,6 +85,7 @@ ignore = []
 "src/crader/embedding/embedder.py" = ["F841", "E501", "E722"]
 "debugger/**/*.py" = ["E402", "E501", "W291", "W293", "E722"]
 "src/crader/config.py" = ["W291"]
+"scripts/**" = ["E402", "E501", "E701", "E702", "E722", "E741", "F401", "F811", "F841", "W291", "W292", "W293"]
 
 [tool.mypy]
 python_version = "3.10"

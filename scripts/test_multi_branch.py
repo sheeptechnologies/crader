@@ -1,11 +1,11 @@
 import os
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-import sys
-import shutil
-import logging
 import argparse
+import logging
+import shutil
 import subprocess
-from typing import List, Dict
+import sys
 
 # --- SETUP PATH ---
 # Aggiunge la cartella src al path per importare la libreria
@@ -16,8 +16,8 @@ if src_dir not in sys.path:
 
 try:
     from crader import CodebaseIndexer, CodeRetriever
+    from crader.providers.embedding import DummyEmbeddingProvider, FastEmbedProvider
     from crader.storage.sqlite import SqliteGraphStorage
-    from crader.providers.embedding import FastEmbedProvider, DummyEmbeddingProvider
 except ImportError as e:
     print(f"❌ Errore importazione: {e}")
     sys.exit(1)
@@ -34,11 +34,11 @@ def setup_persistent_repo(target_path: str):
 
     logger.info(f"🛠️  Creazione repository dummy in: {target_path}")
     os.makedirs(target_path, exist_ok=True)
-    
+
     # 1. Creazione file sorgenti di esempio
     src_dir = os.path.join(target_path, "src")
     os.makedirs(src_dir, exist_ok=True)
-    
+
     with open(os.path.join(src_dir, "auth.py"), "w") as f:
         f.write("""
 class AuthenticationService:
@@ -94,7 +94,7 @@ def main():
     # 1. SETUP AMBIENTE
     setup_persistent_repo(repo_path)
     storage = SqliteGraphStorage(db_path)
-    
+
     # Scelta Provider Embedding
     if args.dummy:
         embedder = DummyEmbeddingProvider(dim=384)
@@ -109,12 +109,12 @@ def main():
 
     # 2. INDEXING & EMBEDDING
     logger.info("\n--- FASE 1: INDEXING & EMBEDDING ---")
-    
+
     indexer = CodebaseIndexer(repo_path, storage)
-    
+
     # Step A: Parsing & Graph Building
-    indexer.index() 
-    
+    indexer.index()
+
     # Step B: Vector Embedding
     # embed() è un generatore, usiamo list() per eseguirlo tutto
     logger.info("Generating Embeddings...")
@@ -124,19 +124,19 @@ def main():
     # Recuperiamo l'ID interno (UUID) generato dal database per questa repo+branch
     repo_info = indexer.parser.metadata_provider.get_repo_info()
     repo_record = storage.get_repository_by_context(repo_info['url'], repo_info['branch'])
-    
+
     if not repo_record:
         logger.error("❌ Errore critico: Repository non trovata nel DB dopo l'indexing.")
         return
-        
+
     internal_repo_id = repo_record['id']
     logger.info(f"✅ Repo pronta per la ricerca. ID Interno: {internal_repo_id}")
 
     # 4. LOOP DI RICERCA
     retriever = CodeRetriever(storage, embedder)
-    
+
     logger.info("\n--- FASE 2: INTERACTIVE RETRIEVAL ---")
-    print(f"🔎 Cerca nel codice (es. 'login logic', 'database connection'). Scrivi 'exit' per uscire.")
+    print("🔎 Cerca nel codice (es. 'login logic', 'database connection'). Scrivi 'exit' per uscire.")
 
     while True:
         try:
@@ -146,11 +146,11 @@ def main():
 
             # Eseguiamo la ricerca usando l'ID interno
             results = retriever.retrieve(query, repo_id=internal_repo_id, limit=3)
-            
+
             if not results:
                 print("⚠️  Nessun risultato trovato.")
                 continue
-                
+
             print(f"\n🏆 Top {len(results)} Risultati per '{query}':")
             for i, res in enumerate(results):
                 print(f"\n[{i+1}] File: {res.file_path} (L{res.start_line}-{res.end_line})")
@@ -158,7 +158,7 @@ def main():
                 print(f"    Type:    {res.chunk_type}")
                 print(f"    Context: {res.parent_context or 'Root'}")
                 print(f"    Code:    {res.content.splitlines()[0].strip()}...")
-                
+
         except KeyboardInterrupt:
             break
         except Exception as e:

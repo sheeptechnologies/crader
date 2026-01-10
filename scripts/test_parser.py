@@ -1,9 +1,8 @@
-import os
-import sys
-import json
 import argparse
 import difflib
-from typing import List, Dict
+import json
+import os
+import sys
 
 # --- FIX IMPORT ---
 # Aggiungiamo 'src' al path per importare la libreria locale
@@ -13,8 +12,8 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 try:
-    from crader.parsing.parser import TreeSitterRepoParser
     from crader.models import ParsingResult
+    from crader.parsing.parser import TreeSitterRepoParser
 except ImportError as e:
     print(f"[FATAL] Errore importazione: {e}")
     print("Assicurati di essere nella root del progetto.")
@@ -32,7 +31,7 @@ def verify_file_reconstruction(original_path: str, parser_result: ParsingResult)
     Segnala buchi (codice perso) o sovrapposizioni.
     """
     rel_path = os.path.basename(original_path) # O calcola path relativo corretto se necessario
-    
+
     # 1. Filtra i nodi per questo file
     # Nota: il parser usa path relativi, cerchiamo di matchare
     target_nodes = []
@@ -40,7 +39,7 @@ def verify_file_reconstruction(original_path: str, parser_result: ParsingResult)
         # Match euristico sul path (endswith)
         if original_path.endswith(n.file_path):
             target_nodes.append(n)
-    
+
     if not target_nodes:
         print(f"❌ Nessun chunk trovato per il file: {original_path}")
         print("   (Verifica che l'estensione sia supportata e non sia ignorato)")
@@ -64,7 +63,7 @@ def verify_file_reconstruction(original_path: str, parser_result: ParsingResult)
     for node in target_nodes:
         start, end = node.byte_range
         chunk_text = content_map.get(node.chunk_hash, "")
-        
+
         status = "OK"
         if start > current_byte:
             gap_size = start - current_byte
@@ -74,9 +73,9 @@ def verify_file_reconstruction(original_path: str, parser_result: ParsingResult)
             reconstructed_content += f" [MISSING {gap_size} BYTES] "
         elif start < current_byte:
             status = f"❌ OVERLAP ({current_byte - start} bytes)"
-        
+
         print(f"{node.id[:8]}.. | {start:<6} - {end:<6} | {node.type:<20} | {status}")
-        
+
         reconstructed_content += chunk_text
         current_byte = end
 
@@ -89,20 +88,20 @@ def verify_file_reconstruction(original_path: str, parser_result: ParsingResult)
         return
 
     print("-" * 70)
-    
+
     # Normalizziamo per il confronto (rimuovendo i placeholder di gap aggiunti sopra per il check stringa pura)
     # Per un confronto onesto, ricostruiamo pulito:
     reconstructed_clean = "".join([content_map.get(n.chunk_hash, "") for n in target_nodes])
-    
+
     is_identical = (original_text == reconstructed_clean)
-    
+
     if is_identical:
         print("✅ RICOSTRUZIONE PERFETTA: Il file rigenerato è identico byte-per-byte.")
     else:
         print("❌ RICOSTRUZIONE FALLITA: Ci sono differenze.")
         print(f"   Lunghezza Originale:   {len(original_text)}")
         print(f"   Lunghezza Ricostruita: {len(reconstructed_clean)}")
-        
+
         # Mostra le differenze se non è troppo lungo
         if len(original_text) < 5000:
             print("\n--- DIFF ---")
@@ -129,7 +128,7 @@ def main():
     args = parser.parse_args()
 
     target_path = os.path.abspath(args.input_path)
-    
+
     # Determina repo_root e file target
     if os.path.isfile(target_path):
         repo_root = os.path.dirname(target_path)
@@ -139,11 +138,11 @@ def main():
         file_to_check = None # Controlla tutto o il primo trovato
 
     print(f"🚀 Avvio Parser su Repo: {repo_root}")
-    
+
     # Esegui Parser
     repo_parser = TreeSitterRepoParser(repo_path=repo_root)
     result = repo_parser.extract_semantic_chunks()
-    
+
     # Export Dati Grezzi
     save_json_debug(result.to_dict(), "debug_parser_full.json")
 

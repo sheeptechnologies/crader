@@ -1,8 +1,8 @@
 
+import json
 import os
 import sys
-import json
-from typing import Optional, List, Union
+from typing import List, Optional, Union
 
 # --- CONFIGURAZIONE PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -17,19 +17,19 @@ try:
 except ImportError:
     pass
 
-from pydantic import BaseModel, Field
-from langchain_openai import ChatOpenAI
-from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
 
 # LangGraph
 from langgraph.prebuilt import create_react_agent
-from langgraph.checkpoint.memory import MemorySaver
+from pydantic import BaseModel, Field
 
 # --- IMPORT LIBRERIA ---
-from crader import CodebaseIndexer, CodeRetriever, CodeReader, CodeNavigator
+from crader import CodebaseIndexer, CodeNavigator, CodeReader, CodeRetriever
+from crader.schema import VALID_CATEGORIES, VALID_ROLES
 from crader.storage.postgres import PostgresGraphStorage
-from crader.schema import VALID_ROLES, VALID_CATEGORIES
 
 # Import dinamico provider
 try:
@@ -42,7 +42,7 @@ except ImportError:
 # ==============================================================================
 
 # Configura qui la porta corretta (5433 o 5435 a seconda del tuo docker ps)
-DB_PORT = "5433" 
+DB_PORT = "5433"
 DB_URL = f"postgresql://sheep_user:sheep_password@localhost:{DB_PORT}/sheep_index"
 REPO_PATH = "/Users/filippodaminato/Desktop/test_repos/7f10a3a2e3b9/worktrees/main"
 
@@ -138,14 +138,14 @@ def list_repo_structure(path: str = "", max_depth: int = 2):
         for item in items:
             icon = "📁" if item['type'] == 'dir' else "📄"
             output.append(f"{icon} {item['name']}")
-            
+
             # Mini-esplorazione per profondità 2
             if item['type'] == 'dir' and max_depth > 1:
                 try:
                     sub_items = reader.list_directory(CURRENT_REPO_ID, item['path'])
                     # Mostra solo i primi 5 file per non intasare
                     for i, sub in enumerate(sub_items):
-                        if i >= 5: 
+                        if i >= 5:
                             output.append(f"  └─ ... ({len(sub_items)-5} more)")
                             break
                         sub_icon = "  └─ 📁" if sub['type'] == 'dir' else "  └─ 📄"

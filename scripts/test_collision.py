@@ -1,7 +1,7 @@
-import os
-import sys
-import shutil
 import logging
+import os
+import shutil
+import sys
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # --- SETUP PATH ---
@@ -10,8 +10,8 @@ src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
 if src_dir not in sys.path: sys.path.insert(0, src_dir)
 
 from crader import CodebaseIndexer
-from crader.storage.postgres import PostgresGraphStorage
 from crader.providers.embedding import FastEmbedProvider
+from crader.storage.postgres import PostgresGraphStorage
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("COLLISION_TEST")
@@ -22,11 +22,11 @@ DB_URL = "postgresql://sheep_user:sheep_password@localhost:5433/sheep_index"
 def setup_local_repo(path, unique_content):
     if os.path.exists(path): shutil.rmtree(path)
     os.makedirs(path)
-    
+
     # File unico per identificarla
     with open(os.path.join(path, "unique.py"), "w") as f:
         f.write(f"def {unique_content}(): pass")
-        
+
     # Git init MA SENZA REMOTE
     import subprocess
     subprocess.run(["git", "init"], cwd=path, stdout=subprocess.DEVNULL)
@@ -36,13 +36,13 @@ def setup_local_repo(path, unique_content):
 def run_test():
     path_a = os.path.abspath("temp_collision_a")
     path_b = os.path.abspath("temp_collision_b")
-    
+
     setup_local_repo(path_a, "function_A")
     setup_local_repo(path_b, "function_B")
-    
+
     storage = PostgresGraphStorage(DB_URL, vector_dim=768)
     provider = FastEmbedProvider()
-    
+
     try:
         # 1. INDEX REPO A
         logger.info("🚀 Indexing Repo A (No Remote)...")
@@ -50,7 +50,7 @@ def run_test():
         idx_a.index(force=True)
         id_a = idx_a.parser.repo_id
         logger.info(f"👉 Repo A ID: {id_a}")
-        
+
         # Verifica che A sia nel DB
         with storage.pool.connection() as conn:
             count_a = conn.execute(
@@ -71,13 +71,13 @@ def run_test():
             logger.error("   Il sistema pensa che siano la stessa repo e ha sovrascritto i dati.")
         else:
             logger.info("✅ PASS: ID diversi. Il sistema le distingue.")
-            
+
             # Verifica finale che i dati di A esistano ancora
             with storage.pool.connection() as conn:
                 check_a = conn.execute(
                     "SELECT count(*) as c FROM files WHERE repo_id=%s", (id_a,)
                 ).fetchone()['c']
-            
+
             if check_a > 0:
                 logger.info(f"✅ PASS: I dati di Repo A sono ancora presenti ({check_a} files).")
             else:

@@ -1,9 +1,8 @@
-import os
-import sys
-import shutil
 import logging
+import os
+import shutil
 import sqlite3
-import argparse
+import sys
 
 # Setup Path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -11,10 +10,11 @@ src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
 if src_dir not in sys.path: sys.path.insert(0, src_dir)
 
 from crader import CodebaseIndexer, CodeRetriever
-from crader.storage.sqlite import SqliteGraphStorage
-# Usiamo DummyProvider per essere deterministici e veloci nel test, 
+
+# Usiamo DummyProvider per essere deterministici e veloci nel test,
 # ma la logica di flow è identica a FastEmbed.
-from crader.providers.embedding import DummyEmbeddingProvider 
+from crader.providers.embedding import DummyEmbeddingProvider
+from crader.storage.sqlite import SqliteGraphStorage
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("ASSURANCE_TEST")
@@ -25,7 +25,7 @@ def setup_targeted_repo(path):
     """
     if os.path.exists(path): shutil.rmtree(path)
     os.makedirs(path)
-    
+
     os.makedirs(os.path.join(path, "src"), exist_ok=True)
 
     # File 1: Contiene keyword uniche e "strane" (Facile per FTS, difficile per Vector)
@@ -46,7 +46,7 @@ class SecurityManager:
         # Encryption handling here
         pass
 """)
-        
+
     # Init Git
     import subprocess
     subprocess.run(["git", "init"], cwd=path, stdout=subprocess.DEVNULL)
@@ -57,7 +57,7 @@ def verify_db_integrity(db_path, repo_id):
     """Controlla direttamente nel DB che i dati siano coerenti."""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
-    
+
     # Conta nodi totali
     # Nota: la join serve per filtrare sul repo_id
     cursor.execute("""
@@ -66,15 +66,15 @@ def verify_db_integrity(db_path, repo_id):
         WHERE f.repo_id = ? AND n.type NOT IN ('external_library', 'program', 'module')
     """, (repo_id,))
     total_nodes = cursor.fetchone()[0]
-    
+
     # Conta embedding totali
     cursor.execute("SELECT COUNT(*) FROM node_embeddings WHERE repo_id = ?", (repo_id,))
     total_embeddings = cursor.fetchone()[0]
-    
+
     conn.close()
-    
+
     logger.info(f"📊 DB Stat Check: Nodi={total_nodes}, Embeddings={total_embeddings}")
-    
+
     if total_embeddings == 0:
         return "empty"
     elif total_embeddings == total_nodes:
@@ -85,12 +85,12 @@ def verify_db_integrity(db_path, repo_id):
 def run_assurance_test():
     repo_path = os.path.abspath("test_assurance_repo")
     db_path = "assurance_test.db"
-    
+
     if os.path.exists(db_path): os.remove(db_path)
-    
+
     logger.info("🛠️  Setup Repo di Test...")
     setup_targeted_repo(repo_path)
-    
+
     storage = SqliteGraphStorage(db_path)
     indexer = CodebaseIndexer(repo_path, storage)
     embedder = DummyEmbeddingProvider(dim=384) # Dimensione standard
@@ -101,12 +101,12 @@ def run_assurance_test():
         logger.info("\n1️⃣  Esecuzione Indexing (Solo Parsing)...")
         indexer.index()
         repo_id = indexer.parser.repo_id
-        
+
         # VERIFICA 1: La ricerca Keyword DEVE funzionare SENZA embedding
         # Questo conferma che il bug della JOIN è risolto.
         logger.info("🧪 TEST A: Keyword Search senza Embedding...")
         res_kw = retriever.retrieve("XYZ_INTERNAL_HANDLE_v99", repo_id, strategy="keyword")
-        
+
         if len(res_kw) > 0 and "legacy_api.py" in res_kw[0].file_path:
             logger.info("✅ PASS: Keyword Search funziona sui dati grezzi.")
         else:
@@ -123,7 +123,7 @@ def run_assurance_test():
         # --- FASE 2: GENERAZIONE EMBEDDINGS ---
         logger.info("\n2️⃣  Generazione Embeddings...")
         list(indexer.embed(embedder)) # Consuma il generatore
-        
+
         # VERIFICA 3: Integrità del Database
         logger.info("🧪 TEST C: Integrità DB (Nodes vs Embeddings)...")
         status = verify_db_integrity(db_path, repo_id)
@@ -139,7 +139,7 @@ def run_assurance_test():
         # Cerchiamo un concetto ("login credentials") che non c'è come keyword esatta
         logger.info("🧪 TEST D: Vector Search semantica...")
         res_vec_final = retriever.retrieve("login credentials encryption", repo_id, strategy="vector")
-        
+
         # DummyEmbeddingProvider ritorna vettori random, quindi la "semantica" è casuale,
         # ma DEVE ritornare dei risultati tecnici se il DB è popolato.
         if len(res_vec_final) > 0:
@@ -152,7 +152,7 @@ def run_assurance_test():
         logger.info("🧪 TEST E: Hybrid Search...")
         # Usiamo una query che contiene la keyword "XYZ..." per forzare il match testuale
         res_hyb = retriever.retrieve("XYZ_INTERNAL_HANDLE_v99 security", repo_id, strategy="hybrid")
-        
+
         found_legacy = any("legacy_api.py" in r.file_path for r in res_hyb)
         if found_legacy and len(res_hyb) > 0:
              logger.info("✅ PASS: Hybrid Search ha trovato il file tramite keyword.")
