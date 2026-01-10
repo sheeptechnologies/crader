@@ -1,6 +1,6 @@
 # Development Setup
 
-This guide covers how to set up the development environment for contributing to `sheep-codebase-indexer`.
+This guide covers how to set up the development environment for contributing to **Crader**.
 
 ## Prerequisites
 
@@ -15,8 +15,8 @@ We recommend using `venv` or `poetry`.
 
 ```bash
 # Clone the repository
-git clone https://github.com/filippodaminato/sheep-codebase-indexer.git
-cd sheep-codebase-indexer
+git clone https://github.com/filippodaminato/crader.git
+cd crader
 
 # Create virtual env
 python -m venv .venv

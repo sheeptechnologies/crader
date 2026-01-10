@@ -2,7 +2,7 @@
 
 ## General Concepts
 
-### What is `sheep-codebase-indexer`?
+### What is Crader?
 Think of it as **"Google Indexing for your Private Codebase"**, but built specifically for AI Agents.
 It is an ingestion engine that transforms raw source code (from Git) into a structured **Knowledge Graph** stored in PostgreSQL. It captures not just the *text* of the code, but the *relationships* (who calls whom, where is this defined, class hierarchy).
 

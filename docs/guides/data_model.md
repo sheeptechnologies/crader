@@ -1,6 +1,6 @@
 # Data Model
 
-This document details the core entities and relationships in the `sheep-codebase-indexer`.
+This document details the core entities and relationships in **Crader**.
 
 ## Entity Relationship Diagram
 

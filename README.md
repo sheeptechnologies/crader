@@ -1,4 +1,4 @@
-# Sheep Codebase Indexer
+# Crader
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -12,7 +12,7 @@ Transform your codebase into a queryable Knowledge Graph with semantic understan
 
 ## What is This?
 
-**Sheep Codebase Indexer** is a production-ready library that indexes source code into a **Code Property Graph (CPG)** with semantic embeddings. Unlike simple text-based RAG solutions, it understands code structure, relationships, and semantics.
+**Crader** is a production-ready library that indexes source code into a **Code Property Graph (CPG)** with semantic embeddings. Unlike simple text-based RAG solutions, it understands code structure, relationships, and semantics.
 
 ### The Problem
 
@@ -24,7 +24,7 @@ Standard text embeddings fail on code because:
 
 ### The Solution
 
-**Sheep Codebase Indexer** provides:
+**Crader** provides:
 
 1. **Structural Parsing**: Tree-sitter AST parsing for accurate code understanding
 2. **Semantic Chunking**: Intelligent code splitting that preserves meaning
@@ -130,7 +130,7 @@ docker run -d \
 ### 2. Installation
 
 ```bash
-pip install sheep-codebase-indexer
+pip install crader
 ```
 
 ### 3. Complete Example
@@ -291,27 +291,7 @@ indexer = CodebaseIndexer(
 
 ---
 
-## Performance
 
-### Benchmarks
-
-| Repository Size | Files | Lines of Code | Indexing Time | Memory Usage |
-|----------------|-------|---------------|---------------|--------------|
-| Small (FastAPI) | 150 | 15K | 45s | 500MB |
-| Medium (Django) | 1,200 | 120K | 6m | 2GB |
-| Large (Kubernetes) | 8,500 | 850K | 42m | 8GB |
-
-*Tested on: MacBook Pro M1, 16GB RAM, PostgreSQL 14*
-
-### Optimization Tips
-
-1. **Use COPY protocol** for bulk inserts (enabled by default)
-2. **Tune PostgreSQL** for your workload (see [Production Guide](docs/deployment/production.md))
-3. **Adjust batch sizes** based on available memory
-4. **Use connection pooling** for concurrent access
-5. **Enable incremental indexing** for large repos
-
----
 
 ## Contributing
 
@@ -325,8 +305,8 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
 
 ```bash
 # Clone and install
-git clone https://github.com/your-org/sheep-codebase-indexer.git
-cd sheep-codebase-indexer
+git clone https://github.com/your-org/crader.git
+cd crader
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -394,6 +374,6 @@ Built with:
 ## Support
 
 - **Documentation**: [https://your-docs-site.com](https://your-docs-site.com)
-- **Issues**: [GitHub Issues](https://github.com/your-org/sheep-codebase-indexer/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-org/sheep-codebase-indexer/discussions)
+- **Issues**: [GitHub Issues](https://github.com/your-org/crader/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/your-org/crader/discussions)
 - **Email**: support@your-org.com

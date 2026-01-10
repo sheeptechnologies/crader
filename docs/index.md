@@ -1,8 +1,8 @@
-# Welcome to Sheep Codebase Indexer
+# Welcome to Crader
 
 **Enterprise-Grade Code Intelligence for AI Agents**
 
-The **Sheep Codebase Indexer** is a production-ready library that transforms source code into a queryable **Code Property Graph (CPG)** with semantic embeddings. Built for AI-powered code analysis, intelligent retrieval, and agentic workflows.
+**Crader** is a production-ready library that transforms source code into a queryable **Code Property Graph (CPG)** with semantic embeddings. Built for AI-powered code analysis, intelligent retrieval, and agentic workflows.
 
 ---
 
@@ -14,7 +14,7 @@ Standard text-based RAG fails on code because **code is structured, not prose**.
 - What types it uses
 - Its dependencies
 
-**Sheep Codebase Indexer** solves this by:
+**Crader** solves this by:
 
 1. **Parsing** code structure into an AST-based graph
 2. **Embedding** semantically meaningful chunks (not random lines)
@@ -80,7 +80,7 @@ See [Architecture Guide](guides/architecture.md) for detailed design.
 ### Installation
 
 ```bash
-pip install sheep-codebase-indexer
+pip install crader
 ```
 
 See [Installation Guide](getting-started/installation.md) for detailed setup.
@@ -173,17 +173,7 @@ Auto-generate docs with call graphs and usage examples.
 
 ---
 
-## Performance
 
-| Repository | Files | LOC | Indexing Time | Memory |
-|-----------|-------|-----|---------------|--------|
-| Small | 150 | 15K | 45s | 500MB |
-| Medium | 1,200 | 120K | 6m | 2GB |
-| Large | 8,500 | 850K | 42m | 8GB |
-
-*MacBook Pro M1, 16GB RAM, PostgreSQL 14*
-
----
 
 ## Contributing
 
@@ -200,5 +190,5 @@ We welcome contributions! See [CONTRIBUTING.md](contributing/code-of-conduct.md)
 ## Support
 
 - **Documentation**: Full docs at [guides](guides/architecture.md)
-- **Issues**: [GitHub Issues](https://github.com/your-org/sheep-codebase-indexer/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-org/sheep-codebase-indexer/discussions)
+- **Issues**: [GitHub Issues](https://github.com/your-org/crader/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/your-org/crader/discussions)

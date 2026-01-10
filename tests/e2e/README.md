@@ -1,6 +1,6 @@
 # End-to-End Tests
 
-This directory contains comprehensive end-to-end tests that verify the complete workflow of the Sheep Codebase Indexer.
+This directory contains comprehensive end-to-end tests that verify the complete workflow of **Crader**.
 
 ## Test Files
 

@@ -1,6 +1,6 @@
 # Installation
 
-This guide covers the prerequisites and steps to install `sheep-codebase-indexer` in your environment.
+This guide covers the prerequisites and steps to install **Crader** in your environment.
 
 ## Prerequisites
 
@@ -20,8 +20,8 @@ Before installing the python library, ensure you have the following system compo
 The recommended way to install is directly from the source code, as it is an internal library.
 
 ```bash
-git clone https://github.com/your-org/sheep-codebase-indexer.git
-cd sheep-codebase-indexer
+git clone https://github.com/your-org/crader.git
+cd crader
 pip install .
 ```
 

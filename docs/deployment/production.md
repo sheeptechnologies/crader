@@ -1,6 +1,6 @@
 # Production Deployment Guide
 
-This guide covers deploying Sheep Codebase Indexer in production environments with focus on performance, reliability, and scalability.
+This guide covers deploying **Crader** in production environments with focus on performance, reliability, and scalability.
 
 ## Architecture Overview
 
@@ -407,39 +407,7 @@ volumes:
 
 ---
 
-## Performance Benchmarks
 
-### Expected Performance
-
-| Operation | Throughput | Latency (p95) |
-|-----------|------------|---------------|
-| **Vector Search** | 1000 req/s | 50ms |
-| **Keyword Search** | 2000 req/s | 30ms |
-| **Hybrid Search** | 800 req/s | 80ms |
-| **Graph Traversal** | 500 req/s | 100ms |
-| **Indexing** | 10K chunks/min | - |
-
-### Load Testing
-
-```python
-import asyncio
-import aiohttp
-
-async def load_test(num_requests=1000):
-    async with aiohttp.ClientSession() as session:
-        tasks = []
-        for i in range(num_requests):
-            task = session.post(
-                "http://localhost:8000/search",
-                json={"query": f"test query {i}", "limit": 10}
-            )
-            tasks.append(task)
-        
-        responses = await asyncio.gather(*tasks)
-        return responses
-```
-
----
 
 ## Troubleshooting
 

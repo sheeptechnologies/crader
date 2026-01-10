@@ -1,8 +1,8 @@
-site_name: Sheep Codebase Indexer
+site_name: Crader
 site_description: Enterprise-grade Code Knowledge Graph & Indexing Library
 site_url: https://example.com/ # Placeholder
-repo_url: https://github.com/filippodaminato/sheep-codebase-indexer
-repo_name: sheep-codebase-indexer
+repo_url: https://github.com/filippodaminato/crader
+repo_name: crader
 
 theme:
   name: material

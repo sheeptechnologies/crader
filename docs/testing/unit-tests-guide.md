@@ -1,6 +1,6 @@
 # Unit Test Documentation
 
-This guide explains the structure and purpose of the unit tests in the `sheep-codebase-indexer` project.
+This guide explains the structure and purpose of the unit tests in the **Crader** project.
 
 ## 📊 Current Coverage
 

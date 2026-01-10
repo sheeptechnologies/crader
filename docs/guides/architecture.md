@@ -1,6 +1,6 @@
 # System Architecture
 
-This document describes the high-level architecture of the `sheep-codebase-indexer`. The system is designed as a **Code Property Graph (CPG) Builder** that ingests source code repositories and transforms them into a queriable knowledge graph.
+This document describes the high-level architecture of **Crader**. The system is designed as a **Code Property Graph (CPG) Builder** that ingests source code repositories and transforms them into a queriable knowledge graph.
 
 ## High-Level Overview
 
