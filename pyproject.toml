@@ -97,3 +97,4 @@ no_implicit_optional = false
 strict_optional = false
 allow_redefinition = true
 disable_error_code = ["attr-defined", "name-defined", "assignment", "arg-type", "misc", "override", "list-item", "return-value", "call-arg", "var-annotated", "index", "union-attr"]
+exclude = ["scripts", "debugger", "sheep_data"]
