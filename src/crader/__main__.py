@@ -1,31 +1,36 @@
-import click
-import os
 import logging
+import os
+
+import click
+
 from crader.indexer import CodebaseIndexer
+
 # from crader.embedding.provider import OpenAIEmbeddingProvider
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
 
 @click.group()
 def cli():
     """Crader - Sheep Codebase Indexer CLI"""
     pass
 
+
 @cli.command()
-@click.argument('repo_url')
-@click.option('--branch', default='main', help='Branch to index')
-@click.option('--db-url', default=None, help='Database connection string')
-@click.option('--force', is_flag=True, help='Force re-indexing')
-@click.option('--auto-prune', is_flag=True, help='Auto prune old snapshots')
+@click.argument("repo_url")
+@click.option("--branch", default="main", help="Branch to index")
+@click.option("--db-url", default=None, help="Database connection string")
+@click.option("--force", is_flag=True, help="Force re-indexing")
+@click.option("--auto-prune", is_flag=True, help="Auto prune old snapshots")
 def index(repo_url, branch, db_url, force, auto_prune):
     """Index a repository."""
-    
+
     # Fallback to env var if db_url not provided
     if not db_url:
         db_url = os.getenv("DB_URL")
-        
+
     if not db_url:
         click.echo("Error: DB_URL must be provided via argument or environment variable.", err=True)
         return
@@ -40,5 +45,6 @@ def index(repo_url, branch, db_url, force, auto_prune):
     finally:
         indexer.close()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     cli()

@@ -1,1 +1,1 @@
-from .git_volume_manager import GitVolumeManager
+from .git_volume_manager import GitVolumeManager as GitVolumeManager

@@ -1,11 +1,14 @@
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List
+
 from ..models import CodeRelation
+
 
 class BaseGraphIndexer(ABC):
     """
     Classe base astratta per tutti gli indexer specializzati (SCIP, Frameworks, ecc.).
     """
+
     def __init__(self, repo_path: str):
         self.repo_path = repo_path
 

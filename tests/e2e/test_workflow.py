@@ -1,10 +1,10 @@
 import asyncio
 import json
-from typing import Dict, Any, Generator, List
+from typing import Any, Dict, Generator, List
 
 from crader.embedding.embedder import CodeEmbedder
 from crader.graph.builder import KnowledgeGraphBuilder
-from crader.models import ChunkNode, ChunkContent, RetrievedContext
+from crader.models import ChunkContent, ChunkNode, RetrievedContext
 from crader.providers.embedding import DummyEmbeddingProvider
 from crader.retriever import CodeRetriever
 
@@ -31,7 +31,9 @@ class InMemoryStorage:
     def add_search_index(self, search_docs):
         self.search_docs.extend(search_docs)
 
-    def get_nodes_to_embed(self, snapshot_id: str, model_name: str, batch_size: int = 2000) -> Generator[Dict[str, Any], None, None]:
+    def get_nodes_to_embed(
+        self, snapshot_id: str, model_name: str, batch_size: int = 2000
+    ) -> Generator[Dict[str, Any], None, None]:
         for node in self.nodes.values():
             yield {
                 "id": node["id"],

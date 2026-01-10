@@ -1,6 +1,6 @@
 import asyncio
 
-from crader.embedding.embedder import _compute_prompt_and_hash, _prepare_batch_for_staging, CodeEmbedder
+from crader.embedding.embedder import CodeEmbedder, _compute_prompt_and_hash, _prepare_batch_for_staging
 from crader.providers.embedding import DummyEmbeddingProvider
 
 
@@ -19,7 +19,7 @@ class FakeStorage:
             "file_path": "a.py",
             "language": "python",
             "category": "code",
-            "metadata_json": "{\"semantic_matches\": [{\"category\": \"role\", \"label\": \"Class\"}]}",
+            "metadata_json": '{"semantic_matches": [{"category": "role", "label": "Class"}]}',
             "content": "print('x')",
         }
 
@@ -60,7 +60,7 @@ def test_compute_prompt_and_hash_deterministic():
             "file_path": "a.py",
             "language": "python",
             "category": "code",
-            "metadata_json": "{\"semantic_matches\": [{\"category\": \"role\", \"label\": \"Class\"}]}",
+            "metadata_json": '{"semantic_matches": [{"category": "role", "label": "Class"}]}',
             "content": "print('x')",
             "incoming_definitions": ["Foo"],
         }

@@ -1,4 +1,4 @@
-from crader.models import RetrievedContext, Repository
+from crader.models import Repository, RetrievedContext
 
 
 def test_repository_to_dict():

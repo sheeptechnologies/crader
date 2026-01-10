@@ -1,15 +1,16 @@
 import logging
-import os
-from typing import List, Dict, Optional, Any
+from typing import Any, Dict, List
+
 from .storage.base import GraphStorage
 
 logger = logging.getLogger(__name__)
 
+
 class CodeReader:
     """
     Virtual Filesystem Reader based on Immutable Snapshots.
-    
-    This facade provides high-performance, consistent read access to the repository's file structure and content 
+
+    This facade provides high-performance, consistent read access to the repository's file structure and content
     as it existed at a specific point in time (Snapshot). It abstracts the underlying storage mechanism (which stores files as distributed chunks)
     into a coherent file system interface.
 
@@ -22,7 +23,7 @@ class CodeReader:
         storage (GraphStorage): The storage backend interface.
         _manifest_cache (Dict): Internal cache to store loaded snapshot manifests.
     """
-    
+
     def __init__(self, storage: GraphStorage):
         self.storage = storage
         # Local manifest cache per session (optional, but useful if the Reader object is long-lived)
@@ -33,7 +34,9 @@ class CodeReader:
             self._manifest_cache[snapshot_id] = self.storage.get_snapshot_manifest(snapshot_id)
         return self._manifest_cache[snapshot_id]
 
-    def read_file(self, snapshot_id: str, file_path: str, start_line: int = None, end_line: int = None) -> Dict[str, Any]:
+    def read_file(
+        self, snapshot_id: str, file_path: str, start_line: int = None, end_line: int = None
+    ) -> Dict[str, Any]:
         """
         Retrieves file content, potentially partial, from the snapshot.
 
@@ -58,7 +61,7 @@ class CodeReader:
         """
         # Note: We could also validate file existence by looking at the manifest before calling the DB
         content = self.storage.get_file_content_range(snapshot_id, file_path, start_line, end_line)
-        
+
         if content is None:
             raise FileNotFoundError(f"File '{file_path}' not found in snapshot {snapshot_id[:8]}")
 
@@ -66,7 +69,7 @@ class CodeReader:
             "file_path": file_path,
             "content": content,
             "start_line": start_line or 1,
-            "end_line": end_line or "EOF"
+            "end_line": end_line or "EOF",
         }
 
     def list_directory(self, snapshot_id: str, path: str = "") -> List[Dict[str, Any]]:
@@ -85,16 +88,16 @@ class CodeReader:
                 *   'name': Name of the file/dir.
                 *   'type': 'file' or 'dir'.
                 *   'path': Full relative path.
-            
+
             Result is sorted so directories appear first.
         """
         manifest = self._get_manifest(snapshot_id)
-        
+
         # Navigation in the JSON tree
         current = manifest
         # Remove leading/trailing slashes
-        target_parts = [p for p in path.split('/') if p]
-        
+        target_parts = [p for p in path.split("/") if p]
+
         try:
             # Descend into tree
             for part in target_parts:
@@ -103,21 +106,17 @@ class CodeReader:
                     raise NotADirectoryError(f"{path} is not a directory.")
         except KeyError:
             # If a part of the path does not exist
-            return [] # Or raise FileNotFoundError, but [] is safer for the agent
+            return []  # Or raise FileNotFoundError, but [] is safer for the agent
 
         # Output formatting (direct children)
         results = []
         children = current.get("children", {})
-        
+
         for name, meta in children.items():
-            results.append({
-                "name": name,
-                "type": meta["type"],
-                "path": f"{path}/{name}".strip("/")
-            })
-            
+            results.append({"name": name, "type": meta["type"], "path": f"{path}/{name}".strip("/")})
+
         # Sort: Directory first
-        return sorted(results, key=lambda x: (x['type'] != 'dir', x['name']))
+        return sorted(results, key=lambda x: (x["type"] != "dir", x["name"]))
 
     def find_directories(self, snapshot_id: str, name_pattern: str, limit: int = 10) -> List[str]:
         """
@@ -139,12 +138,13 @@ class CodeReader:
         pattern = name_pattern.lower()
 
         def _recurse(node, current_path):
-            if len(found) >= limit: return
+            if len(found) >= limit:
+                return
 
             children = node.get("children", {})
             for name, meta in children.items():
                 full_path = f"{current_path}/{name}".strip("/")
-                
+
                 # If it is a directory
                 if meta["type"] == "dir":
                     # Check match

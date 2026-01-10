@@ -1,11 +1,12 @@
 import json
+
 import pytest
 
+from crader.models import RetrievedContext
+from crader.retrieval.graph_walker import GraphWalker
 from crader.retrieval.rankers import reciprocal_rank_fusion
 from crader.retrieval.searcher import SearchExecutor
-from crader.retrieval.graph_walker import GraphWalker
 from crader.retriever import CodeRetriever
-from crader.models import RetrievedContext
 
 
 class FakeStorage:
@@ -103,7 +104,7 @@ def test_code_retriever_hybrid_flow():
     storage = FakeStorage()
     retriever = CodeRetriever(storage, FakeEmbedder())
 
-    docs = [
+    [
         {
             "id": "n1",
             "file_path": "a.py",

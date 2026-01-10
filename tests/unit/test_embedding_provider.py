@@ -61,4 +61,4 @@ def test_openai_embedding_provider_async(monkeypatch):
 
     result = asyncio.run(provider.embed_async(["a\n", " "]))
     assert result == [[0.3, 0.4], [0.3, 0.4]]
-    assert fake_async.calls[0][0] == ["a ", "empty"]
+    assert fake_async.calls[0][0] == ["a ", "empty_node_content"]

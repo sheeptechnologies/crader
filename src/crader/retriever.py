@@ -1,14 +1,15 @@
 import logging
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
-from .storage.postgres import PostgresGraphStorage
-from .providers.embedding import EmbeddingProvider
 from .models import RetrievedContext
-from .retrieval.rankers import reciprocal_rank_fusion
+from .providers.embedding import EmbeddingProvider
 from .retrieval.graph_walker import GraphWalker
+from .retrieval.rankers import reciprocal_rank_fusion
 from .retrieval.searcher import SearchExecutor
+from .storage.postgres import PostgresGraphStorage
 
 logger = logging.getLogger(__name__)
+
 
 class CodeRetriever:
     """
@@ -30,15 +31,21 @@ class CodeRetriever:
         embedder (EmbeddingProvider): The provider used to embed query strings for vector search.
         walker (GraphWalker): Helper component for traversing the graph to build context.
     """
-    
+
     def __init__(self, storage: PostgresGraphStorage, embedder: EmbeddingProvider):
         self.storage = storage
         self.embedder = embedder
         self.walker = GraphWalker(storage)
 
-    def retrieve(self, query: str, repo_id: str, snapshot_id: Optional[str] = None, 
-                 limit: int = 10, strategy: str = "hybrid", 
-                 filters: Dict[str, Any] = None) -> List[RetrievedContext]:
+    def retrieve(
+        self,
+        query: str,
+        repo_id: str,
+        snapshot_id: Optional[str] = None,
+        limit: int = 10,
+        strategy: str = "hybrid",
+        filters: Dict[str, Any] = None,
+    ) -> List[RetrievedContext]:
         """
         Executes a high-fidelity search operation against the codebase.
 
@@ -66,44 +73,49 @@ class CodeRetriever:
         Raises:
             ValueError: If neither `repo_id` nor `snapshot_id` is provided.
         """
-        
+
         target_snapshot_id = snapshot_id
-        
+
         # 1. Fallback to "Latest" if not pinned
         if not target_snapshot_id:
             if not repo_id:
-                 raise ValueError("You must provide repo_id (for latest) or snapshot_id (for pinned).")
+                raise ValueError("You must provide repo_id (for latest) or snapshot_id (for pinned).")
             target_snapshot_id = self.storage.get_active_snapshot_id(str(repo_id))
             logger.info(f"🔄 Auto-resolution: Repo {repo_id} -> Snapshot {target_snapshot_id}")
-        
+
         if not target_snapshot_id:
-            logger.warning(f"⚠️ Retrieve impossibile: Nessuno snapshot attivo o valido.")
+            logger.warning("⚠️ Retrieve impossibile: Nessuno snapshot attivo o valido.")
             return []
 
         # Log contestualizzato
         filter_log = f" | Filters: {filters}" if filters else ""
         context_mode = "PINNED" if snapshot_id else "LATEST"
         logger.info(f"🔎 Retrieving [{context_mode}]: '{query}' su Snap {target_snapshot_id[:8]}...{filter_log}")
-        
+
         candidates = {}
         fetch_limit = limit * 2 if strategy == "hybrid" else limit
-        
+
         # 2. Execution Strategies (Always with target_snapshot_id)
         if strategy in ["hybrid", "vector"]:
             SearchExecutor.vector_search(
-                self.storage, self.embedder, query, fetch_limit, 
-                snapshot_id=target_snapshot_id, # [CRITICAL] We use the resolved ID
+                self.storage,
+                self.embedder,
+                query,
+                fetch_limit,
+                snapshot_id=target_snapshot_id,  # [CRITICAL] We use the resolved ID
                 filters=filters,
-                candidates=candidates
+                candidates=candidates,
             )
-            
+
         if strategy in ["hybrid", "keyword"]:
             SearchExecutor.keyword_search(
-                self.storage, query, fetch_limit, 
-                snapshot_id=target_snapshot_id, # [FIX] Now we mandatory pass it
+                self.storage,
+                query,
+                fetch_limit,
+                snapshot_id=target_snapshot_id,  # [FIX] Now we mandatory pass it
                 repo_id=str(repo_id) if repo_id else None,
                 filters=filters,
-                candidates=candidates
+                candidates=candidates,
             )
 
         if not candidates:
@@ -113,7 +125,7 @@ class CodeRetriever:
         if strategy == "hybrid":
             ranked_docs = reciprocal_rank_fusion(candidates)
         else:
-            ranked_docs = sorted(candidates.values(), key=lambda x: x.get('score', 0), reverse=True)
+            ranked_docs = sorted(candidates.values(), key=lambda x: x.get("score", 0), reverse=True)
 
         # 4. Arricchimento
         return self._build_response(ranked_docs[:limit], target_snapshot_id)
@@ -138,41 +150,48 @@ class CodeRetriever:
         for doc in docs:
             # Context expansion (GraphWalker)
             ctx_info = self.walker.expand_context(doc)
-            
-            meta = doc.get('metadata', {})
+
+            meta = doc.get("metadata", {})
             if isinstance(meta, str):
                 import json
-                try: meta = json.loads(meta)
-                except: meta = {}
-            
+
+                try:
+                    meta = json.loads(meta)
+                except Exception:
+                    meta = {}
+
             labels = []
-            matches = meta.get('semantic_matches', [])
+            matches = meta.get("semantic_matches", [])
             for m in matches:
-                label = m.get('label') or m.get('value')
-                if label: labels.append(label)
-            
-            if not labels: labels = ["Code Block"]
+                label = m.get("label") or m.get("value")
+                if label:
+                    labels.append(label)
+
+            if not labels:
+                labels = ["Code Block"]
 
             # Navigation
             nav_hints = {}
-            if hasattr(self.storage, 'get_neighbor_metadata'):
-                nav_hints = self.storage.get_neighbor_metadata(doc['id'])
+            if hasattr(self.storage, "get_neighbor_metadata"):
+                nav_hints = self.storage.get_neighbor_metadata(doc["id"])
 
-            results.append(RetrievedContext(
-                node_id=doc['id'],
-                snapshot_id=snapshot_id,
-                file_path=doc.get('file_path', 'unknown'),
-                semantic_labels=list(set(labels)),
-                content=doc.get('content', ''),
-                score=doc.get('final_rrf_score', doc.get('score', 0.0)),
-                retrieval_method="+".join(sorted(list(doc.get('methods', ['unknown'])))),
-                start_line=doc.get('start_line', 0),
-                end_line=doc.get('end_line', 0),
-                repo_id=doc.get('repo_id', ''),
-                branch=doc.get('branch', 'main'),
-                parent_context=ctx_info['parent_context'],
-                outgoing_definitions=ctx_info['outgoing_definitions'],
-                language=doc.get('language', 'text'),
-                nav_hints=nav_hints
-            ))
+            results.append(
+                RetrievedContext(
+                    node_id=doc["id"],
+                    snapshot_id=snapshot_id,
+                    file_path=doc.get("file_path", "unknown"),
+                    semantic_labels=list(set(labels)),
+                    content=doc.get("content", ""),
+                    score=doc.get("final_rrf_score", doc.get("score", 0.0)),
+                    retrieval_method="+".join(sorted(list(doc.get("methods", ["unknown"])))),
+                    start_line=doc.get("start_line", 0),
+                    end_line=doc.get("end_line", 0),
+                    repo_id=doc.get("repo_id", ""),
+                    branch=doc.get("branch", "main"),
+                    parent_context=ctx_info["parent_context"],
+                    outgoing_definitions=ctx_info["outgoing_definitions"],
+                    language=doc.get("language", "text"),
+                    nav_hints=nav_hints,
+                )
+            )
         return results

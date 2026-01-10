@@ -1,5 +1,3 @@
-import os
-
 from crader.parsing import parser as parser_module
 from crader.providers.metadata import LocalMetadataProvider
 
@@ -72,4 +70,3 @@ def test_safe_read_file_rejects_large_files(tmp_path, monkeypatch):
     content, error = parser._safe_read_file(str(file_path))
     assert content is None
     assert "File too large" in error
-

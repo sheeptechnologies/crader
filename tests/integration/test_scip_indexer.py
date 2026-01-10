@@ -1,5 +1,3 @@
-import os
-
 from crader.graph.indexers.scip import (
     DiskSymbolTable,
     SCIPIndexer,

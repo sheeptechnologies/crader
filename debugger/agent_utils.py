@@ -1,34 +1,41 @@
-import logging
-import uuid
 import json
-from typing import Optional, List, Union, Dict, Any
-from pydantic import BaseModel, Field
-from langchain_openai import ChatOpenAI
-from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.prebuilt import create_react_agent
-from langgraph.checkpoint.memory import MemorySaver
+import logging
+from typing import Dict, List, Optional, Union
 
-from src.crader.retriever import CodeRetriever
-from src.crader.reader import CodeReader
-from src.crader.navigator import CodeNavigator
-from src.crader.schema import VALID_ROLES, VALID_CATEGORIES
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import create_react_agent
+from pydantic import BaseModel, Field
+
 from debugger.database import get_storage
+from src.crader.navigator import CodeNavigator
 from src.crader.providers.embedding import OpenAIEmbeddingProvider
+from src.crader.reader import CodeReader
+from src.crader.retriever import CodeRetriever
+from src.crader.schema import VALID_CATEGORIES, VALID_ROLES
 
 logger = logging.getLogger(__name__)
 
 # --- Tool Input Schemas ---
 
+
 class SearchFiltersInput(BaseModel):
     path_prefix: Optional[Union[str, List[str]]] = Field(None, description="Filtra per cartella.")
     language: Optional[Union[str, List[str]]] = Field(None, description="Filtra per linguaggio.")
-    role: Optional[Union[VALID_ROLES, List[VALID_ROLES]]] = Field(None, description="Include ruoli specifici (SOLO se esplicitamente richiesto/noto).")
+    role: Optional[Union[VALID_ROLES, List[VALID_ROLES]]] = Field(
+        None, description="Include ruoli specifici (SOLO se esplicitamente richiesto/noto)."
+    )
     exclude_role: Optional[Union[VALID_ROLES, List[VALID_ROLES]]] = Field(None, description="Esclude ruoli.")
     category: Optional[Union[VALID_CATEGORIES, List[VALID_CATEGORIES]]] = Field(None, description="Include categorie.")
-    exclude_category: Optional[Union[VALID_CATEGORIES, List[VALID_CATEGORIES]]] = Field(None, description="Esclude categorie.")
+    exclude_category: Optional[Union[VALID_CATEGORIES, List[VALID_CATEGORIES]]] = Field(
+        None, description="Esclude categorie."
+    )
+
 
 # --- RepoAgent Class ---
+
 
 class RepoAgent:
     def __init__(self, repo_id: str):
@@ -36,15 +43,15 @@ class RepoAgent:
         self.storage = get_storage()
         # Initialize providers - assuming OpenAI is configured via env vars
         self.provider = OpenAIEmbeddingProvider(model="text-embedding-3-small")
-        
+
         # We initialize facade components but tools will use them
         self.retriever = CodeRetriever(self.storage, self.provider)
         self.reader = CodeReader(self.storage)
         self.navigator = CodeNavigator(self.storage)
-        
+
         self.tools = self._create_tools()
         self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-        
+
         self.system_prompt = f"""
         Sei un Senior Software Engineer che analizza la repository.
         Hai accesso a un Knowledge Graph avanzato.
@@ -61,7 +68,7 @@ class RepoAgent:
         
         Rispondi in modo conciso e tecnico.
         """
-        
+
         # In-memory checkpointer for this session
         self.checkpointer = MemorySaver()
         self.agent_executor = create_react_agent(self.llm, self.tools, checkpointer=self.checkpointer)
@@ -75,7 +82,7 @@ class RepoAgent:
 
     def _create_tools(self):
         # Closure to access self
-        
+
         @tool
         def search_codebase(query: str, filters: Optional[SearchFiltersInput] = None):
             """
@@ -89,32 +96,25 @@ class RepoAgent:
                 # Use active snapshot implicitly via retriever or pass it
                 snap_id = self.active_snapshot_id
                 results = self.retriever.retrieve(
-                    query, 
-                    repo_id=self.repo_id, 
-                    snapshot_id=snap_id,
-                    limit=5, 
-                    strategy="hybrid", 
-                    filters=f_dict
+                    query, repo_id=self.repo_id, snapshot_id=snap_id, limit=5, strategy="hybrid", filters=f_dict
                 )
-                
+
                 # FALLBACK LOGIC: If filters were used and no results found, try without filters
                 if not results and f_dict:
                     logger.info(f"🔎 Agent Search: No results with filters {f_dict}. Retrying raw...")
                     results = self.retriever.retrieve(
-                        query, 
-                        repo_id=self.repo_id, 
-                        snapshot_id=snap_id,
-                        limit=5, 
-                        strategy="hybrid", 
-                        filters=None
+                        query, repo_id=self.repo_id, snapshot_id=snap_id, limit=5, strategy="hybrid", filters=None
                     )
                     if results:
-                        return f"⚠️ Nessun risultato con i filtri {f_dict}, ma ho trovato questi risultati generali:\n" + "\n".join([r.render() for r in results])
+                        return (
+                            f"⚠️ Nessun risultato con i filtri {f_dict}, ma ho trovato questi risultati generali:\n"
+                            + "\n".join([r.render() for r in results])
+                        )
 
                 if not results:
                     logger.info("🔎 Agent Search: No results found.")
                     return "Nessun risultato trovato."
-                
+
                 logger.info(f"🔎 Agent Search: Found {len(results)} results.")
                 return "\n".join([r.render() for r in results])
             except Exception as e:
@@ -127,7 +127,8 @@ class RepoAgent:
             try:
                 snap_id = self.active_snapshot_id
                 data = self.reader.read_file(snap_id, file_path, start_line, end_line)
-                if not data: return "File non trovato o vuoto."
+                if not data:
+                    return "File non trovato o vuoto."
                 return f"File: {data['file_path']}\nContent:\n{data['content']}"
             except Exception as e:
                 return f"Errore lettura: {e}"
@@ -144,10 +145,11 @@ class RepoAgent:
                 refs = self.navigator.analyze_impact(node_id)
                 if refs:
                     report.append(f"⬅️ CALLED BY ({len(refs)}):")
-                    for r in refs[:5]: report.append(f"   - {r['file']} L{r['line']} ({r['relation']})")
+                    for r in refs[:5]:
+                        report.append(f"   - {r['file']} L{r['line']} ({r['relation']})")
                 else:
                     report.append("⬅️ CALLED BY: None detected.")
-                
+
                 # 2. Contesto (Dove sono?)
                 parent = self.navigator.read_parent_chunk(node_id)
                 if parent:
@@ -162,46 +164,54 @@ class RepoAgent:
     async def stream_chat(self, message: str, thread_id: str):
         config = {"configurable": {"thread_id": thread_id}}
         inputs = {"messages": [SystemMessage(content=self.system_prompt), HumanMessage(content=message)]}
-        
+
         try:
             # Unlike the test which prints, here we yield ndjson events for the frontend
             async for event in self.agent_executor.astream(inputs, config=config):
-                
                 # 'agent' event contains the AI message (thought or final answer)
-                if 'agent' in event:
-                    msg = event['agent']['messages'][-1]
+                if "agent" in event:
+                    msg = event["agent"]["messages"][-1]
                     if msg.content:
-                        yield json.dumps({
-                            "type": "message",
-                            "content": msg.content
-                        }) + "\n"
-                    
-                    if getattr(msg, 'tool_calls', None):
+                        yield json.dumps({"type": "message", "content": msg.content}) + "\n"
+
+                    if getattr(msg, "tool_calls", None):
                         for tc in msg.tool_calls:
-                            yield json.dumps({
-                                "type": "tool_call",
-                                "name": tc.get('name'),
-                                "args": tc.get('args'),
-                                "id": tc.get('id')
-                            }) + "\n"
+                            yield (
+                                json.dumps(
+                                    {
+                                        "type": "tool_call",
+                                        "name": tc.get("name"),
+                                        "args": tc.get("args"),
+                                        "id": tc.get("id"),
+                                    }
+                                )
+                                + "\n"
+                            )
 
                 # 'tools' event contains the output of tool execution
-                if 'tools' in event:
-                    msg = event['tools']['messages'][-1]
-                    yield json.dumps({
-                        "type": "tool_output",
-                        "name": msg.name,
-                        "content": msg.content,
-                        "tool_call_id": msg.tool_call_id
-                    }) + "\n"
+                if "tools" in event:
+                    msg = event["tools"]["messages"][-1]
+                    yield (
+                        json.dumps(
+                            {
+                                "type": "tool_output",
+                                "name": msg.name,
+                                "content": msg.content,
+                                "tool_call_id": msg.tool_call_id,
+                            }
+                        )
+                        + "\n"
+                    )
 
         except Exception as e:
             logger.error(f"Agent error: {e}")
             yield json.dumps({"type": "error", "content": str(e)}) + "\n"
 
+
 # Global cache for agents to persist memory across requests (simple version)
 # In a real app, we'd persist checkpoints to DB.
 _agents: Dict[str, RepoAgent] = {}
+
 
 def get_agent(repo_id: str) -> RepoAgent:
     if repo_id not in _agents:

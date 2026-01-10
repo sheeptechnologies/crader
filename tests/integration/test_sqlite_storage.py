@@ -1,4 +1,3 @@
-import os
 import uuid
 
 from crader.storage.sqlite import SqliteGraphStorage
@@ -6,6 +5,7 @@ from crader.storage.sqlite import SqliteGraphStorage
 
 class SqliteStorageHarness(SqliteGraphStorage):
     __test__ = False
+
     def ensure_repository(self, url: str, branch: str, name: str) -> str:
         return self.register_repository(str(uuid.uuid4()), name, url, branch, "c1")
 
@@ -98,9 +98,7 @@ def test_sqlite_storage_search_and_content(tmp_path):
             ]
         )
 
-        storage.add_contents([
-            {"chunk_hash": "ch1", "content": "print('hello')"}
-        ])
+        storage.add_contents([{"chunk_hash": "ch1", "content": "print('hello')"}])
 
         storage.add_search_index(
             [

@@ -1,17 +1,19 @@
-import logging
 import contextlib
-from typing import Protocol, Generator, Any
+import logging
+from typing import Any, Generator, Protocol
+
 import psycopg
-from psycopg.rows import dict_row
 from pgvector.psycopg import register_vector
+from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 logger = logging.getLogger(__name__)
 
+
 class DatabaseConnector(Protocol):
     """
     Interface Contract for PostgreSQL connection providers.
-    
+
     This protocol ensures that the Persistence Layer (`GraphStorage`) operates agnostically regarding
     how connections are acquired (e.g., via a Threaded Pool, a Single Process setup, or a Serverless connection).
     """
@@ -22,10 +24,11 @@ class DatabaseConnector(Protocol):
         The implementation must handle lifecycle management (e.g., checking liveness, returning to pool vs closing).
         """
         ...
-    
+
     def close(self):
         """Releases all underlying resources (pools, sockets)."""
         ...
+
 
 class PooledConnector:
     """
@@ -40,6 +43,7 @@ class PooledConnector:
     *   **Vector Support**: Automatically registers `pgvector` codecs on new connections.
     *   **Resilience**: Blocks until a connection is available or the pool is ready.
     """
+
     def __init__(self, dsn: str, min_size: int = 4, max_size: int = 20):
         """
         Initializes the connection pool.
@@ -54,11 +58,8 @@ class PooledConnector:
             conninfo=dsn,
             min_size=min_size,
             max_size=max_size,
-            kwargs={
-                "row_factory": dict_row,
-                "autocommit": True 
-            },
-            configure=self._configure
+            kwargs={"row_factory": dict_row, "autocommit": True},
+            configure=self._configure,
         )
         # Block until at least one connection is established to ensure system readiness ("Fail Fast")
         self.pool.wait()
@@ -68,7 +69,7 @@ class PooledConnector:
         try:
             register_vector(conn)
         except psycopg.ProgrammingError:
-            pass 
+            pass
 
     @contextlib.contextmanager
     def get_connection(self):
@@ -83,18 +84,20 @@ class PooledConnector:
         """Gracefully shuts down the pool, closing all open sockets."""
         self.pool.close()
 
+
 class SingleConnector:
     """
     Persistent Single-Connection implementation.
 
     **Use Case**:
-    Designed for **Worker Processes** (multiprocessing spawn) that live to execute long-running, 
-    sequential batch operations (like `COPY` ingestion). Avoids the overhead and complexity of a pool 
+    Designed for **Worker Processes** (multiprocessing spawn) that live to execute long-running,
+    sequential batch operations (like `COPY` ingestion). Avoids the overhead and complexity of a pool
     inside a single-threaded independent worker.
 
     **Stability Features**:
     *   **Auto-Reconnect**: Detects broken pipes/closed sockets and transparently reconnects before yielding.
     """
+
     def __init__(self, dsn: str):
         self.dsn = dsn
         self.conn: Any = None
@@ -102,11 +105,7 @@ class SingleConnector:
 
     def _connect(self):
         """Opens a direct TCP socket to PostgreSQL and registers extensions."""
-        self.conn = psycopg.connect(
-            self.dsn, 
-            autocommit=True, 
-            row_factory=dict_row
-        )
+        self.conn = psycopg.connect(self.dsn, autocommit=True, row_factory=dict_row)
         try:
             register_vector(self.conn)
         except psycopg.ProgrammingError:
@@ -121,7 +120,7 @@ class SingleConnector:
         if self.conn.closed:
             logger.warning("⚠️ SingleConnector: Connection lost. Reconnecting...")
             self._connect()
-        
+
         yield self.conn
 
     def close(self):

@@ -8,7 +8,7 @@ class FakeStorage:
         self.calls = []
 
     def get_neighbor_chunk(self, node_id, direction):
-        return {"id": node_id, "metadata": "{\"semantic_matches\": [{\"category\": \"role\", \"label\": \"Service\"}]}"}
+        return {"id": node_id, "metadata": '{"semantic_matches": [{"category": "role", "label": "Service"}]}'}
 
     def get_context_neighbors(self, node_id):
         return {"parents": [{"id": "p1", "metadata": {"semantic_matches": []}}]}

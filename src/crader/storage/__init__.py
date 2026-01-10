@@ -1,3 +1,3 @@
-from .base import GraphStorage
-from .sqlite import SqliteGraphStorage
-from .postgres import PostgresGraphStorage
+from .base import GraphStorage as GraphStorage
+from .postgres import PostgresGraphStorage as PostgresGraphStorage
+from .sqlite import SqliteGraphStorage as SqliteGraphStorage

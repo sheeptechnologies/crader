@@ -1,8 +1,10 @@
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
+
 from .storage.base import GraphStorage
 
 logger = logging.getLogger(__name__)
+
 
 class CodeNavigator:
     """
@@ -22,7 +24,7 @@ class CodeNavigator:
     Attributes:
         storage (GraphStorage): The storage backend implementing graph query primitives.
     """
-    
+
     def __init__(self, storage: GraphStorage):
         self.storage = storage
 
@@ -39,30 +41,34 @@ class CodeNavigator:
         Returns:
             Dict[str, Any]: The input dictionary enriched with a 'type' field and parsed 'metadata'.
         """
-        if not node_data: return node_data
-        
-        meta = node_data.get('metadata', {})
+        if not node_data:
+            return node_data
+
+        meta = node_data.get("metadata", {})
         # If it comes from SQLite, it might be a string
         if isinstance(meta, str):
             import json
-            try: meta = json.loads(meta)
-            except: meta = {}
-            node_data['metadata'] = meta
+
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+            node_data["metadata"] = meta
 
         # Derive a readable Label (replacement for the old 'type')
-        matches = meta.get('semantic_matches', [])
+        matches = meta.get("semantic_matches", [])
         primary_label = "Code Block"
-        
+
         # Priority: Role > Type
         for m in matches:
-            if m.get('category') == 'role':
-                primary_label = m.get('label') or m.get('value')
+            if m.get("category") == "role":
+                primary_label = m.get("label") or m.get("value")
                 break
-            elif m.get('category') == 'type':
-                primary_label = m.get('label') or m.get('value')
-        
+            elif m.get("category") == "type":
+                primary_label = m.get("label") or m.get("value")
+
         # Inject the 'type' (or 'label') field for client convenience
-        node_data['type'] = primary_label
+        node_data["type"] = primary_label
         return node_data
 
     def read_neighbor_chunk(self, node_id: str, direction: str = "next") -> Optional[Dict[str, Any]]:
@@ -77,13 +83,13 @@ class CodeNavigator:
 
         Returns:
             Optional[Dict[str, Any]]: The adjacent node data, or None if the file boundary is reached.
-        
+
         Raises:
             ValueError: If `direction` is invalid.
         """
         if direction not in ["next", "prev"]:
             raise ValueError("Direction must be 'next' or 'prev'.")
-            
+
         chunk = self.storage.get_neighbor_chunk(node_id, direction)
         return self._enrich_node_info(chunk)
 
@@ -102,9 +108,10 @@ class CodeNavigator:
         """
         neighbors = self.storage.get_context_neighbors(node_id)
         parents = neighbors.get("parents", [])
-        
-        if not parents: return None
-        
+
+        if not parents:
+            return None
+
         # Enrich the first parent found
         return self._enrich_node_info(parents[0])
 
@@ -141,13 +148,14 @@ class CodeNavigator:
         # 1. Retrieve parent metadata (O(1))
         nav = self.storage.get_neighbor_metadata(node_id)
         parent_info = nav.get("parent")
-        if not parent_info: return None
-        
+        if not parent_info:
+            return None
+
         # 2. Retrieve content
         # Note: We might want to use a specific method to get only the signature
         # but for now we read the chunk.
-        
-        # Optimization: We could use get_chunk_by_id if implemented, 
+
+        # Optimization: We could use get_chunk_by_id if implemented,
         # here we rely on the generic reader or do a direct query.
         return self.storage.get_outgoing_calls(node_id)
 
@@ -166,25 +174,24 @@ class CodeNavigator:
             Dict[str, Any]: A dictionary representing the call tree rooted at `node_id`.
         """
         logger.info(f"🕸️ Traversing pipeline for: {node_id}")
-        
+
         def _walk(curr_id, depth):
-            if depth > max_depth: return None 
-            
+            if depth > max_depth:
+                return None
+
             calls = self.storage.get_outgoing_calls(curr_id, limit=10)
-            if not calls: return {}
-            
+            if not calls:
+                return {}
+
             tree = {}
             for call in calls:
                 child_data = {
-                    "file": call['file'],
-                    "type": call['relation'], # Fixed: use 'relation' instead of 'target_type'
-                    "symbol": call.get('symbol'),
-                    "children": _walk(call['target_id'], depth + 1)
+                    "file": call["file"],
+                    "type": call["relation"],  # Fixed: use 'relation' instead of 'target_type'
+                    "symbol": call.get("symbol"),
+                    "children": _walk(call["target_id"], depth + 1),
                 }
-                tree[call['target_id']] = child_data
+                tree[call["target_id"]] = child_data
             return tree
 
-        return {
-            "root_node": node_id,
-            "call_graph": _walk(node_id, 1)
-        }
+        return {"root_node": node_id, "call_graph": _walk(node_id, 1)}

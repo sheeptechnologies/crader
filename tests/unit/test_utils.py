@@ -1,7 +1,7 @@
 import subprocess
 
-from crader.utils.hashing import compute_file_hash
 from crader.utils.git import GitClient
+from crader.utils.hashing import compute_file_hash
 
 
 def test_compute_file_hash_is_deterministic():

@@ -1,5 +1,5 @@
 from crader.graph.builder import KnowledgeGraphBuilder
-from crader.models import ChunkNode, ChunkContent, CodeRelation
+from crader.models import ChunkContent, ChunkNode, CodeRelation
 
 
 class FakeStorage:

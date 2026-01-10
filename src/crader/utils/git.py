@@ -1,6 +1,6 @@
 import subprocess
-import os
-from typing import Optional, List
+from typing import List, Optional
+
 
 class GitClient:
     def __init__(self, repo_path: str):
@@ -24,11 +24,15 @@ class GitClient:
         return self._run_git(["rev-parse", "--abbrev-ref", "HEAD"]) or "unknown"
 
     def get_changed_files(self, since_commit: str) -> List[str]:
-        if not since_commit or since_commit == "unknown": return []
+        if not since_commit or since_commit == "unknown":
+            return []
         try:
             output = subprocess.check_output(
                 ["git", "diff", "--name-only", since_commit, "HEAD"],
-                cwd=self.repo_path, text=True, stderr=subprocess.PIPE
+                cwd=self.repo_path,
+                text=True,
+                stderr=subprocess.PIPE,
             )
             return [f.strip() for f in output.splitlines() if f.strip()]
-        except subprocess.CalledProcessError: return []
+        except subprocess.CalledProcessError:
+            return []
