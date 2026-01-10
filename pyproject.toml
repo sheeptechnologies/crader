@@ -21,6 +21,7 @@ dependencies = [
     "opentelemetry-api>=1.0.0",
     "pgvector>=0.2.0",
     "psycopg>=3.1.0",
+    "psycopg-pool>=3.1.0",
     "pydantic>=2.0.0",
     "tenacity>=8.0.0"
 ]
