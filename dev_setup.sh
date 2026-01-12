@@ -136,7 +136,7 @@ fi
 python3 -m pip install --upgrade pip -q
 
 echo -e "\n${GREEN}🐍 Installing Python dependencies...${NC}"
-python3 -m pip install -r requirements.txt
+python3 -m pip install -r requirements.txt #no more requirements.txt
 
 echo -e "\n${BLUE}=========================================="
 echo -e "   🚀 Installation Complete!"

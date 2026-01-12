@@ -8,7 +8,7 @@ from sqlalchemy import engine_from_config, pool
 # Leggiamo l'URL dall'ambiente.
 # Se non c'è, usiamo un default locale per sviluppo (comodo, ma sicuro perché locale)
 DEFAULT_DEV_URL = "postgresql://sheep_user:sheep_password@localhost:5433/sheep_index"
-db_url = os.getenv("SHEEP_INDEX_DB_URL", DEFAULT_DEV_URL)
+db_url = os.getenv("CRADER_DB_URL", DEFAULT_DEV_URL)
 
 # Forza l'uso di psycopg2 se non specificato (per compatibilità SQLAlchemy)
 if db_url.startswith("postgresql://") and "psycopg" not in db_url:

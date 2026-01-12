@@ -27,6 +27,8 @@ dependencies = [
     "networkx>=3.0",
     "tree-sitter>=0.21.3",
     "tree-sitter-language-pack",
+    "alembic>=1.7.0",
+    "click>=8.0",
     "GitPython>=3.1",
     "openai>=1.0.0",
     "opentelemetry-api>=1.0.0",
@@ -34,7 +36,8 @@ dependencies = [
     "psycopg>=3.1.0",
     "psycopg-pool>=3.1.0",
     "pydantic>=2.0.0",
-    "tenacity>=8.0.0"
+    "tenacity>=8.0.0",
+    "python-dotenv>=1.0.0"
 ]
 
 [project.urls]
@@ -100,9 +103,7 @@ ignore = []
 "src/crader/graph/builder.py" = ["E501"]
 "src/crader/graph/indexers/scip.py" = ["E501", "E722", "E741", "F841"]
 "src/crader/embedding/embedder.py" = ["F841", "E501", "E722"]
-"debugger/**/*.py" = ["E402", "E501", "W291", "W293", "E722"]
 "src/crader/config.py" = ["W291"]
-"scripts/**" = ["E402", "E501", "E701", "E702", "E722", "E741", "F401", "F811", "F841", "W291", "W292", "W293"]
 
 [tool.mypy]
 python_version = "3.10"
@@ -114,4 +115,4 @@ no_implicit_optional = false
 strict_optional = false
 allow_redefinition = true
 disable_error_code = ["attr-defined", "name-defined", "assignment", "arg-type", "misc", "override", "list-item", "return-value", "call-arg", "var-annotated", "index", "union-attr"]
-exclude = ["scripts", "debugger", "sheep_data"]
+exclude = ["sheep_data"]

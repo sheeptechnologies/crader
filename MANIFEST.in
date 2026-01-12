@@ -1,15 +1,24 @@
 include LICENSE
 include README.md
 include pyproject.toml
-include requirements.txt
-include install.sh
 
 recursive-include src/crader *.py
 recursive-include src/crader *.typed
 
-exclude tests
-recursive-exclude tests *
-recursive-exclude scripts *
-recursive-exclude debugger *
-recursive-exclude site *
-recursive-exclude docs *
+# Include DB migrations and config
+recursive-include src/crader/db *
+
+# Exclude development files and directories
+exclude Makefile
+exclude dev_setup.sh
+exclude mkdocs.yml
+exclude requirements.txt
+exclude install.sh
+exclude .gitignore
+exclude .antigravityignore
+exclude .env.example
+
+prune tests
+prune docs
+prune site
+prune .github

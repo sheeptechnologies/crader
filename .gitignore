@@ -7,6 +7,7 @@ env/
 venv/
 .venv/
 dist/
+site/
 build/
 *.egg-info/
 *.scip

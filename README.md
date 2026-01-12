@@ -293,6 +293,27 @@ indexer = CodebaseIndexer(
 
 
 
+## Configuration
+
+You can configure `crader` by passing arguments via CLI or setting environment variables in a `.env` file (loaded from the current working directory).
+
+| Variable | CLI Flag | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `CRADER_DB_URL` | `--db-url` | `None` | Connection string for the PostgreSQL database (e.g. `postgresql://user:pass@localhost:5432/dbname`) |
+| `CRADER_REPO_VOLUME` | N/A | `./sheep_data/repositories` | Local path where git repositories are cloned |
+
+### CLI Usage
+
+```bash
+# Using CLI arguments
+crader index https://github.com/user/repo --db-url postgresql://...
+
+# Using Environment Variables (.env)
+# Create a .env file:
+# CRADER_DB_URL=postgresql://user:pass@localhost:5432/dbname
+crader index https://github.com/user/repo
+```
+
 ## Contributing
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:

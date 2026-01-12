@@ -129,7 +129,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         self._batch_size = batch_size
         self._max_concurrency = max_concurrency
 
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = os.getenv("CRADER_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
         if not api_key:
             logger.warning("⚠️ OPENAI_API_KEY non trovata. Le chiamate falliranno.")
 

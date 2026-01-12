@@ -5,7 +5,7 @@ import crader.config as config
 
 
 def test_config_uses_env_path(monkeypatch, tmp_path):
-    monkeypatch.setenv("REPO_VOLUME", str(tmp_path))
+    monkeypatch.setenv("CRADER_REPO_VOLUME", str(tmp_path))
     module = importlib.reload(config)
     assert module.STORAGE_ROOT == str(tmp_path)
 

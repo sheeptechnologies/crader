@@ -266,7 +266,7 @@ class CodebaseIndexer:
         self.branch = branch
         self.worker_telemetry_init = worker_telemetry_init
 
-        self.db_url = db_url or os.getenv("DB_URL")
+        self.db_url = db_url or os.getenv("CRADER_DB_URL")
         if not self.db_url:
             raise ValueError("DB_URL non fornito e non trovato nelle variabili d'ambiente.")
 
