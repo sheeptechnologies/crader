@@ -19,3 +19,5 @@ build/
 node_modules/
 sheep_data/
 htmlcov/
+
+.pypirc

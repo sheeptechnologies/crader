@@ -26,6 +26,8 @@ from .storage.postgres import PostgresGraphStorage
 from .storage.sqlite import SqliteGraphStorage
 from .volume_manager import GitVolumeManager
 
+__version__ = "0.1.1"
+
 __all__ = [
     "CodebaseIndexer",
     "CodeReader",

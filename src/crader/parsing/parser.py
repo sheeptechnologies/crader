@@ -7,7 +7,7 @@ from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 from opentelemetry import trace
 from tree_sitter import Node, Parser
-from tree_sitter_languages import get_language
+from tree_sitter_language_pack import get_language
 
 from ..models import ChunkContent, ChunkNode, CodeRelation, FileRecord
 from ..providers.metadata import GitMetadataProvider, LocalMetadataProvider, MetadataProvider
