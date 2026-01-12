@@ -7,6 +7,7 @@ recursive-include src/crader *.typed
 
 # Include DB migrations and config
 recursive-include src/crader/db *
+recursive-include src/crader/parsing/queries *.scm
 
 # Exclude development files and directories
 exclude Makefile

@@ -11,7 +11,8 @@ site/
 build/
 *.egg-info/
 *.scip
-
+.coverage
+.coverage.*
 *.db
 *.graphml
 *.db*

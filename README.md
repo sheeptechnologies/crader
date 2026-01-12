@@ -1,8 +1,8 @@
 # Crader
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Code Coverage](https://img.shields.io/badge/coverage-73%25-yellow.svg)](docs/testing/unit-tests-guide.md)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![Code Coverage](https://img.shields.io/badge/coverage-75%25-yellow.svg)](docs/testing/unit-tests-guide.md)
 
 **Enterprise-grade Code Intelligence for AI Agents**
 

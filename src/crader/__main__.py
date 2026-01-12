@@ -60,7 +60,7 @@ def upgrade(db_url):
     """Upgrade database schema to the latest version."""
     if not db_url:
         db_url = os.getenv("CRADER_DB_URL")
-    
+
     if not db_url:
         click.echo("Error: --db-url arg or CRADER_DB_URL env var required.", err=True)
         exit(1)

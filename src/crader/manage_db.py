@@ -1,7 +1,8 @@
-import os
 import logging
-from alembic.config import Config
+import os
+
 from alembic import command
+from alembic.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ def get_alembic_config(db_url: str = None):
         raise FileNotFoundError(f"Alembic config not found at {ALEMBIC_INI_PATH}")
 
     alembic_cfg = Config(ALEMBIC_INI_PATH)
-    
+
     # Point 'script_location' to the internal 'db' folder
     # This overrides the value in alembic.ini (which is 'db') to be absolute
     script_location = os.path.join(BASE_DIR, "db")

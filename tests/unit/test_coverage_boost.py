@@ -1,13 +1,10 @@
-import os
-import io
-import json
+from unittest.mock import MagicMock, mock_open, patch
+
 import pytest
-import sqlite3
-import subprocess
-from unittest.mock import MagicMock, patch, mock_open
 
 # --- PARSER TESTS ---
 from crader.parsing.parser import TreeSitterRepoParser
+
 
 class TestParserCoverage:
     @patch("crader.parsing.parser.get_language")
@@ -18,11 +15,11 @@ class TestParserCoverage:
                 raise Exception("Boom")
             return MagicMock()
         mock_get_lang.side_effect = side_effect
-        
+
         parser = TreeSitterRepoParser("/tmp")
         assert ".py" not in parser.languages
         assert ".js" in parser.languages  # Assuming defaults load
-    
+
     def test_safe_read_file_binary(self):
         parser = TreeSitterRepoParser("/tmp")
         with patch("builtins.open", mock_open(read_data=b"\0binary")):
@@ -53,10 +50,10 @@ class TestParserCoverage:
         mock_lang.query.side_effect = Exception("Compile error")
         parser.languages["python"] = mock_lang
         parser.LANGUAGE_MAP[".py"] = "python" # ensure mapping
-        
+
         # Mock load query
         parser._load_query_for_language = MagicMock(return_value="(query)")
-        
+
         parser._get_semantic_captures(MagicMock(), "python")
         assert parser._query_cache["python"] is None
 
@@ -71,7 +68,7 @@ class TestParserCoverage:
             (mock_node, "role.class")
         ]
         parser._query_cache["python"] = mock_query
-        
+
         mock_tree = MagicMock()
         res = parser._get_semantic_captures(mock_tree, "python")
         assert len(res) == 1
@@ -79,7 +76,8 @@ class TestParserCoverage:
 
 
 # --- SCIP TESTS ---
-from crader.graph.indexers.scip import DiskSymbolTable, SCIPRunner, SCIPIndexer
+from crader.graph.indexers.scip import DiskSymbolTable, SCIPIndexer, SCIPRunner
+
 
 class TestSCIPCoverage:
     def test_disk_symbol_table_close_error(self):
@@ -87,13 +85,13 @@ class TestSCIPCoverage:
         # Mock os.remove to fail
         with patch("os.remove", side_effect=OSError("Remove fail")):
             table.close() # Should not raise
-            
+
     def test_disk_symbol_table_get_fallback(self):
         table = DiskSymbolTable()
         # Add global definition (empty scope)
-        table.cursor.execute("INSERT INTO defs VALUES (?, ?, ?, ?, ?, ?, ?)", 
+        table.cursor.execute("INSERT INTO defs VALUES (?, ?, ?, ?, ?, ?, ?)",
                              ("MySym", "", "file.py", 1, 0, 1, 10))
-        
+
         # Search with current_file scope (should miss and fallback to global)
         f, rng = table.get("MySym", "other.py")
         assert f == "file.py"
@@ -103,7 +101,7 @@ class TestSCIPCoverage:
         runner = SCIPRunner("/tmp")
         with patch("os.walk") as mock_walk:
             mock_walk.return_value = [("/root", ["dir_to_rem"], ["file_to_rem.log"])]
-            
+
             # 1. Directory removal failure
             with patch("shutil.rmtree", side_effect=OSError("Perm denied")):
                 # 2. File removal failure
@@ -114,7 +112,7 @@ class TestSCIPCoverage:
     @patch("shutil.which", return_value="/bin/scip")
     def test_scip_runner_run_single_index_failures(self, mock_which):
         runner = SCIPRunner("/tmp")
-        
+
         # Case 1: Subprocess returns non-zero
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stderr="Subprocess error")
@@ -129,27 +127,27 @@ class TestSCIPCoverage:
     @patch("shutil.which", return_value="/bin/scip")
     def test_scip_runner_stream_documents_errors(self, mock_which):
         runner = SCIPRunner("/tmp")
-        
+
         # Case: Malformed JSON output
         with patch("subprocess.Popen") as mock_popen:
             proc_mock = MagicMock()
             proc_mock.stdout = ["{valid_json: false}"] # Bad JSON
             proc_mock.wait.return_value = 0
             mock_popen.return_value = proc_mock
-            
+
             gen = runner.stream_documents([("/root", "index.scip")])
             assert list(gen) == [] # Should handle ValueError silently
 
     def test_scip_clean_symbol(self):
         indexer = SCIPIndexer("/tmp")
         # Test clean symbol logic
-        
+
         # 1. Simple local symbol
         assert indexer._clean_symbol("local 123") == "123"
-        
+
         # 2. Symbol with no language extension (just replaces separators)
         assert indexer._clean_symbol("pypi/pkg/module#Class") == "pypi.pkg.module.Class"
-        
+
         # 3. Symbol WITH language extension (should strip prefix)
         # "repo/src/file.py/MyClass" -> splits on ".py/" -> "MyClass"
         assert indexer._clean_symbol("repo/src/file.py/MyClass") == "MyClass"
@@ -157,20 +155,20 @@ class TestSCIPCoverage:
     def test_ensure_repository(self):
         mock_connector = MagicMock()
         storage = PostgresGraphStorage(mock_connector)
-        
+
         mock_conn = MagicMock()
         mock_connector.get_connection.return_value.__enter__.return_value = mock_conn
         mock_conn.execute.return_value.fetchone.return_value = {"id": "repo-uuid"}
-        
+
         rid = storage.ensure_repository("http://url", "main", "MyRepo")
         assert rid == "repo-uuid"
-        
+
     def test_prune_snapshot(self):
         mock_connector = MagicMock()
         storage = PostgresGraphStorage(mock_connector)
         mock_conn = MagicMock()
         mock_connector.get_connection.return_value.__enter__.return_value = mock_conn
-        
+
         storage.prune_snapshot("snap-1")
         mock_conn.execute.assert_called_with("DELETE FROM files WHERE snapshot_id = %s", ("snap-1",))
 
@@ -179,11 +177,11 @@ class TestSCIPCoverage:
         storage = PostgresGraphStorage(mock_connector)
         mock_conn = MagicMock()
         mock_connector.get_connection.return_value.__enter__.return_value = mock_conn
-        
+
         # Case 1: Found
         mock_conn.execute.return_value.fetchone.return_value = {"current_snapshot_id": "snap-active"}
         assert storage.get_active_snapshot_id("repo-1") == "snap-active"
-        
+
         # Case 2: Not found or null
         mock_conn.execute.return_value.fetchone.return_value = None
         assert storage.get_active_snapshot_id("repo-1") is None
@@ -191,16 +189,18 @@ class TestSCIPCoverage:
 
 # --- POSTGRES STORAGE TESTS ---
 import psycopg
+
 from crader.storage.postgres import PostgresGraphStorage
+
 
 class TestPostgresCoverage:
     def test_create_snapshot_unique_violation(self):
         mock_connector = MagicMock()
         storage = PostgresGraphStorage(mock_connector)
-        
+
         mock_conn = MagicMock()
         mock_connector.get_connection.return_value.__enter__.return_value = mock_conn
-        
+
         # First call (check existing) returns None
         # Second call (insert) raises UniqueViolation
         # Third call (update dirty flag) succeeds
@@ -209,7 +209,7 @@ class TestPostgresCoverage:
             psycopg.errors.UniqueViolation("Duplicate"), # Insert
             MagicMock() # Update
         ]
-        
+
         sid, is_new = storage.create_snapshot("repo-1", "sha-1")
         assert sid is None
         assert is_new is False
@@ -219,9 +219,9 @@ class TestPostgresCoverage:
         storage = PostgresGraphStorage(mock_connector)
         mock_conn = MagicMock()
         mock_connector.get_connection.return_value.__enter__.return_value = mock_conn
-        
+
         storage.activate_snapshot("repo-1", "snap-1", {"nodes": 10}, {"a.py": {}})
-        
+
         # Should execute 2 updates in transaction
         assert mock_conn.execute.call_count == 2
         assert mock_conn.transaction.called
@@ -231,7 +231,7 @@ class TestPostgresCoverage:
         storage = PostgresGraphStorage(mock_connector)
         mock_conn = MagicMock()
         mock_connector.get_connection.return_value.__enter__.return_value = mock_conn
-        
+
         storage.fail_snapshot("snap-1", "Failed")
         mock_conn.execute.assert_called_once()
         assert "failed" in mock_conn.execute.call_args[0][0]
@@ -239,19 +239,19 @@ class TestPostgresCoverage:
     def test_add_nodes_fast_error(self):
         mock_connector = MagicMock()
         storage = PostgresGraphStorage(mock_connector)
-        
+
         mock_conn = MagicMock()
         mock_connector.get_connection.return_value.__enter__.return_value = mock_conn
         mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
-        
+
         # Simulate COPY error
         mock_cursor.copy.side_effect = Exception("Copy failed")
-        
+
         nodes = [MagicMock(to_dict=lambda: {
-            "id": "1", "file_path": "a.py", "start_line": 1, "end_line": 2, 
+            "id": "1", "file_path": "a.py", "start_line": 1, "end_line": 2,
             "byte_range": [0, 10], "metadata": {}
         })]
-        
+
         with pytest.raises(Exception, match="Copy failed"):
             storage.add_nodes_fast(nodes)
 
@@ -260,8 +260,8 @@ class TestPostgresCoverage:
         storage = PostgresGraphStorage(mock_connector)
         mock_conn = MagicMock()
         mock_connector.get_connection.return_value.__enter__.return_value = mock_conn
-        
+
         mock_conn.execute.side_effect = Exception("DB Down")
-        
+
         res = storage.search_fts("query", 10, "snap-1")
         assert res == [] # Should catch and return empty
