@@ -278,6 +278,7 @@ class SCIPRunner:
 
                 logger.info(f"[SCIP] Indexing {project_root} with {indexer}...")
 
+                # Attempt 1
                 result = subprocess.run(
                     [indexer, "index", ".", "--output", tmp_idx],
                     cwd=project_root,
@@ -287,12 +288,32 @@ class SCIPRunner:
                     text=True,
                 )
 
+                # RETRY LOGIC for stubborn tools (like scip-python crashing on pyproject.toml)
+                if result.returncode != 0 and indexer == "scip-python":
+                     logger.warning(f"⚠️ [SCIP] {indexer} failed (code {result.returncode}). Retrying without pyproject.toml...")
+                     pyproj = os.path.join(project_root, "pyproject.toml")
+                     if os.path.exists(pyproj):
+                         try:
+                             os.remove(pyproj)
+                         except OSError:
+                             pass
+                         
+                         # Attempt 2
+                         result = subprocess.run(
+                            [indexer, "index", ".", "--output", tmp_idx],
+                            cwd=project_root,
+                            check=False,
+                            capture_output=True,
+                            env=env,
+                            text=True,
+                         )
+
                 span.set_attribute("scip.exit_code", result.returncode)
 
                 if result.returncode != 0:
                     span.set_status(Status(StatusCode.ERROR))
                     span.set_attribute("scip.stderr", result.stderr[:2000])  # Limit buffer size
-                    logger.error(f"❌ [SCIP FAIL] {indexer} exited with code {result.returncode}")
+                    logger.error(f"❌ [SCIP FAIL] {indexer} exited with code {result.returncode}\nSTDERR:\n{result.stderr}")
                     return None
 
                 if os.path.exists(tmp_idx):
