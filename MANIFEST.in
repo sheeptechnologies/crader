@@ -23,3 +23,4 @@ prune tests
 prune docs
 prune site
 prune .github
+prune tools

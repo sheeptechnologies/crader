@@ -77,6 +77,7 @@ testpaths = [
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
+norecursedirs = ["tools"]
 
 [tool.coverage.run]
 omit = [
@@ -89,6 +90,7 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 ignore = []
+exclude = ["tools", "sheep_data"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["E402"]
@@ -118,4 +120,4 @@ no_implicit_optional = false
 strict_optional = false
 allow_redefinition = true
 disable_error_code = ["attr-defined", "name-defined", "assignment", "arg-type", "misc", "override", "list-item", "return-value", "call-arg", "var-annotated", "index", "union-attr"]
-exclude = ["sheep_data", "build", "dist"]
+exclude = ["sheep_data", "build", "dist", "tools"]

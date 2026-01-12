@@ -23,3 +23,11 @@ sheep_data/
 htmlcov/
 
 .pypirc
+coverage.xml
+junit.xml
+test-results/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json

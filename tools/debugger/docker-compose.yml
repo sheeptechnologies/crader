@@ -1,0 +1,92 @@
+services:
+  # ----------------------------------------------------------------
+  # 1. DATABASE (PostgreSQL con Vector)
+  # ----------------------------------------------------------------
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: sheep_postgres
+    environment:
+      POSTGRES_USER: sheep_user
+      POSTGRES_PASSWORD: sheep_password
+      POSTGRES_DB: sheep_index
+    ports:
+      - "5433:5432" # Accesso DIRETTO (solo per debug/admin, non usare per l'app)
+    volumes:
+      - sheep_pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U sheep_user -d sheep_index" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    # Ottimizzazioni per write-heavy (opzionale ma consigliato per indexing massivo)
+    command: postgres -c 'max_connections=200' -c 'shared_buffers=1GB'
+
+  # ----------------------------------------------------------------
+  # 2. PGBOUNCER (Il "Centralino" per i Worker)
+  # ----------------------------------------------------------------
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    container_name: sheep_pgbouncer
+    environment:
+      # Credenziali per connettersi al DB reale
+      DB_USER: sheep_user
+      DB_PASSWORD: sheep_password
+      DB_HOST: db # Nome del servizio docker sopra
+      DB_NAME: sheep_index
+
+      # CONFIGURAZIONE CRUCIALE PER LA TUA LIBRERIA
+      POOL_MODE: transaction # I worker prendono la connessione solo per la durata della query/copy
+      MAX_CLIENT_CONN: 10000 # Accetta fino a 10.000 worker Python concorrenti
+      DEFAULT_POOL_SIZE: 40 # Usa solo 40 connessioni vere verso Postgres
+
+      # Autenticazione
+      AUTH_TYPE: plain # Semplice per dev/docker locale
+      ADMIN_USERS: sheep_user
+    ports:
+      - "6432:5432" # L'applicazione si connetterà QUI (localhost:6432)
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------
+  # 3. INTERFACCIA WEB (Opzionale)
+  # ----------------------------------------------------------------
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: sheep_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@sheep.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - db
+    volumes:
+      - sheep_pgadmin_data:/var/lib/pgadmin
+
+  # ----------------------------------------------------------------
+  # 4. OBSERVABILITY (Jaeger All-in-One)
+  # ----------------------------------------------------------------
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: sheep_jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true # Abilita ricezione tracce OTel
+    ports:
+      - "16686:16686" # UI Web (http://localhost:16686)
+      - "4317:4317" # OTLP gRPC receiver (dove spedisce Python)
+      - "4318:4318" # OTLP HTTP receiver
+    restart: unless-stopped
+
+volumes:
+  sheep_pg_data: # Persistenza Database
+  sheep_pgadmin_data: # Persistenza PgAdmin
+
+  # ----------------------------------------------------------------
+  # VOLUME CONDIVISO PER CACHE GIT
+  # ----------------------------------------------------------------
+  # Questo volume verrà montato dai tuoi worker container in futuro.
+  # Evita di riscaricare le repo da zero ogni volta che un container muore.
+  sheep_git_cache:
