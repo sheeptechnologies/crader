@@ -151,11 +151,13 @@ def delete_repo(repo_id: str):
         # Delete related data first to be safe if no cascade
         conn.execute("DELETE FROM node_embeddings WHERE repo_id = %s", (repo_id,))
         conn.execute(
-            "DELETE FROM nodes_fts WHERE node_id IN (SELECT id FROM nodes WHERE file_id IN (SELECT id FROM files WHERE repo_id = %s))",
+            "DELETE FROM nodes_fts WHERE node_id IN "
+            "(SELECT id FROM nodes WHERE file_id IN (SELECT id FROM files WHERE repo_id = %s))",
             (repo_id,),
         )
         conn.execute(
-            "DELETE FROM edges WHERE source_id IN (SELECT id FROM nodes WHERE file_id IN (SELECT id FROM files WHERE repo_id = %s))",
+            "DELETE FROM edges WHERE source_id IN "
+            "(SELECT id FROM nodes WHERE file_id IN (SELECT id FROM files WHERE repo_id = %s))",
             (repo_id,),
         )
         conn.execute("DELETE FROM nodes WHERE file_id IN (SELECT id FROM files WHERE repo_id = %s)", (repo_id,))

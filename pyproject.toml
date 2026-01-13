@@ -86,11 +86,11 @@ omit = [
 
 [tool.ruff]
 line-length = 120
+exclude = ["*.ipynb", "sheep_data"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 ignore = []
-exclude = ["tools", "sheep_data"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["E402"]
