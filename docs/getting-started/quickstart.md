@@ -1,124 +1,88 @@
 # Quickstart
 
-This guide will help you index a repository and perform your first semantic search in under 10 minutes.
+Index a repository and run a search in a few minutes.
 
-## Prerequisites
-
-*   **Docker** (for PostgreSQL)
-*   **Python 3.11+**
-*   **OpenAI API Key** (or another embedding provider)
-
-## 1. Start Infrastructure
-
-Use the provided `docker-compose.yml` to spin up PostgreSQL with `pgvector`:
+## 1. Start PostgreSQL (if needed)
 
 ```bash
-docker-compose up -d db
+docker run -d --name crader-postgres \
+  -e POSTGRES_USER=crader \
+  -e POSTGRES_PASSWORD=crader \
+  -e POSTGRES_DB=codebase \
+  -p 5432:5432 \
+  pgvector/pgvector:pg14
 ```
 
-## 2. Install Library
+## 2. Configure the database
 
 ```bash
-pip install -e .
+export CRADER_DB_URL="postgresql://crader:crader@localhost:5432/codebase"
+crader db upgrade
 ```
 
-## 3. Creating the Index (Python Script)
+## 3. Index a repository
 
-Create a file named `index_repo.py`. We will use the `CodebaseIndexer` to clone, parse, and embed the `flask` repository.
-
-```python
-import os
-import asyncio
-from code_graph_indexer.indexer import CodebaseIndexer
-from code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider
-
-# 1. Configuration
-DB_URL = "postgresql://sheep_user:sheep_password@localhost:6432/sheep_index"
-REPO_URL = "https://github.com/pallets/flask.git"
-BRANCH = "main"
-
-async def main():
-    # 2. Init Indexer
-    # The indexer manages cloning and DB connection pools automatically.
-    indexer = CodebaseIndexer(REPO_URL, BRANCH, db_url=DB_URL)
-    
-    # 3. Init Provider (Async)
-    # Use a cost-effective model like text-embedding-3-small
-    provider = OpenAIEmbeddingProvider(
-        model="text-embedding-3-small", 
-        max_concurrency=10
-    )
-    
-    try:
-        # 4. Phase 1: Indexing (Parsing & Graph Construction)
-        print("Starting Indexing (Parsing, SCIP)...")
-        snapshot_id = indexer.index(force=False)
-        print(f"Active Snapshot: {snapshot_id}")
-
-        # 5. Phase 2: Embedding (Async Pipeline)
-        print("Starting Embedding pipeline...")
-        async for update in indexer.embed(provider, batch_size=200):
-            status = update['status']
-            if status == 'embedding_progress':
-                print(f"   Processing... {update.get('total_embedded')} vectors", end='\r')
-            elif status == 'completed':
-                print(f"\nDone! New vectors: {update.get('newly_embedded')}")
-
-    finally:
-        indexer.close()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-Run it:
 ```bash
-export OPENAI_API_KEY="sk-..."
-python index_repo.py
+crader index https://github.com/pallets/flask.git --branch main
 ```
 
-## 4. Semantic Search
+This step parses files, builds chunks, and ingests cross-file relations via SCIP tooling. SCIP is currently the bottleneck for file-incremental indexing; the roadmap includes a Mycelium-based replacement (https://github.com/sheeptechnologies/mycelium.git). It does not generate embeddings.
 
-Now that the data is indexed, let's search it. Create `search.py`:
+## 4. Generate embeddings
 
 ```python
 import asyncio
-from code_graph_indexer.indexer import CodebaseIndexer
-from code_graph_indexer.retriever import CodeRetriever
-from code_graph_indexer.providers.embedding import OpenAIEmbeddingProvider
+from crader import CodebaseIndexer
+from crader.providers.embedding import OpenAIEmbeddingProvider
 
-DB_URL = "postgresql://sheep_user:sheep_password@localhost:6432/sheep_index"
-REPO_URL = "https://github.com/pallets/flask.git"
+repo_url = "https://github.com/pallets/flask.git"
+branch = "main"
+db_url = "postgresql://crader:crader@localhost:5432/codebase"
+
+indexer = CodebaseIndexer(repo_url=repo_url, branch=branch, db_url=db_url)
 
 async def main():
-    # We reuse the indexer to get access to storage
-    indexer = CodebaseIndexer(REPO_URL, "main", db_url=DB_URL)
     provider = OpenAIEmbeddingProvider(model="text-embedding-3-small")
-    
-    # Init Retriever
-    retriever = CodeRetriever(indexer.storage, provider)
-    
-    # Resolve Repository ID
-    repo_id = indexer.storage.get_repository(indexer.storage.ensure_repository(REPO_URL, "main", "flask"))['id']
-    
-    query = "How does request routing work?"
-    print(f"Searching for: '{query}'...")
-    
-    results = retriever.retrieve(
-        query, 
-        repo_id=repo_id, 
-        limit=3, 
-        strategy="hybrid"
-    )
-    
-    for r in results:
-        print("\n" + "="*50)
-        print(f"File: {r.file_path} (Line {r.start_line})")
-        print(f"Score: {r.score:.4f}")
-        print(f"Labels: {r.semantic_labels}")
-        print("-" * 50)
-        print(r.content[:200] + "...")
+    async for update in indexer.embed(provider, batch_size=200):
+        if update.get("status") == "completed":
+            print(update)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
+indexer.close()
 ```
+
+## 5. Search
+
+```python
+from crader import CodeRetriever
+from crader.providers.embedding import OpenAIEmbeddingProvider
+from crader.storage.connector import PooledConnector
+from crader.storage.postgres import PostgresGraphStorage
+
+db_url = "postgresql://crader:crader@localhost:5432/codebase"
+repo_url = "https://github.com/pallets/flask.git"
+branch = "main"
+
+connector = PooledConnector(dsn=db_url)
+storage = PostgresGraphStorage(connector)
+provider = OpenAIEmbeddingProvider(model="text-embedding-3-small")
+retriever = CodeRetriever(storage, provider)
+
+repo_id = storage.ensure_repository(
+    repo_url,
+    branch,
+    repo_url.rstrip("/").split("/")[-1].replace(".git", ""),
+)
+
+results = retriever.retrieve(
+    query="How does request routing work?",
+    repo_id=repo_id,
+    limit=3,
+    strategy="hybrid",
+)
+
+for hit in results:
+    print(hit.file_path, hit.start_line, hit.score)
+```
+
+Keyword search works without embeddings, but `CodeRetriever` still requires an embedding provider instance.

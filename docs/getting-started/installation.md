@@ -1,53 +1,44 @@
 # Installation
 
-This guide covers the prerequisites and steps to install **Crader** in your environment.
+This guide covers the system requirements and setup steps for Crader.
 
-## Prerequisites
+## Requirements
 
-Before installing the python library, ensure you have the following system components:
+- Python 3.10+
+- PostgreSQL with the pgvector extension
+- git
+- SCIP CLI tools for cross-file relations (current bottleneck for file-incremental indexing; see [Roadmap](../roadmap.md))
+- Optional: OpenAI API key if you use OpenAI embeddings
 
-1.  **Python 3.10+**: The codebase uses modern Python features like `asyncio` and type hinting.
-2.  **PostgreSQL 15+**: Required for robust data storage.
-3.  **pgvector**: The PostgreSQL extension for vector similarity search.
-4.  **Git**: Required for cloning and managing repositories.
-5.  **SCIP CLI** (Required): For advanced semantic indexing (LSIF).
-    *   Install via npm: `npm install -g @sourcegraph/scip-typescript @sourcegraph/scip-python` (etc.)
-
-## Installation
-
-### From Source
-
-The recommended way to install is directly from the source code, as it is an internal library.
+## Install the package
 
 ```bash
-git clone https://github.com/your-org/crader.git
-cd crader
-pip install .
+pip install crader
 ```
 
-### With Development Dependencies
+## Database setup
 
-If you plan to contribute or run tests:
+Set your database URL and run migrations:
 
 ```bash
-pip install -r requirements.txt
+export CRADER_DB_URL="postgresql://user:pass@localhost:5432/codebase"
+crader db upgrade
 ```
 
-## Configuration
+The migration enables the `vector` extension and creates all required tables.
 
-The library uses **Environment Variables** for configuration. You can set these in your shell or use a `.env` file.
+## Environment variables
 
-| Variable | Description | Default | Required |
-| :--- | :--- | :--- | :--- |
-| `DATABASE_URL` | PostgreSQL Connection String. | `postgresql://user:pass@localhost:5432/sheep` | **Yes** |
-| `OPENAI_API_KEY` | Key for generating embeddings (OpenAIProvider). | *None* | **Yes** |
-| `REPO_VOLUME` | Local directory where repos are cloned/cached. | `/var/tmp/sheep_volume` | No |
-| `LOG_LEVEL` | Python logging level (DEBUG, INFO). | `INFO` | No |
+- `CRADER_DB_URL`: PostgreSQL connection string (required by CLI and `CodebaseIndexer`).
+- `CRADER_REPO_VOLUME`: Root directory for cached repos and worktrees (defaults to `./sheep_data/repositories`).
+- `CRADER_OPENAI_API_KEY` or `OPENAI_API_KEY`: OpenAI credentials for embeddings.
 
-### Setting up PostgreSQL with pgvector
+## SCIP tooling
 
-Ensure your database has the `vector` extension enabled:
+SCIP relations require the CLI tools to be installed and available on PATH. This is currently the bottleneck for file-incremental indexing; the roadmap includes a Mycelium-based replacement (https://github.com/sheeptechnologies/mycelium.git). Install the ones you need for your languages, for example:
 
-```sql
-CREATE EXTENSION IF NOT EXISTS vector;
+```bash
+npm install -g @sourcegraph/scip @sourcegraph/scip-python @sourcegraph/scip-typescript
 ```
+
+Other indexers include `scip-java`, `scip-go`, `scip-rust`, `scip-php`, and `scip-clang`.

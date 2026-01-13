@@ -1,103 +1,65 @@
-# Indexer API Reference
+# Indexer API
 
-The `indexer` module is the command center of the library. It acts as the coordinator between the Git filesystem, the Parsing workers, the Embedding provider, and the Storage layer.
-
-::: src.code_graph_indexer.indexer
+`CodebaseIndexer` orchestrates repository indexing and embedding. It uses PostgreSQL for storage and the Git volume manager for repository worktrees.
 
 ## CodebaseIndexer
 
 ```python
-class CodebaseIndexer(repo_url: str, branch: str, db_url: Optional[str] = None, worker_telemetry_init: Optional[Callable] = None)
+from crader import CodebaseIndexer
+
+indexer = CodebaseIndexer(
+    repo_url="https://github.com/org/repo.git",
+    branch="main",
+    db_url="postgresql://user:pass@localhost:5432/codebase",
+)
 ```
 
-The persistent controller for a specific repository.
+### Constructor arguments
 
-### Constructor Arguments
+- `repo_url` (str): Git remote URL or any URL accepted by `git clone`.
+- `branch` (str): Branch or tag to index.
+- `db_url` (str, optional): PostgreSQL DSN. Falls back to `CRADER_DB_URL`.
+- `worker_telemetry_init` (callable, optional): Hook executed in worker processes.
 
-*   **`repo_url`** *(str)*:
-    The complete Git remote URL. Supports SSH (`git@...`) and HTTPS (`https://...`). This acts as part of the unique key for the repository.
-    
-*   **`branch`** *(str)*:
-    The target branch to index (e.g., `main`, `master`, `develop`).
-    
-*   **`db_url`** *(Optional[str])*:
-    A standard PostgreSQL connection string (`postgresql://server:port/db`). If not provided, it looks for `DATABASE_URL` in environment variables.
-    
-*   **`worker_telemetry_init`** *(Optional[Callable])*:
-    A hook function called at the start of every worker process. Useful for initializing tools like Sentry, OpenTelemetry, or custom logging config in parallel processes.
-
----
-
-### Methods
-
-#### `index`
+### index
 
 ```python
-def index(self, force: bool = False, auto_prune: bool = False) -> str
+snapshot_id = indexer.index(force=False, auto_prune=False)
 ```
 
-**Description:**
-Triggers the "Structure Analysis" phase. This involves cloning, parsing, and graph construction. This is a synchronous, blocking operation (though it uses internal parallelism).
+Runs parsing and relation extraction and stores results in the database.
 
-**Arguments:**
-*   `force` (bool): If `True`, ignores the "Stale Check". Even if the latest commit is already indexed, it will create a new Snapshot and re-parse everything. Useful for development or fixing corrupted indices.
-*   `auto_prune` (bool): If `True`, automatically sets old snapshots to `archived` or deletes them after successful indexing.
+- `force`: if `True`, create a new snapshot even if the commit is already indexed.
+- `auto_prune`: currently a placeholder. Old snapshots are not removed automatically.
 
-**Returns:**
-*   `snapshot_id` (str): The UUID of the newly created (or existing reused) snapshot.
+Returns the snapshot ID, or the string `"queued"` when another indexing run is in progress.
 
-**Raises:**
-*   `GitCommandError`: If cloning or fetching fails (e.g. auth error, network down).
-*   `DatabaseError`: If connection fails.
-
----
-
-#### `embed`
+### embed
 
 ```python
-async def embed(self, provider: EmbeddingProvider, batch_size: int = 1000, mock_api: bool = False, force_snapshot_id: str = None) -> AsyncGenerator[Dict[str, Any], None]
+async for update in indexer.embed(provider, batch_size=1000, mock_api=False, force_snapshot_id=None):
+    ...
 ```
 
-**Description:**
-Triggers the "Semantic Analysis" phase. This is an **Asynchronous Generator**. You must iterate over it to drive the process forward. It is decoupled from `index()` to allow for different scheduling (e.g., Index now, Embed tonight).
+Runs the asynchronous embedding pipeline. This does not run automatically during `index()`.
 
-**Arguments:**
-*   `provider` (EmbeddingProvider): An instance of a provider wrapper (e.g. `OpenAIEmbeddingProvider`).
-*   `batch_size` (int): Number of vectors to flush to DB in one transaction. Default 1000.
-*   `mock_api` (bool): If `True`, generates random vectors. STRICTLY FOR TESTING.
-*   `force_snapshot_id` (str): target a specific historical snapshot instead of the current one.
+- `provider`: an `EmbeddingProvider` implementation.
+- `batch_size`: staging batch size.
+- `mock_api`: generate random vectors for testing.
+- `force_snapshot_id`: embed a specific snapshot instead of the active one.
 
-**Yields:**
-A stream of status dictionaries.
-*   `{'status': 'staging_progress', 'total': 100, 'staged': 50}`
-*   `{'status': 'embedding_progress', 'total_to_embed': 500, 'total_embedded': 100}`
-*   `{'status': 'completed', 'newly_embedded': 450, 'recovered_from_history': 50}`
-
----
-
-#### `_init_worker_process` (Internal)
+### get_stats
 
 ```python
-def _init_worker_process(worktree_path: str, db_url: str)
+stats = indexer.get_stats()
 ```
 
-**Global State Initialization**:
-This static method is the entry point for every `multiprocessing.Process` spawned by the indexer.
-1.  disables Signals to avoid `KeyboardInterrupt` corruption.
-2.  Initializes a thread-local `TreeSitterRepoParser`.
-3.  Opens a **new** DB connection (as connections strictly cannot be shared across forks).
+Returns counters from the database (`files`, `total_nodes`, `embeddings`, `snapshots`, `repos`).
 
----
-
-## Utility: Pruning
-
-### `prune_snapshots`
+### close
 
 ```python
-def prune_snapshots(self, keep: int = 3)
+indexer.close()
 ```
 
-Maintenance method to keep the database size in check.
-*   Keeps the last `keep` (default 3) snapshots for this repository.
-*   Hard deletes older snapshots and cascades deletes to `nodes`, `edges`, and `embeddings`.
-*   **Warning**: This is destructive and irreversible.
+Closes the database connection pool.

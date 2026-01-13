@@ -1,71 +1,45 @@
 # Embedding API
 
-The embedding module manages the conversion of code chunks into high-dimensional vector representations. It is designed for massive throughput and cost efficiency.
-
-::: src.code_graph_indexer.embedding.embedder
+The embedding module generates vector embeddings for chunks. It runs asynchronously and uses a staging table to deduplicate work.
 
 ## CodeEmbedder
 
 ```python
-class CodeEmbedder
+from crader.embedding.embedder import CodeEmbedder
+
+embedder = CodeEmbedder(storage, provider)
 ```
 
-The asynchronous engine responsible for vectorization.
-
-### `run_indexing`
+### run_indexing
 
 ```python
-async def run_indexing(self, snapshot_id: str, ...) -> AsyncGenerator
+async for update in embedder.run_indexing(snapshot_id, batch_size=1000, mock_api=False):
+    ...
 ```
 
-Executes the embedding pipeline.
+Status updates include stages such as `init`, `staging_progress`, `deduplicating`, `embedding_progress`, and `completed`.
 
-### The Staging Pipeline
+### Prompt construction
 
-The embedder implements a customized **ETL (Extract, Transform, Load)** process to minimize calls to the expensive Embedding API (OpenAI/Vertex).
+`_compute_prompt_and_hash` builds the prompt and hash used for deduplication. The prompt includes:
 
-#### 1. Transform & Hash (CPU Parallel)
-Before touching the database, the system uses a `ProcessPoolExecutor` to prepare data in parallel.
-For each chunk, it computes a **Semantic Fingerprint** (`v_hash`).
-*   **Formula**: `SHA256(Filepath + Struct + Content + OutgoingDefs + IncomingDefs)`
-*   This hash represents the *exact* semantic state of the code.
+- File path, language, and category
+- Semantic roles and tags (from parser metadata)
+- Incoming definitions (symbols that resolve to this node)
+- Code content
 
-#### 2. Staging Load (Bulk I/O)
-The prepared data is loaded using `COPY` into a temporary table:
-```sql
-CREATE UNLOGGED TABLE temp_embedding_staging ...
-```
-*Unlogged tables are faster as they bypass the WAL (Write Ahead Log).*
+The SHA-256 hash of this prompt is stored as `vector_hash`.
 
-#### 3. Deduplication (SQL Set Logic)
-This is the core cost-saving mechanism.
-```sql
--- "Backfill": Find existing vectors for identical code
-UPDATE temp_embedding_staging t
-SET embedding = e.embedding, 
-    is_cached = true
-FROM node_embeddings e
-WHERE e.vector_hash = t.vector_hash;
-```
-If you move a file, or rename a folder, the `vector_hash` might change (due to path), but if the content is stable, we could potentially relax the hash strictness. Currently, it is strict.
+## EmbeddingProvider
 
-#### 4. Delta Processing (Async Workers)
-Only rows where `embedding IS NULL` are fetched.
-*   **Producer**: Pushes batches to an `asyncio.Queue`.
-*   **Consumers**: A pool of workers (size = `max_concurrency`) pull batches, call the API, and write results.
+Providers must implement:
 
-### `_compute_prompt_and_hash`
+- `embed(texts: List[str]) -> List[List[float]]`
+- `embed_async(texts: List[str]) -> List[List[float]]`
+- `dimension` and `model_name` properties
 
-```python
-def _compute_prompt_and_hash(node: Dict) -> Tuple[str, str]
-```
+Built-in providers:
 
-Constructs the "Context Window" for the LLM. It's not just the code!
-
-**Prompt Structure:**
-1.  **Header**: File Path, Language, Category.
-2.  **Semantic Tags**: Roles (e.g., `Role: API Endpoint`), Modifiers (e.g., `Tags: async, static`).
-3.  **Graph Context**: Incoming Definitions (e.g., `Defines: UserFactory, AuthMiddleware`).
-4.  **Body**: The actual source code.
-
-This rich context ensures that even small chunks (like a 5-line function) have enough semantic meaning for high-quality retrieval.
+- `OpenAIEmbeddingProvider`
+- `FastEmbedProvider`
+- `DummyEmbeddingProvider`

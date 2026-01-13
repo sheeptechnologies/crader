@@ -1,108 +1,21 @@
-# System Architecture
+# Architecture
 
-This document describes the high-level architecture of **Crader**. The system is designed as a **Code Property Graph (CPG) Builder** that ingests source code repositories and transforms them into a queriable knowledge graph.
+Crader is split into a write path (indexing and embedding) and a read path (search and navigation). The system stores all data in PostgreSQL with snapshot isolation, so readers always query a stable version of the codebase.
 
-## High-Level Overview
+## Write path
 
-The system operates in two main phases: **Indexing (Write Path)** and **Retrieval (Read Path)**.
+- **Repository sync**: `GitVolumeManager` maintains a bare mirror cache and creates ephemeral worktrees for specific commits. Repositories are stored under `CRADER_REPO_VOLUME` (default: `./sheep_data/repositories`).
+- **Parsing and chunking**: `TreeSitterRepoParser` loads Tree-sitter grammars by extension and splits code into chunks. Chunks include byte ranges, line ranges, and metadata tags. Parent-child edges (`child_of`) are created during parsing.
+- **SCIP relations**: `SCIPIndexer` runs language-specific SCIP tools to extract cross-file relations. Relations are resolved to node IDs and stored as edges in the graph. This is currently the bottleneck for file-incremental indexing; the roadmap includes replacing SCIP with Mycelium (stack graphs in Python): https://github.com/sheeptechnologies/mycelium.git.
+- **Storage**: `PostgresGraphStorage` persists repositories, snapshots, files, nodes, contents, edges, and the FTS index.
+- **Embeddings (separate step)**: `CodeEmbedder` stages node content, deduplicates by hash, then calls an embedding provider. Vectors are stored in `node_embeddings` for vector search.
 
-### Write Path: From Git to Graph
+## Read path
 
-```mermaid
-graph TD
-    A[Git Repository] -->|Clone| B(GitVolumeManager)
-    B -->|Files| C{ParserOrchestrator}
-    
-    subgraph "Parallel Processing"
-        direction TB
-        C -->|Syntactic Analysis| D[TreeSitterRepoParser]
-        C -->|Semantic Analysis| E[SCIPIndexer]
-    end
-    
-    D -->|Chunks| F[CodeEmbedder]
-    F -->|Embeddings| G[PostgresGraphStorage]
-    E -->|Edges| G
-```
+- **Search**: `CodeRetriever` runs vector search and keyword search through `SearchExecutor`. Results are merged using Reciprocal Rank Fusion.
+- **Context expansion**: `GraphWalker` adds parent context and outgoing definitions based on graph edges.
+- **Navigation and reading**: `CodeReader` reconstructs files from chunk content and uses the snapshot manifest for fast directory listing. `CodeNavigator` exposes helpers for neighbors, parent blocks, callers, and callees.
 
-### Read Path: From Query to Context
+## Snapshot model
 
-```mermaid
-graph TD
-    H[User Query] -->|Input| I[CodeRetriever]
-    I -->|Vector/Keyword Search| J[SearchExecutor]
-    
-    subgraph "Enrichment"
-        direction TB
-        J -->|Node IDs| K[GraphWalker]
-        K -->|Traverse Graph| L[Augmented Context]
-    end
-```
-
-## Indexing Pipeline
-
-The indexing process is orchestrated by `CodebaseIndexer`. It follows a **Snapshot-based** consistency model: every indexing run creates an immutable `Snapshot` of the repository.
-
-### 1. Ingestion (`GitVolumeManager`)
-*   **Role**: Manages the cloning and updating of Git repositories.
-*   **Mechanism**: Uses `git` CLI (via `GitPython`) to fetch data.
-*   **Optimization**: Maintains a persistent "Bare Repository" cache and creates lightweight `worktrees` for specific commits. This avoids re-downloading the entire history for every analysis.
-
-### 2. Syntactic Parsing (`TreeSitterRepoParser`)
-*   **Role**: Breaks down source files into "Chunks" (Functions, Classes, Methods).
-*   **Technology**: Uses `tree-sitter`, a high-performance incremental parser.
-*   **Logic**:
-    *   Iterates over all files.
-    *   Applies language-specific **S-expression queries** (`*.scm`) to extract definitions.
-    *   Splits large files using a recursive "scope-aware" chunking strategy to preserve context.
-
-### 3. Semantic Analysis (`SCIPIndexer`)
-*   **Role**: Extracts cross-file relationships (e.g., `calls`, `inherits`, `imports`).
-*   **Technology**: Wraps **SCIP (Source Code Indexing Protocol)** CLIs (e.g., `scip-python`, `scip-typescript`).
-*   **Process**:
-    *   Runs the language-specific indexer (often requiring a build environment).
-    *   Streams the resulting Protobuf index.
-    *   Resolves "References" to "Definitions" to create graph edges.
-
-### 4. Embedding Generation (`CodeEmbedder`)
-*   **Role**: Converts text code chunks into dense vectors.
-*   **Pipeline**:
-    1.  **Staging**: Chunks are written to a temporary table.
-    2.  **Deduplication**: The system computes a hash of the content. If the same code block (same hash) was already embedded in a previous snapshot, the implementation reuses the existing vector.
-    3.  **Delta Computing**: Only new/changed chunks are sent to the LLM API.
-    4.  **Batching**: Requests are batched to respect API rate limits.
-
-## Storage Layer (`PostgresGraphStorage`)
-
-The persistence layer is valid PostgreSQL 15+ with the `pgvector` extension. It handles the **Code Property Graph (CPG)** schema, ensuring data integrity and high performance for both inserts and lookups.
-
-**Key Responsibilities:**
-*   **Snapshot Isolation**: Guarantees consistent reads during indexing updates (MVCC).
-*   **Bulk Ingestion**: Uses `COPY` protocol for millions of rows/sec.
-*   **Hybrid Indexing**: Manages IVFFlat/HNSW indexes for vectors and GIN indexes for keywords.
-
-!!! tip "Full Specification"
-    For a complete, exhaustive description of the Database Schema, Table structures, and Method behaviors, please consult the **[Storage API Reference](../reference/storage.md)**.
-
-## Retrieval Architecture
-
-The `CodeRetriever` implements a "Retrieval-Augmented Generation" (RAG) specialized for code.
-
-### 1. Hybrid Search
-
-Combines two search strategies:
-
-*   **Dense Retrieval (Vector)**: Finds conceptually similar code (e.g. "auth logic" -> `login()`).
-*   **Sparse Retrieval (Keyword)**: Finds exact matches (e.g. `UserFactory`, `API_KEY`).
-
-### 2. Result Fusion
-
-Uses **Reciprocal Rank Fusion (RRF)** to combine the ranked lists from Vector and Keyword search into a single, high-quality result set.
-
-### 3. Graph Expansion (`GraphWalker`)
-
-Once relevant "Seed Nodes" are found, the `GraphWalker` traverses the graph edges to fetch context that wasn't in the search results:
-
-*   **Vertical Expansion**: "Who defines this function?" (Parent Class).
-*   **Horizontal Expansion**: "What does this function call?" (Dependencies).
-
-This ensures the LLM receives a complete subgraph rather than a disconnected snippet.
+Each indexing run creates a snapshot tied to a commit hash. A repository points to a single active snapshot. Queries always target a specific snapshot, either explicitly or by resolving the active one.

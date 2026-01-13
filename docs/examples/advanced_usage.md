@@ -1,107 +1,96 @@
-# Advanced Usage & Recipes
+# Advanced usage
 
-This guide covers scenarios beyond the basic "Quickstart", tailored for enterprise deployments and power users.
+This page collects practical patterns that match the current API surface.
 
-## 1. Indexing Strategy
+Assume you already created a PostgreSQL storage instance and resolved `repo_id` and `snapshot_id` as needed.
 
-### Monorepo Filtering
-For large repositories, you generally want to exclude build artifacts, docs, and test fixtures to keep the graph clean and performance high.
+## Index multiple branches
 
-The indexer respects `GLOBAL_IGNORE_DIRS` by default, but you can customize this by modifying `src/code_graph_indexer/parsing/parsing_filters.py` or by passing custom logic if you extend the class.
-
-**Default Exclusions:**
-*   **Technical Noise**: `node_modules`, `.git`, `dist`, `__pycache__`
-*   **Semantic Noise**: `fixtures`, `migrations`, `locales`
-
-### Branch-Specific Indexing
-You can maintain separate indices for different branches (e.g., `main` vs `develop`).
+Each `(url, branch)` pair is a separate repository record.
 
 ```python
-from code_graph_indexer import CodebaseIndexer
+from crader import CodebaseIndexer
 
-# index main (Production)
 indexer_main = CodebaseIndexer(
     repo_url="git@github.com:org/repo.git",
     branch="main",
-    db_url="postgresql://user:pass@localhost/dbname"
+    db_url=db_url,
 )
 indexer_main.index()
+indexer_main.close()
 
-# index feature-branch (Development)
 indexer_dev = CodebaseIndexer(
     repo_url="git@github.com:org/repo.git",
     branch="feature/new-search-api",
-    db_url="postgresql://user:pass@localhost/dbname"
+    db_url=db_url,
 )
-indexer_dev.index()
+indexer_dev.index(force=True)
+indexer_dev.close()
 ```
-*Note: The `Repository` entity in the DB is unique per (url, branch) pair.*
 
-## 2. Advanced Search & Retrieval
+## Keyword-only search
 
-### Using Metadata Filters
-The `filters` argument in `retrieve()` allows you to slice the graph by any metadata field extracted during parsing. This is pushed down to the database (SQL `WHERE` clause) for maximum speed.
+Keyword search does not require embeddings, but `CodeRetriever` still needs a provider instance.
 
-**Filter by Language:**
+```python
+from crader import CodeRetriever
+from crader.providers.embedding import DummyEmbeddingProvider
+
+retriever = CodeRetriever(storage, DummyEmbeddingProvider())
+results = retriever.retrieve(
+    query="AuthMiddleware",
+    repo_id=repo_id,
+    strategy="keyword",
+)
+```
+
+## Use filters to reduce noise
+
 ```python
 results = retriever.retrieve(
-    query="authentication middleware",
+    query="router",
     repo_id=repo_id,
-    filters={"language": "python"} 
+    strategy="hybrid",
+    filters={
+        "language": ["python"],
+        "exclude_category": ["test"],
+        "path_prefix": ["src/"]
+    },
 )
 ```
 
-**Filter by Semantic Role:**
-Find only **Class Definitions** related to "User":
+## Read files and navigate chunks
+
 ```python
-results = retriever.retrieve(
-    query="User",
-    repo_id=repo_id,
-    filters={"role": "class"} # derived either from 'type' or 'category' in metadata
-)
+from crader import CodeReader, CodeNavigator
+
+reader = CodeReader(storage)
+nav = CodeNavigator(storage)
+
+# List a directory
+entries = reader.list_directory(snapshot_id, "src")
+
+# Read a file range
+file_data = reader.read_file(snapshot_id, "src/app.py", start_line=1, end_line=80)
+
+# Move to the next chunk in a file
+next_chunk = nav.read_neighbor_chunk(node_id, direction="next")
 ```
 
-**Filter by File Path:**
-Scope search to a specific module:
-```python
-results = retriever.retrieve(
-    query="calculate_tax",
-    repo_id=repo_id,
-    filters={"start_path": "src/billing/"} # Implementation depends on storage backend
-)
+## Control the repo storage location
+
+```bash
+export CRADER_REPO_VOLUME="/mnt/crader/repos"
 ```
 
-### Hybrid Search Tuning
-By default, `CodeRetriever` uses **Reciprocal Rank Fusion (RRF)** to combine Vector and Keyword results. You can force a specific strategy if you know what you are doing.
+This affects the bare mirrors and worktrees created by `GitVolumeManager`.
 
-*   **`strategy='vector'`**: Best for concept search ("how do I login?").
-*   **`strategy='keyword'`**: Best for exact error codes ("Error 503") or specific symbol names ("UserFactory").
-*   **`strategy='hybrid'`**: (Default) Best of both worlds.
+## Embed without external APIs
 
-```python
-# Force exact keyword match for an error code
-hits = retriever.retrieve(
-    query="ERR_CONNECTION_RESET",
-    repo_id=repo_id,
-    strategy="keyword"
-)
-```
-
-## 3. Custom Embedding Models
-
-The system uses the `EmbeddingProvider` interface. You can swap OpenAI with any other provider (Vertex AI, HuggingFace, Bedrock) by implementing a simple adapter.
+Use `mock_api=True` to generate random vectors for testing:
 
 ```python
-from code_graph_indexer.providers.embedding import EmbeddingProvider
-
-class VertexEmbeddingProvider(EmbeddingProvider):
-    def __init__(self, project_id, model="text-embedding-gecko"):
-        self.client = ... # Initialize Vertex AI client
-        
-    async def embed_async(self, texts: List[str]) -> List[List[float]]:
-        # Implement call to Google Cloud
-        return await self.client.get_embeddings(texts)
-
-# Usage
-indexer = CodebaseIndexer(..., embedding_provider=VertexEmbeddingProvider("my-project"))
+async for update in indexer.embed(provider, batch_size=200, mock_api=True):
+    if update.get("status") == "completed":
+        print(update)
 ```

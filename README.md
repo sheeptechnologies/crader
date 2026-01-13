@@ -1,400 +1,134 @@
 # Crader
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Code Coverage](https://img.shields.io/badge/coverage-75%25-yellow.svg)](docs/testing/unit-tests-guide.md)
+Crader builds a code property graph (CPG) and embeddings from Git repositories. It parses code into semantic chunks, stores them in PostgreSQL with snapshot isolation, and supports hybrid search and graph navigation.
 
-**Enterprise-grade Code Intelligence for AI Agents**
+## Core capabilities
 
-Transform your codebase into a queryable Knowledge Graph with semantic understanding. Built for AI-powered code analysis, intelligent retrieval, and agentic workflows.
+- Tree-sitter parsing and chunking with byte-precise ranges
+- SCIP-based relations for cross-file references (current bottleneck for file-incremental indexing; see [Roadmap](docs/roadmap.md))
+- Full-text index for keyword search
+- Vector embeddings and pgvector search
+- Snapshot-based reads for consistent retrieval
+- Graph navigation helpers (parent blocks, callers, callees)
 
----
+## Requirements
 
-## What is This?
+- Python 3.10+
+- PostgreSQL with the pgvector extension
+- git
+- SCIP CLI and language indexers (scip, scip-python, scip-typescript, scip-java, scip-go, scip-rust, scip-php, scip-clang). This is the current bottleneck for file-incremental indexing; see [Roadmap](docs/roadmap.md).
+- Optional: OpenAI API key if you use OpenAI embeddings
 
-**Crader** is a production-ready library that indexes source code into a **Code Property Graph (CPG)** with semantic embeddings. Unlike simple text-based RAG solutions, it understands code structure, relationships, and semantics.
-
-### The Problem
-
-Standard text embeddings fail on code because:
-- Code is highly structured (AST, not prose)
-- Context matters: `process_data()` means nothing without knowing where it's defined and who calls it
-- Symbol resolution requires understanding imports, inheritance, and scoping
-- Chunking arbitrary lines breaks semantic meaning
-
-### The Solution
-
-**Crader** provides:
-
-1. **Structural Parsing**: Tree-sitter AST parsing for accurate code understanding
-2. **Semantic Chunking**: Intelligent code splitting that preserves meaning
-3. **Graph Relationships**: Links definitions, references, calls, and inheritance
-4. **Hybrid Search**: Combines vector similarity with keyword matching (RRF)
-5. **Context-Aware Retrieval**: Graph traversal for relevant context expansion
-
----
-
-## Key Features
-
-### Precise Code Intelligence
-- **Tree-sitter Parsing**: Zero-copy, incremental parsing for Python, TypeScript, Go, Java, Rust
-- **SCIP Integration**: Industry-standard protocol for symbol resolution and cross-references
-- **Semantic Chunking**: Respects function/class boundaries with configurable overlap
-
-### Supported Languages
-
-| Language | Support Status | Note |
-|----------|----------------|------|
-| **Python** | ✅ Supported | Full indexing, retrieval, and graph capabilities |
-| JavaScript | 🚧 Coming Soon | Planned |
-| TypeScript | 🚧 Coming Soon | Planned |
-| Go | 🚧 Coming Soon | Planned |
-| Java | 🚧 Coming Soon | Planned |
-| Rust | 🚧 Coming Soon | Planned |
-
-### Enterprise Storage
-- **PostgreSQL + pgvector**: ACID compliance, scalability, and vector search
-- **Snapshot Isolation**: Atomic updates with zero-downtime reindexing
-- **COPY Protocol**: High-performance bulk inserts (10x-50x faster than INSERT)
-- **Connection Pooling**: Efficient resource management for concurrent access
-
-### High Performance
-- **Parallel Processing**: Multi-process indexing with `ProcessPoolExecutor`
-- **Streaming Pipeline**: Memory-efficient processing of large repositories
-- **Incremental Updates**: Only reindex changed files
-- **Batch Embeddings**: Optimized vector generation with configurable batch sizes
-
-### Advanced Retrieval
-- **Hybrid Search**: Vector similarity + Full-text search with Reciprocal Rank Fusion
-- **Graph Traversal**: Navigate call graphs, inheritance hierarchies, and dependencies
-- **Context Expansion**: Automatically include related code (callers, callees, definitions)
-- **Multi-Stage Pipeline**: Resolution → Search → Expansion for optimal results
-
----
-
-## 📊 Architecture Overview
-
-```
-┌─────────────────┐
-│  Source Code    │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐      ┌──────────────────┐
-│  Tree-sitter    │─────▶│  Code Chunks     │
-│  Parser         │      │  (Semantic)      │
-└─────────────────┘      └────────┬─────────┘
-                                  │
-         ┌────────────────────────┼────────────────────────┐
-         │                        │                        │
-         ▼                        ▼                        ▼
-┌─────────────────┐      ┌──────────────────┐    ┌──────────────────┐
-│  SCIP Indexer   │      │  Embedding       │    │  PostgreSQL      │
-│  (Relations)    │      │  Generation      │    │  Storage         │
-└────────┬────────┘      └────────┬─────────┘    └────────┬─────────┘
-         │                        │                        │
-         └────────────────────────┴────────────────────────┘
-                                  │
-                                  ▼
-                         ┌──────────────────┐
-                         │  Knowledge Graph │
-                         │  (CPG + Vectors) │
-                         └──────────────────┘
-```
-
-See [Architecture Guide](docs/guides/architecture.md) for detailed design.
-
----
-
-
-## 🚀 Quick Start
-
-Get your codebase indexed and queryable in under 5 minutes.
-
-### 1. Prerequisites
-
-You need a PostgreSQL database with the `pgvector` extension enabled.
-
-**Using Docker (Recommended):**
-
-```bash
-docker run -d \
-  --name sheep-postgres \
-  -e POSTGRES_USER=user \
-  -e POSTGRES_PASSWORD=pass \
-  -e POSTGRES_DB=codebase \
-  -p 5432:5432 \
-  pgvector/pgvector:pg14
-```
-
-### 2. Installation
+## Install
 
 ```bash
 pip install crader
 ```
 
-### 3. Complete Example
+## Database setup
 
-Here is a complete script to index a repository and perform a semantic search.
+Set the database URL and run the migrations:
+
+```bash
+export CRADER_DB_URL="postgresql://user:pass@localhost:5432/codebase"
+crader db upgrade
+```
+
+The migration enables the `vector` extension and creates the schema used by the indexer.
+
+## Quick start
+
+Index a repository (parsing, chunking, SCIP relations; see [Roadmap](docs/roadmap.md) for the current bottleneck):
+
+```bash
+crader index https://github.com/pallets/flask.git --branch main
+```
+
+Generate embeddings:
 
 ```python
-import os
-from crader import CodebaseIndexer, CodeRetriever
+import asyncio
+from crader import CodebaseIndexer
+from crader.providers.embedding import OpenAIEmbeddingProvider
+
+repo_url = "https://github.com/pallets/flask.git"
+branch = "main"
+
+db_url = "postgresql://user:pass@localhost:5432/codebase"
+indexer = CodebaseIndexer(repo_url=repo_url, branch=branch, db_url=db_url)
+
+async def main():
+    provider = OpenAIEmbeddingProvider(model="text-embedding-3-small")
+    async for update in indexer.embed(provider, batch_size=200):
+        if update.get("status") == "completed":
+            print(update)
+
+asyncio.run(main())
+indexer.close()
+```
+
+Search and retrieve context:
+
+```python
+from crader import CodeRetriever
 from crader.storage.connector import PooledConnector
+from crader.storage.postgres import PostgresGraphStorage
+from crader.providers.embedding import OpenAIEmbeddingProvider
 
-# 1. Setup Database Connection
-db_url = os.getenv("DB_URL", "postgresql://user:pass@localhost:5432/codebase")
-connector = PooledConnector(db_url=db_url)
+db_url = "postgresql://user:pass@localhost:5432/codebase"
+provider = OpenAIEmbeddingProvider(model="text-embedding-3-small")
+connector = PooledConnector(dsn=db_url)
+storage = PostgresGraphStorage(connector)
+retriever = CodeRetriever(storage, provider)
 
-# 2. Initialize the Indexer
-indexer = CodebaseIndexer(
-    repo_path="./my-target-repo",  # Path to local repo clone
-    storage_connector=connector,
-    languages=["python"],          # Only Python is currently supported
+repo_id = storage.ensure_repository(
+    repo_url,
+    branch,
+    repo_url.rstrip("/").split("/")[-1].replace(".git", ""),
 )
 
-# 3. Index the Repository
-# This parses the code, builds the graph, and generates embeddings (requires OPENAI_API_KEY)
-# You can skip this step if the repo is already indexed
-print("Indexing repository...")
-indexer.index(
-    repo_url="https://github.com/my-org/my-target-repo",
-    branch="main",
-    force_reindex=False
-)
-
-# 4. Perform a Hybrid Search
-# Initialize the retriever with the same connector
-retriever = CodeRetriever(connector)
-
-query = "How is the authentication middleware implemented?"
-
-print(f"\nSearching for: '{query}'...")
-results = retriever.search(
-    query=query,
+results = retriever.retrieve(
+    query="How does request routing work?",
+    repo_id=repo_id,
     limit=3,
-    include_context=True,   # Fetch surrounding code context
-    repo_id="my-target-repo" # Filter by repo
+    strategy="hybrid",
+    filters={"language": "python"},
 )
 
-# 5. Display Results
-for i, result in enumerate(results, 1):
-    print(f"\n--- Result {i} (Score: {result['score']:.4f}) ---")
-    print(f"File: {result['file_path']}:{result['start_line']}")
-    print(f"Type: {result['metadata'].get('node_type', 'chunk')}")
-    print(f"Content Preview:\n{result['content'][:200]}...")
+for hit in results:
+    print(hit.file_path, hit.start_line, hit.score)
 ```
 
-### 4. Graph Navigation
+Keyword search works without embeddings, but `CodeRetriever` still requires an embedding provider instance.
 
-Beyond search, you can traverse the knowledge graph to understand dependencies.
+## Supported languages
 
-```python
-from crader import CodeNavigator
+Crader scans files by extension during indexing:
 
-navigator = CodeNavigator(connector)
+- .py
+- .js, .jsx
+- .ts, .tsx
+- .java
+- .go
+- .rs
+- .c, .cpp
+- .php
+- .html, .css
 
-# Example: Find what calls 'process_data'
-callers = navigator.get_incoming_calls(function_name="process_data")
-print(f"Found {len(callers)} callers for 'process_data'")
-```
+Semantic tagging via Tree-sitter queries is currently provided for Python, JavaScript, and TypeScript. SCIP relations require the relevant SCIP tools to be installed and available on PATH. SCIP is currently the bottleneck for file-incremental indexing; we are building a Python stack-graphs library to address this: https://github.com/sheeptechnologies/mycelium.git.
 
----
+## SCIP and incremental indexing
 
-## 📚 Documentation
-
-| Resource | Description |
-|----------|-------------|
-| [**Installation Guide**](docs/getting-started/installation.md) | Detailed setup instructions with Docker |
-| [**Quickstart**](docs/getting-started/quickstart.md) | Index your first repo in 5 minutes |
-| [**Architecture**](docs/guides/architecture.md) | System design and components |
-| [**API Reference**](docs/reference/indexer.md) | Complete API documentation |
-| [**Testing Guide**](docs/testing/unit-tests-guide.md) | Testing philosophy and practices |
-
----
-
-## Use Cases
-
-### 1. AI Code Assistants
-Provide LLMs with precise, contextual code snippets instead of random text chunks.
-
-```python
-# Get relevant context for a coding question
-context = retriever.get_context_for_query(
-    "How does authentication work?",
-    max_tokens=4000
-)
-```
-
-### 2. Code Search & Navigation
-Find definitions, usages, and relationships across large codebases.
-
-```python
-# Find all implementations of an interface
-implementations = navigator.find_implementations("IHandler")
-```
-
-### 3. Impact Analysis
-Understand the ripple effects of code changes.
-
-```python
-# Find all code affected by changing a function
-impact = navigator.analyze_impact(node_id="func_456")
-```
-
-### 4. Documentation Generation
-Auto-generate documentation with call graphs and usage examples.
-
-```python
-# Get comprehensive function documentation
-docs = navigator.get_function_docs(
-    function_name="process_request",
-    include_callers=True,
-    include_examples=True
-)
-```
-
----
+SCIP is required today to build cross-file relations, but it prevents a file-incremental approach. We are developing Mycelium, a Python implementation of GitHub-style stack graphs, to replace SCIP in the pipeline and unlock incremental semantic indexing. See [Roadmap](docs/roadmap.md) for the planned migration.
 
 ## Configuration
 
-### Environment Variables
+Environment variables used by the runtime:
 
-```bash
-# Database
-export DB_URL="postgresql://user:pass@localhost:5432/codebase"
-
-# Embedding Provider
-export EMBEDDING_PROVIDER="openai"  # or "cohere", "local"
-export OPENAI_API_KEY="sk-..."
-
-# Performance Tuning
-export MAX_WORKERS=8
-export BATCH_SIZE=100
-export CHUNK_SIZE=512
-export CHUNK_OVERLAP=50
-```
-
-### Advanced Configuration
-
-```python
-indexer = CodebaseIndexer(
-    repo_path="./project",
-    storage_connector=connector,
-    max_workers=8,           # Parallel indexing processes
-    chunk_size=512,          # Tokens per chunk
-    chunk_overlap=50,        # Overlap for context
-    languages=["python", "typescript"],  # Filter languages
-    exclude_patterns=["**/test_*.py", "**/__pycache__"]
-)
-```
-
----
-
-
-
-## Configuration
-
-You can configure `crader` by passing arguments via CLI or setting environment variables in a `.env` file (loaded from the current working directory).
-
-| Variable | CLI Flag | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `CRADER_DB_URL` | `--db-url` | `None` | Connection string for the PostgreSQL database (e.g. `postgresql://user:pass@localhost:5432/dbname`) |
-| `CRADER_REPO_VOLUME` | N/A | `./sheep_data/repositories` | Local path where git repositories are cloned |
-
-### CLI Usage
-
-```bash
-# Using CLI arguments
-crader index https://github.com/user/repo --db-url postgresql://...
-
-# Using Environment Variables (.env)
-# Create a .env file:
-# CRADER_DB_URL=postgresql://user:pass@localhost:5432/dbname
-crader index https://github.com/user/repo
-```
-
-## Contributing
-
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
-- Development setup
-- Code style guide
-- Testing requirements
-- Pull request process
-
-### Development Setup
-
-```bash
-# Clone and install
-git clone https://github.com/your-org/crader.git
-cd crader
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
-# Run tests
-make test-unit
-make test-integration
-make coverage
-
-# Build docs
-mkdocs serve
-```
-
----
-
-## Troubleshooting
-
-### Common Issues
-
-**PostgreSQL connection fails**
-```bash
-# Check PostgreSQL is running
-pg_isready -h localhost -p 5432
-
-# Verify pgvector extension
-psql -c "CREATE EXTENSION IF NOT EXISTS vector;"
-```
-
-**Out of memory during indexing**
-```python
-# Reduce batch size and workers
-indexer = CodebaseIndexer(
-    max_workers=2,
-    batch_size=50
-)
-```
-
-**Slow queries**
-```sql
--- Add indexes for common queries
-CREATE INDEX idx_nodes_file_path ON nodes(file_path);
-CREATE INDEX idx_edges_source_target ON edges(source_id, target_id);
-```
-
-See [FAQ](docs/faqs.md) for more solutions.
-
----
+- `CRADER_DB_URL`: PostgreSQL connection string (required by CLI and indexer).
+- `CRADER_REPO_VOLUME`: Root directory for cached repos and worktrees (defaults to `./sheep_data/repositories`).
+- `CRADER_OPENAI_API_KEY` or `OPENAI_API_KEY`: OpenAI credentials for embeddings.
 
 ## License
 
-[MIT License](LICENSE) - see LICENSE file for details.
-
----
-
-## Acknowledgments
-
-Built with:
-- [Tree-sitter](https://tree-sitter.github.io/) - Incremental parsing
-- [SCIP](https://github.com/sourcegraph/scip) - Code intelligence protocol
-- [PostgreSQL](https://www.postgresql.org/) + [pgvector](https://github.com/pgvector/pgvector) - Vector storage
-- [psycopg3](https://www.psycopg.org/psycopg3/) - PostgreSQL driver
-
----
-
-## Support
-
-- **Documentation**: [https://your-docs-site.com](https://your-docs-site.com)
-- **Issues**: [GitHub Issues](https://github.com/your-org/crader/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/your-org/crader/discussions)
-- **Email**: support@your-org.com
+MIT. See `LICENSE`.

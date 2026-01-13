@@ -1,63 +1,51 @@
-# Development Setup
+# Development setup
 
-This guide covers how to set up the development environment for contributing to **Crader**.
+This guide describes a minimal local setup for working on Crader.
 
-## Prerequisites
+## Requirements
 
-*   **Python**: Version 3.11 or higher.
-*   **Docker**: Required for running the PostgreSQL + pgvector integration tests.
-*   **Node.js**: Required if you plan to touch the `debugger/frontend`.
-*   **SCIP Tools**: To run full end-to-end indexing on local code.
+- Python 3.10+
+- git
+- Optional: PostgreSQL with pgvector (required for e2e tests)
+- SCIP tools for full relation extraction (currently the bottleneck for file-incremental indexing; see [Roadmap](../roadmap.md) and https://github.com/sheeptechnologies/mycelium.git)
 
-## 1. Environment Setup
-
-We recommend using `venv` or `poetry`.
+## Setup
 
 ```bash
-# Clone the repository
 git clone https://github.com/filippodaminato/crader.git
 cd crader
 
-# Create virtual env
 python -m venv .venv
 source .venv/bin/activate
 
-# Install dependencies (Editable mode + Dev tools)
 pip install -e ".[dev]"
 ```
 
-## 2. Infrastructure (Postgres)
+## Tests
 
-Start the local database for testing.
+Unit and integration tests are mostly mocked and do not require a database:
 
 ```bash
-docker-compose up -d db
+pytest tests/unit/ tests/integration/
 ```
 
-This starts PostgreSQL on port `6432` (mapped) with `pgvector` enabled.
-Connection String: `postgresql://sheep_user:sheep_password@localhost:6432/sheep_index`
-
-## 3. Running Tests
-
-We use `pytest`.
+End-to-end tests require PostgreSQL and a runnable git environment:
 
 ```bash
-# Run all tests
-pytest tests/
-
-# Run specific functional tests (slow, integration)
-pytest tests_files/test_workflow.py
+pytest tests/e2e/
 ```
 
-## 4. Code Style
-
-*   **Linting**: We use `ruff`.
-*   **Formatting**: We use `black`.
-*   **Type Checking**: We use `mypy`.
+## Linting and type checks
 
 ```bash
-# Run full check
-ruff check .
-black .
-mypy src/
+ruff check src tests
+mypy src
+```
+
+## Local PostgreSQL (optional)
+
+A Docker Compose file is available for the debugger stack:
+
+```bash
+docker compose -f tools/debugger/docker-compose.yml up -d
 ```

@@ -6,6 +6,8 @@ repo_name: crader
 
 theme:
   name: material
+  logo: assets/logo.png
+  favicon: assets/logo.png
   palette:
     - scheme: default
       primary: indigo
@@ -27,7 +29,6 @@ theme:
     - search.highlight
     - content.code.copy
   icon:
-    logo: material/graph-outline
     repo: fontawesome/brands/github
 
 plugins:
@@ -82,4 +83,5 @@ nav:
   - Contributing:
       - Development Setup: contributing/development-setup.md
       - Code of Conduct: contributing/code-of-conduct.md
+  - Roadmap: roadmap.md
   - FAQs: faqs.md

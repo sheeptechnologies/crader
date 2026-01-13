@@ -1,71 +1,48 @@
-# Frequently Asked Questions
+# FAQ
 
-## General Concepts
+## What is Crader?
 
-### What is Crader?
-Think of it as **"Google Indexing for your Private Codebase"**, but built specifically for AI Agents.
-It is an ingestion engine that transforms raw source code (from Git) into a structured **Knowledge Graph** stored in PostgreSQL. It captures not just the *text* of the code, but the *relationships* (who calls whom, where is this defined, class hierarchy).
+Crader indexes Git repositories into a code property graph stored in PostgreSQL. It parses code into chunks, stores relationships, and supports keyword and vector search.
 
-### How is this different from standard RAG (LangChain/LlamaIndex)?
-Standard RAG treats code as plain text documents. It splits files into chunks and embeds them.
-*   **Standard RAG**: "Find lines similar to 'login error'." -> Returns random snippets containing "login".
-*   **We**: "Find the definition of `login` and its top 3 callers." -> Returns the exact function body and the graph edges connecting it to the controllers that use it.
-**We provide Structure.** You can easily wrap our `CodeRetriever` as a generic "Tool" within LangChain or LlamaIndex.
+## Do I need SCIP?
 
-### What is a "Code Property Graph" (CPG)?
-It's a data structure that combines:
-1.  **Abstract Syntax Tree (AST)**: The grammar of the code (Functions, Classes).
-2.  **Dependency Graph**: semantic links (Imports, Calls, Inheritance).
-3.  **Embeddings**: Vector representation of the code's meaning.
-We store all of this in a unified schema so you can query: *"Give me the embedding for the Function defined at line 50 that calls `User.save()`"*.
+Yes. SCIP tooling is required to build the cross-file relations used by the graph. This is currently Crader's main bottleneck because it prevents a file-incremental approach. To address this, we are building a supporting library that implements GitHub's stack graphs in Python to enable incremental semantic indexing: https://github.com/sheeptechnologies/mycelium.git.
 
-## Use Cases
+## Does Crader do incremental indexing?
 
-### What can I build with this?
-1.  **Context-Aware Coding Agents**: An agent that doesn't hallucinate libraries because it can see the actual method signatures in the project.
-2.  **Repository Q&A**: A chatbot that answers "How does the billing system handle retries?" by traversing the call graph of the retry middleware.
-3.  **Automated Refactoring**: Identify all 50 files that import a deprecated module to plan a migration.
-4.  **Onboarding Assistants**: Help new engineers navigate legacy codebases by explaining *flows* rather than just files.
+Crader indexes a full commit. It skips re-indexing if the same commit already has a completed snapshot. Embeddings are deduplicated across snapshots by `vector_hash`, but file-level incremental parsing is not implemented.
 
-### Is it suitable for Production?
-**Yes.** The system uses an **Eventual Consistency** model with **Snapshot Isolation**.
-*   You can index a new commit in the background.
-*   Your users continue searching the "live" snapshot without interruption.
-*   Once indexing is done, you atomically "swap" to the new snapshot.
-This is the same architectural pattern used by heavy-duty search engines.
+## Which languages are supported?
 
-## Architecture & Design
+Indexing scans files by extension:
 
-### Why PostgreSQL instead of a dedicated Vector DB?
-We believe in **keeping the stack simple**. PostgreSQL 15+ with `pgvector` offers:
-1.  **Transactional Integrity (ACID)**: We ensure the graph edges and the embeddings are always in sync.
-2.  **Complex JOINs**: usage requires joining relational data (graph edges) with vector similarity. Postgres does this natively.
-3.  **Operational Maturity**: Most teams already run Postgres. No need to manage a new piece of infrastructure like Pinecone or Weaviate just for this.
+- .py
+- .js, .jsx
+- .ts, .tsx
+- .java
+- .go
+- .rs
+- .c, .cpp
+- .php
+- .html, .css
 
-### Why do you use both Tree-sitter and SCIP?
-They solve different problems:
-*   **Tree-sitter** is our "Parser". It is fast, runs locally, and understands the *syntax* (Where does the function start/end?).
-*   **SCIP** (Source Code Indexing Protocol) is our "Linker". It understands *semantics* (This usage of `User` refers to `models.py`).
-By combining them, we get the speed of regex-free parsing with the precision of a compiler.
+Semantic tagging via Tree-sitter queries is currently provided for Python, JavaScript, and TypeScript. SCIP relations require the installed indexers (see [Roadmap](roadmap.md) for the current bottleneck and Mycelium plan).
 
-## Operations & Troubleshooting
+## Why PostgreSQL instead of a separate vector database?
 
-### Does it support huge Monorepos?
-**Yes.**
-*   **Filtering**: You can ignore `node_modules`, `vendor`, or specific folders via `GLOBAL_IGNORE_DIRS`.
-*   **Incremental Indexing**: We track commit hashes per file. If a file hasn't changed between commits, we reuse its existing nodes and embeddings, saving 90% of embedding costs.
-*   **Parallelism**: Parsing and Graph construction happen in parallel worker processes.
+Crader stores the graph, full-text index, and vectors in one system. PostgreSQL provides transactional consistency and flexible joins between nodes, edges, and embeddings.
 
-### Can I use local LLMs (Ollama / Llama.cpp)?
-**Yes.**
-The `EmbeddingProvider` is an abstract base class. You can implement a subclass that calls your local inference server (e.g., using `langchain` or direct HTTP calls) and pass it to the indexer.
-We default to OpenAI (`text-embedding-3-small`) because it provides the best cost/performance ratio for code today.
+## `index()` returns "queued". What does it mean?
 
-### `Snapshot locked` error
-If the indexer process is kill -9'd, it might leave a snapshot in `indexing` state.
-*   **Solution**: Run `indexer.index(force=True, force_new=True)` to ignore the lock and start a fresh snapshot. The orphan snapshot will be cleaned up by the auto-pruner eventually.
+The repository is already locked by another indexing run (a snapshot is still marked `indexing`). Wait for it to finish or mark the stale snapshot as `failed` or `completed` in the database before retrying.
 
-### Search returns irrelevant results
-*   **Check Filters**: Are you filtering by `language='python'` but searching a TypeScript repo?
-*   **Check Embeddings**: Did the embedding process finish? Run `indexer.get_stats()` to see if `embeddings` count matches `total_nodes`.
-*   **Tweak Strategy**: If looking for specific error codes (e.g., `ERR_505`), force `strategy="keyword"`.
+## Search returns empty or low-quality results
+
+- Confirm that a snapshot is active for the repository.
+- Run the embedding pipeline if you are using `strategy="vector"` or `strategy="hybrid"`.
+- Remove restrictive filters like `path_prefix` or `language`.
+- Use `strategy="keyword"` to validate FTS results independently of embeddings.
+
+## Can I use local embeddings?
+
+Yes. Use `FastEmbedProvider` for local embeddings or implement your own `EmbeddingProvider`.

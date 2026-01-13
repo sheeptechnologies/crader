@@ -1,27 +1,22 @@
-# Code of Conduct
+# Code of conduct
 
-## Our Pledge
+## Pledge
 
-In the interest of fostering an open and welcoming environment, we as contributors and maintainers pledge to making participation in our project and our community a harassment-free experience for everyone, regardless of age, body size, disability, ethnicity, sex characteristics, gender identity and expression, level of experience, education, socio-economic status, nationality, personal appearance, race, religion, or sexual identity and orientation.
+We are committed to providing a welcoming, professional, and harassment-free environment for everyone who participates in this project.
 
-## Our Standards
+## Expected behavior
 
-Examples of behavior that contributes to creating a positive environment include:
+- Be respectful and considerate in all interactions
+- Assume good intent and give constructive feedback
+- Focus on improving the project and supporting the community
 
-*   Using welcoming and inclusive language
-*   Being respectful of differing viewpoints and experiences
-*   Gracefully accepting constructive criticism
-*   Focusing on what is best for the community
-*   Showing empathy towards other community members
+## Unacceptable behavior
 
-Examples of unacceptable behavior by participants include:
+- Harassment, discrimination, or personal attacks
+- Sexualized language or imagery
+- Publishing private information without permission
+- Sustained disruptive behavior
 
-*   The use of sexualized language or imagery and unwelcome sexual attention or advances
-*   Trolling, insulting/derogatory comments, and personal or political attacks
-*   Public or private harassment
-*   Publishing others' private information, such as a physical or electronic address, without explicit permission
-*   Other conduct which could reasonably be considered inappropriate in a professional setting
+## Reporting
 
-## Enforcement
-
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported by contacting the project team. All complaints will be reviewed and investigated and will result in a response that is deemed necessary and appropriate to the circumstances. The project team is obligated to maintain confidentiality with regard to the reporter of an incident.
+If you experience or witness unacceptable behavior, contact the project maintainers. Reports will be reviewed and handled as responsibly and confidentially as possible.
