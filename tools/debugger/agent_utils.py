@@ -2,6 +2,7 @@ import json
 import logging
 from typing import Dict, List, Optional, Union
 
+from debugger.database import get_storage
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
@@ -9,7 +10,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
 from pydantic import BaseModel, Field
 
-from debugger.database import get_storage
 from crader.navigator import CodeNavigator
 from crader.providers.embedding import OpenAIEmbeddingProvider
 from crader.reader import CodeReader
@@ -41,13 +41,13 @@ class RepoAgent:
     def __init__(self, repo_id: str):
         self.repo_id = repo_id
         self.storage = get_storage()
-        
+
         # Resolve API Key favoring CRADER_ prefix
         import os
         api_key = os.getenv("CRADER_OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
         if not api_key:
             logger.warning("⚠️ Nessuna API Key (CRADER_OPENAI_API_KEY o OPENAI_API_KEY) trovata!")
-        
+
         # Initialize providers
         # OpenAIEmbeddingProvider reads env vars internally (CRADER_OPENAI_API_KEY)
         self.provider = OpenAIEmbeddingProvider(
@@ -61,25 +61,25 @@ class RepoAgent:
 
         self.tools = self._create_tools()
         self.llm = ChatOpenAI(
-            model="gpt-4o-mini", 
-            temperature=0, 
+            model="gpt-4o-mini",
+            temperature=0,
             api_key=api_key
         )
 
         self.system_prompt = f"""
         Sei un Senior Software Engineer che analizza la repository.
         Hai accesso a un Knowledge Graph avanzato.
-        
+
         REPO ID: {self.repo_id}
-        
+
         Usa 'search_codebase' per trovare punti di ingresso.
         Usa 'read_file' per leggere il codice.
         Usa 'inspect_node' sugli UUID trovati per capire le dipendenze (Graph RAG).
-        
-        IMPORTANTE: 
+
+        IMPORTANTE:
         - Usa `search_codebase` SENZA filtri inizialmente, a meno che l'utente non specifichi "classe", "funzione", ecc.
         - Se la ricerca non trova nulla, riprova con query più generiche.
-        
+
         Rispondi in modo conciso e tecnico.
         """
 

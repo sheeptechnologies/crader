@@ -40,7 +40,7 @@ def test_indexing_full(repo_path: str, output_json: str = None, branch: str = "m
     indexer.storage.create_snapshot.return_value = ("snap-123", True)
     # Ensure check_and_reset returns False
     indexer.storage.check_and_reset_reindex_flag.return_value = False
-    
+
     logger.info("⚠️ RUNNING WITH MOCKED STORAGE (DB Bypass) ⚠️")
 
     # 1. ESECUZIONE

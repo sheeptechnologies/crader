@@ -5,34 +5,31 @@ import sys
 from typing import Any, Dict, Optional
 
 import git
+from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from fastapi.responses import StreamingResponse
-
-import sys
-import os
 # Allow importing 'debugger' package when running this script directly
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from debugger.agent_utils import get_agent
-from debugger.database import DB_URL, get_storage
-from crader.indexer import CodebaseIndexer
-from crader.navigator import CodeNavigator
-from crader.providers.embedding import DummyEmbeddingProvider, OpenAIEmbeddingProvider
-from crader.retriever import CodeRetriever
+load_dotenv()
+
+from debugger.agent_utils import get_agent  # noqa: E402
+from debugger.database import DB_URL, get_storage  # noqa: E402
+
+from crader.indexer import CodebaseIndexer  # noqa: E402
+from crader.navigator import CodeNavigator  # noqa: E402
+from crader.providers.embedding import DummyEmbeddingProvider, OpenAIEmbeddingProvider  # noqa: E402
+from crader.retriever import CodeRetriever  # noqa: E402
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("DebuggerServer")
 # Ensure our library logs are shown
 logging.getLogger("crader").setLevel(logging.INFO)
-
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # --- CONFIGURATION ---
 # Set CRADER_REPO_VOLUME to 'repos' directory in debugger folder
@@ -328,7 +325,7 @@ def get_file_content(repo_id: str, path: str):
 
             try:
                 d["metadata"] = json.loads(d["metadata"])
-            except:
+            except Exception:
                 d["metadata"] = {}
         chunks.append(d)
 
@@ -840,7 +837,7 @@ def search(req: SearchRequest):
     # Let's try to initialize OpenAI, if fails use Dummy.
     try:
         embedder = OpenAIEmbeddingProvider()
-    except:
+    except Exception:
         embedder = DummyEmbeddingProvider()
 
     retriever = CodeRetriever(storage, embedder)

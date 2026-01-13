@@ -146,7 +146,7 @@ def _process_and_insert_chunk(file_paths: List[str], carrier: Dict[str, str]) ->
                     _worker_storage.add_nodes_raw(buffer["nodes"])
                 if buffer["rels"]:
                     _worker_storage.add_relations_raw(buffer["rels"])
-                
+
                 # Flush Full-Text Search (FTS) entries *after* nodes to ensure referential integrity.
                 if buffer["fts"]:
                      _worker_storage.add_search_index(buffer["fts"])
@@ -202,7 +202,7 @@ def _process_and_insert_chunk(file_paths: List[str], carrier: Dict[str, str]) ->
                         buffer["contents"].append((c.chunk_hash, c.content))
                     for r in rels:
                         buffer["rels"].append((r.source_id, r.target_id, r.relation_type, json.dumps(r.metadata)))
-                    
+
                     # Buffer FTS documents for batch insertion.
                     # We defer insertion to the flush phase to ensure nodes exist first.
                     if nodes and contents:

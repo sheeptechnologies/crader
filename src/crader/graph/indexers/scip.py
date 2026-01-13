@@ -238,12 +238,12 @@ class SCIPRunner:
 
             span.set_attribute("scip.prune.removed_dirs", removed_dirs)
             span.set_attribute("scip.prune.removed_files", removed_files)
-            
+
             if pruned_dirs_list:
                 logger.info(f"✂️ [SCIP Prune] Removed Directories: {', '.join(pruned_dirs_list)}")
             if pruned_files_list:
                 logger.info(f"✂️ [SCIP Prune] Removed Files: {', '.join(pruned_files_list)}")
-            
+
             logger.info(f"✂️ [SCIP Prune] Cleaned {removed_dirs} dirs and {removed_files} junk files.")
 
     def prepare_indices(self) -> List[Tuple[str, str]]:
@@ -311,7 +311,7 @@ class SCIPRunner:
                              os.remove(pyproj)
                          except OSError:
                              pass
-                         
+
                          # Attempt 2
                          result = subprocess.run(
                             [indexer, "index", ".", "--output", tmp_idx],

@@ -1,11 +1,10 @@
 import os
 
+from crader.storage.connector import PooledConnector
 from crader.storage.postgres import PostgresGraphStorage
 
 # Default to the one used in tests, but allow env override
 DB_URL = os.getenv("CRADER_DB_URL", "postgresql://sheep_user:sheep_password@localhost:5433/sheep_index")
-
-from crader.storage.connector import PooledConnector
 
 _storage_instance = None
 

@@ -1,8 +1,7 @@
 import os
 
-from fastapi.testclient import TestClient
-
 from debugger.server import app
+from fastapi.testclient import TestClient
 
 client = TestClient(app)
 

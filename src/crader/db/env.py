@@ -14,7 +14,7 @@ if not current_url:
     DEFAULT_DEV_URL = "postgresql://sheep_user:sheep_password@localhost:5433/sheep_index"
     db_url = os.getenv("CRADER_DB_URL", DEFAULT_DEV_URL)
     config.set_main_option("sqlalchemy.url", db_url)
-    
+
 # 3. Driver Validation
 final_url = config.get_main_option("sqlalchemy.url")
 if final_url and final_url.startswith("postgresql://") and "psycopg" not in final_url:
