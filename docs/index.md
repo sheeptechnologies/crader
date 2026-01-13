@@ -25,24 +25,24 @@ Standard text-based RAG fails on code because **code is structured, not prose**.
 
 ## Key Features
 
-### 🔍 **Precise Code Understanding**
+### **Precise Code Understanding**
 - **Tree-sitter Parsing**: Zero-copy, incremental AST parsing for Python, TypeScript, Go, Java, Rust
 - **SCIP Integration**: Industry-standard protocol for symbol resolution and cross-references  
 - **Semantic Chunking**: Respects function/class boundaries with configurable overlap
 
-### 🗄️ **Enterprise Storage**
+### **Enterprise Storage**
 - **PostgreSQL + pgvector**: ACID compliance, scalability, vector search
 - **Snapshot Isolation**: Atomic updates with zero-downtime reindexing
 - **COPY Protocol**: 10x-50x faster bulk inserts
 - **Connection Pooling**: Efficient concurrent access
 
-### 🚀 **High Performance**
+### **High Performance**
 - **Parallel Processing**: Multi-process indexing with `ProcessPoolExecutor`
 - **Streaming Pipeline**: Memory-efficient for large repositories
 - **Incremental Updates**: Only reindex changed files
 - **Batch Embeddings**: Optimized vector generation
 
-### 🔎 **Advanced Retrieval**
+### **Advanced Retrieval**
 - **Hybrid Search**: Vector similarity + Full-text search with RRF
 - **Graph Traversal**: Navigate call graphs, inheritance, dependencies
 - **Context Expansion**: Auto-include related code (callers, callees, definitions)
@@ -75,58 +75,6 @@ See [Architecture Guide](guides/architecture.md) for detailed design.
 
 ---
 
-## Quick Start
-
-### Installation
-
-```bash
-pip install crader
-```
-
-See [Installation Guide](getting-started/installation.md) for detailed setup.
-
-### Index a Repository
-
-```python
-from code_graph_indexer import CodebaseIndexer
-from code_graph_indexer.storage.connector import PooledConnector
-
-# Initialize
-connector = PooledConnector(
-    db_url="postgresql://user:pass@localhost:5432/codebase"
-)
-
-indexer = CodebaseIndexer(
-    repo_path="./my-project",
-    storage_connector=connector
-)
-
-# Index
-indexer.index(
-    repo_url="https://github.com/org/repo",
-    branch="main"
-)
-```
-
-### Search and Retrieve
-
-```python
-from code_graph_indexer import CodeRetriever
-
-retriever = CodeRetriever(connector)
-
-# Hybrid search (vector + keyword)
-results = retriever.search(
-    query="authentication middleware",
-    limit=10,
-    include_context=True
-)
-```
-
-See [Quickstart Guide](getting-started/quickstart.md) for complete examples.
-
----
-
 ## Documentation Structure
 
 ### Getting Started
@@ -147,9 +95,7 @@ See [Quickstart Guide](getting-started/quickstart.md) for complete examples.
 - [**Parsing**](reference/parsing.md): `TreeSitterRepoParser`, `SCIPIndexer`
 - [**Embedding**](reference/embedding.md): `CodeEmbedder`, `EmbeddingProvider`
 
-### Testing & Deployment
-- [**Testing Guide**](testing/unit-tests-guide.md): Testing philosophy and practices
-- [**Production Deployment**](deployment/production.md): PostgreSQL tuning and scaling
+
 
 ### Contributing
 - [**Development Setup**](contributing/development-setup.md): Dev environment and workflow

@@ -60,6 +60,7 @@ The fundamental unit of the graph (a "Node").
 *   **Granularity**: Can be a Function, Class, Method, or a standalone specific block of code.
 *   **Vector**: Stores the 1536-dim embedding (if using OpenAI).
 *   **Metadata**: JSONB field containing "semantic captures" (e.g., `role: entry_point`, `access: public`).
+*   **Search**: Indexed via `nodes_fts` table using a weighted `tsvector` (A=tags, B=content).
 
 ### 5. CodeRelation (`models.CodeRelation`)
 A directed edge between two ChunkNodes.

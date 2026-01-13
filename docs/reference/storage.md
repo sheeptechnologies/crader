@@ -45,7 +45,16 @@ The system is designed to run on **PostgreSQL 15+** with the **`pgvector`** exte
 | `chunk_hash` | CHAR(64) | SHA-256 of the content (for deduplication). |
 | `content` | TEXT | The actual source code segment. |
 | `metadata` | JSONB | Semantic tags (`role`, `category`, `language`). |
-| `ts_vector` | TSVECTOR | Full-Text Search index (english). |
+
+
+
+#### `nodes_fts` (Full-Text Search)
+| Column | Type | Description |
+| :--- | :--- | :--- |
+| `node_id` | UUID (FK) | Link to `nodes`. |
+| `file_path` | TEXT | Denormalized path for filtering. |
+| `content` | TEXT | Raw content (Weight B). |
+| `search_vector` | TSVECTOR | Weighted index: `A=tags`, `B=content`. |
 
 #### `edges` (The Graph Relations)
 | Column | Type | Description |

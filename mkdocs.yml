@@ -75,10 +75,8 @@ nav:
       - Models: reference/models.md
       - Reader: reference/reading.md
       - Navigator: reference/navigation.md
-  - Deployment:
-      - Production Guide: deployment/production.md
-  - Testing:
-      - Unit Tests Guide: testing/unit-tests-guide.md
+
+
   - Examples:
       - Advanced Usage: examples/advanced_usage.md
   - Contributing:
