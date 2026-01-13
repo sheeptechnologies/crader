@@ -7,18 +7,20 @@ import sys
 # Setup Path per importare la libreria src
 current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
-if src_dir not in sys.path: sys.path.insert(0, src_dir)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
 
-from crader import CodebaseIndexer, CodeNavigator
-from crader.parsing.parser import TreeSitterRepoParser
-from crader.storage.sqlite import SqliteGraphStorage
+from crader import CodebaseIndexer, CodeNavigator  # noqa: E402
+from crader.parsing.parser import TreeSitterRepoParser  # noqa: E402
+from crader.storage.sqlite import SqliteGraphStorage  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("NAV_TEST")
 
 def setup_dummy_repo(path):
     """Crea la repo finta per il test standard."""
-    if os.path.exists(path): shutil.rmtree(path)
+    if os.path.exists(path):
+        shutil.rmtree(path)
     os.makedirs(path)
 
     code = """
@@ -94,12 +96,14 @@ def run_test(target_path=None):
     finally:
         # Cleanup
         TreeSitterRepoParser.MAX_CHUNK_SIZE = original_limit
-        if 'storage' in locals(): storage.close()
+        if 'storage' in locals():
+            storage.close()
 
         if is_dummy and os.path.exists(repo_path):
             shutil.rmtree(repo_path)
 
-        if os.path.exists(db_path): os.remove(db_path)
+        if os.path.exists(db_path):
+            os.remove(db_path)
 
 def _run_dummy_assertions(nodes, navigator):
     """Test rigido sulla struttura nota di PaymentService."""
@@ -112,7 +116,7 @@ def _run_dummy_assertions(nodes, navigator):
             logger.error(f"❌ Errore Chunking: Trovati solo {len(methods)} metodi su 3 attesi.")
             return
 
-        init_node, val_node, proc_node = methods[0], methods[1], methods[2]
+        init_node, val_node, _ = methods[0], methods[1], methods[2]
         logger.info(f"✅ Struttura riconosciuta: {class_node['id'][:8]} -> {val_node['id'][:8]}")
 
         # Test Parent
@@ -120,8 +124,10 @@ def _run_dummy_assertions(nodes, navigator):
         p_info = navigator.read_parent_chunk(val_node['id']) # Dict
         if p_info:
             print(f"Parent found: {p_info.get('type')} - {p_info.get('file_path')}")
-            if p_info['id'] == class_node['id']: logger.info("✅ PASS")
-            else: logger.error("❌ FAIL ID Mismatch")
+            if p_info['id'] == class_node['id']:
+                logger.info("✅ PASS")
+            else:
+                logger.error("❌ FAIL ID Mismatch")
         else:
             logger.error("❌ FAIL: No parent found")
 
@@ -131,8 +137,10 @@ def _run_dummy_assertions(nodes, navigator):
         if nxt:
             content_preview = nxt.get('content', '').split('\n')[0]
             print(f"Next found: {nxt.get('type')} -> {content_preview}")
-            if "def validate" in nxt.get('content', ''): logger.info("✅ PASS")
-            else: logger.error("❌ FAIL Content Mismatch")
+            if "def validate" in nxt.get('content', ''):
+                logger.info("✅ PASS")
+            else:
+                logger.error("❌ FAIL Content Mismatch")
         else:
             logger.error("❌ FAIL: No next chunk")
 

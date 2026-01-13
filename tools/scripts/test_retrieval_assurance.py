@@ -7,14 +7,15 @@ import sys
 # Setup Path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
-if src_dir not in sys.path: sys.path.insert(0, src_dir)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
 
-from crader import CodebaseIndexer, CodeRetriever
+from crader import CodebaseIndexer, CodeRetriever  # noqa: E402
 
 # Usiamo DummyProvider per essere deterministici e veloci nel test,
 # ma la logica di flow è identica a FastEmbed.
-from crader.providers.embedding import DummyEmbeddingProvider
-from crader.storage.sqlite import SqliteGraphStorage
+from crader.providers.embedding import DummyEmbeddingProvider  # noqa: E402
+from crader.storage.sqlite import SqliteGraphStorage  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("ASSURANCE_TEST")
@@ -23,7 +24,8 @@ def setup_targeted_repo(path):
     """
     Crea una repo con contenuti specifici per testare Keyword vs Vector.
     """
-    if os.path.exists(path): shutil.rmtree(path)
+    if os.path.exists(path):
+        shutil.rmtree(path)
     os.makedirs(path)
 
     os.makedirs(os.path.join(path, "src"), exist_ok=True)
@@ -86,7 +88,8 @@ def run_assurance_test():
     repo_path = os.path.abspath("test_assurance_repo")
     db_path = "assurance_test.db"
 
-    if os.path.exists(db_path): os.remove(db_path)
+    if os.path.exists(db_path):
+        os.remove(db_path)
 
     logger.info("🛠️  Setup Repo di Test...")
     setup_targeted_repo(repo_path)
@@ -166,9 +169,12 @@ def run_assurance_test():
         import traceback
         traceback.print_exc()
     finally:
-        if 'storage' in locals(): storage.close()
-        if os.path.exists(repo_path): shutil.rmtree(repo_path)
-        if os.path.exists(db_path): os.remove(db_path)
+        if 'storage' in locals():
+            storage.close()
+        if os.path.exists(repo_path):
+            shutil.rmtree(repo_path)
+        if os.path.exists(db_path):
+            os.remove(db_path)
 
 if __name__ == "__main__":
     run_assurance_test()

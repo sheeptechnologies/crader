@@ -46,7 +46,7 @@ class AuthenticationService:
         # Authenticates the user against the database
         print(f"User {username} logged in")
         return True
-        
+
     def logout(self, username):
         print(f"User {username} logged out")
 """)
@@ -56,10 +56,10 @@ class AuthenticationService:
 class DatabaseConnection:
     def __init__(self, uri):
         self.uri = uri
-        
+
     def connect(self):
         print(f"Connected to {self.uri}")
-        
+
     def execute_query(self, sql):
         # Executes SQL query safely
         return []
@@ -141,8 +141,10 @@ def main():
     while True:
         try:
             query = input("\n💬 Query: ").strip()
-            if not query: continue
-            if query.lower() in ['exit', 'quit']: break
+            if not query:
+                continue
+            if query.lower() in ['exit', 'quit']:
+                break
 
             # Eseguiamo la ricerca usando l'ID interno
             results = retriever.retrieve(query, repo_id=internal_repo_id, limit=3)

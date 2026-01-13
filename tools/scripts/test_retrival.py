@@ -105,7 +105,8 @@ def test_retrieval_pipeline():
         import traceback
         traceback.print_exc()
     finally:
-        if 'indexer' in locals(): indexer.close()
+        if 'indexer' in locals():
+            indexer.close()
         shutil.rmtree(temp_dir)
 
 if __name__ == "__main__":

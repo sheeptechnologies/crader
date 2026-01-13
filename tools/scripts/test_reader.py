@@ -11,11 +11,11 @@ src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from crader import CodebaseIndexer
+from crader import CodebaseIndexer  # noqa: E402
 
 # Importiamo direttamente il reader (assicurati di aver creato il file src/crader/reader.py)
-from crader.reader import CodeReader
-from crader.storage.sqlite import SqliteGraphStorage
+from crader.reader import CodeReader  # noqa: E402
+from crader.storage.sqlite import SqliteGraphStorage  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger("TEST_READER")
@@ -41,7 +41,8 @@ def run_reader_test(target_path=None):
     temp_dir = None
     if not target_path:
         temp_dir = "temp_reader_test_repo"
-        if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
         os.makedirs(temp_dir)
         target_path = temp_dir
         logger.info(f"🛠️  Creazione repo dummy in: {target_path}")
@@ -55,7 +56,8 @@ def run_reader_test(target_path=None):
         target_path = os.path.abspath(target_path)
 
     db_path = "reader_test.db"
-    if os.path.exists(db_path): os.remove(db_path)
+    if os.path.exists(db_path):
+        os.remove(db_path)
 
     storage = SqliteGraphStorage(db_path)
     indexer = CodebaseIndexer(target_path, storage)

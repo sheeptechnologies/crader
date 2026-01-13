@@ -7,11 +7,12 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # --- SETUP PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
-if src_dir not in sys.path: sys.path.insert(0, src_dir)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
 
-from crader import CodebaseIndexer
-from crader.providers.embedding import FastEmbedProvider
-from crader.storage.postgres import PostgresGraphStorage
+from crader import CodebaseIndexer  # noqa: E402
+from crader.providers.embedding import FastEmbedProvider  # noqa: E402
+from crader.storage.postgres import PostgresGraphStorage  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger("COLLISION_TEST")
@@ -20,7 +21,8 @@ logger = logging.getLogger("COLLISION_TEST")
 DB_URL = "postgresql://sheep_user:sheep_password@localhost:5433/sheep_index"
 
 def setup_local_repo(path, unique_content):
-    if os.path.exists(path): shutil.rmtree(path)
+    if os.path.exists(path):
+        shutil.rmtree(path)
     os.makedirs(path)
 
     # File unico per identificarla
@@ -41,7 +43,7 @@ def run_test():
     setup_local_repo(path_b, "function_B")
 
     storage = PostgresGraphStorage(DB_URL, vector_dim=768)
-    provider = FastEmbedProvider()
+    _ = FastEmbedProvider()
 
     try:
         # 1. INDEX REPO A
@@ -87,8 +89,10 @@ def run_test():
         logger.error(f"Errore: {e}")
     finally:
         storage.close()
-        if os.path.exists(path_a): shutil.rmtree(path_a)
-        if os.path.exists(path_b): shutil.rmtree(path_b)
+        if os.path.exists(path_a):
+            shutil.rmtree(path_a)
+        if os.path.exists(path_b):
+            shutil.rmtree(path_b)
 
 if __name__ == "__main__":
     run_test()

@@ -13,11 +13,11 @@ src_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from crader.embedding.embedder import CodeEmbedder
-from crader.models import ChunkContent, ChunkNode, FileRecord
-from crader.providers.embedding import EmbeddingProvider
-from crader.storage.connector import PooledConnector
-from crader.storage.postgres import PostgresGraphStorage
+from crader.embedding.embedder import CodeEmbedder  # noqa: E402
+from crader.models import ChunkContent, ChunkNode, FileRecord  # noqa: E402
+from crader.providers.embedding import EmbeddingProvider  # noqa: E402
+from crader.storage.connector import PooledConnector  # noqa: E402
+from crader.storage.postgres import PostgresGraphStorage  # noqa: E402
 
 # --- CONFIGURAZIONE DB ---
 DB_PORT = "6432"
@@ -103,7 +103,9 @@ async def main():
                 metadata={"complexity": "high", "semantic_matches": []}
             )
             c = ChunkContent(chunk_hash=chash, content=content_str)
-            files.append(f); nodes.append(n); contents.append(c)
+            files.append(f)
+            nodes.append(n)
+            contents.append(c)
 
         storage.add_files(files)
         storage.add_contents(contents)
@@ -157,7 +159,8 @@ async def main():
                 start_line=1, end_line=5, byte_range=[0, 100],
                 metadata={"complexity": "high", "semantic_matches": []}
             )
-            files_2.append(f); nodes_2.append(n)
+            files_2.append(f)
+            nodes_2.append(n)
 
         # 2. I nuovi (10)
         for i in range(1000, 1010):
@@ -178,7 +181,9 @@ async def main():
                 metadata={"tag": "new"}
             )
             c = ChunkContent(chunk_hash=chash, content=content_str)
-            files_2.append(f); nodes_2.append(n); contents_2.append(c)
+            files_2.append(f)
+            nodes_2.append(n)
+            contents_2.append(c)
 
         storage.add_files(files_2)
         storage.add_contents(contents_2)

@@ -53,6 +53,14 @@ class FakeStorage:
     def add_relations_raw(self, items):
         self.rels.extend(items)
 
+    def add_search_index(self, items):
+        pass
+
+
+class FakeBuilder:
+    def build_search_documents(self, nodes, content_map):
+        return [{"id": "doc1"}]
+
 
 def test_chunked_iterable():
     chunks = list(indexer_module._chunked_iterable(range(5), 2))
@@ -62,6 +70,7 @@ def test_chunked_iterable():
 def test_process_and_insert_chunk(monkeypatch):
     indexer_module._worker_parser = FakeParser()
     indexer_module._worker_storage = FakeStorage()
+    indexer_module._worker_builder = FakeBuilder()
 
     count, metrics = indexer_module._process_and_insert_chunk(["a.py"], {})
 

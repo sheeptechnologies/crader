@@ -8,9 +8,10 @@ import sys
 # --- SETUP PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
-if src_dir not in sys.path: sys.path.insert(0, src_dir)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
 
-from crader.storage.postgres import PostgresGraphStorage
+from crader.storage.postgres import PostgresGraphStorage  # noqa: E402
 
 # Configurazione Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(message)s', datefmt='%H:%M:%S')

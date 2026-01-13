@@ -30,7 +30,7 @@ def verify_file_reconstruction(original_path: str, parser_result: ParsingResult)
     Tenta di ricostruire il file originale unendo i chunk.
     Segnala buchi (codice perso) o sovrapposizioni.
     """
-    rel_path = os.path.basename(original_path) # O calcola path relativo corretto se necessario
+    # rel_path = os.path.basename(original_path) # O calcola path relativo corretto se necessario
 
     # 1. Filtra i nodi per questo file
     # Nota: il parser usa path relativi, cerchiamo di matchare
@@ -49,7 +49,10 @@ def verify_file_reconstruction(original_path: str, parser_result: ParsingResult)
     target_nodes.sort(key=lambda x: x.byte_range[0])
 
     # 3. Mappa Contenuti
-    content_map = {c.chunk_hash: c.content for c in parser_result.contents.values()} if isinstance(parser_result.contents, dict) else {c.chunk_hash: c.content for c in parser_result.contents}
+    if isinstance(parser_result.contents, dict):
+        content_map = {c.chunk_hash: c.content for c in parser_result.contents.values()}
+    else:
+        content_map = {c.chunk_hash: c.content for c in parser_result.contents}
 
     # 4. Ricostruzione e Analisi Buchi
     reconstructed_content = ""

@@ -41,7 +41,7 @@ class DatabaseConnection:
     def connect(self):
         print(f"Connecting to {self.uri}")
         self.is_connected = True
-        
+
     def query(self, sql: str):
         if not self.is_connected:
             raise Exception("Not connected")
@@ -57,8 +57,7 @@ class PaymentProcessor:
         self.db = db
 
     def process_payment(self, amount: int):
-        users = self.db.query("SELECT * FROM users") 
-        print(f"Processing {amount} for users: {users}")
+        users = self.db.query("SELECT * FROM users")        print(f"Processing {amount} for users: {users}")
         return True
 """)
 
@@ -84,7 +83,11 @@ if __name__ == "__main__":
         subprocess.run(["git", "config", "user.name", "TestUser"], cwd=repo_path, check=False)
 
         # [FIX] Aggiungiamo un remote esplicito per evitare di ereditare config strani
-        subprocess.run(["git", "remote", "add", "origin", "https://github.com/test-org/dummy-finance.git"], cwd=repo_path, check=False)
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/test-org/dummy-finance.git"],
+            cwd=repo_path,
+            check=False
+        )
 
         subprocess.run(["git", "add", "."], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=repo_path, check=True, stdout=subprocess.DEVNULL)

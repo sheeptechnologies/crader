@@ -1,3 +1,5 @@
+# ruff: noqa: E501, W291, W293
+
 import argparse
 import html
 import json
@@ -88,8 +90,10 @@ class DbAdapter:
             t_file = tgt.file_path if tgt and tgt.file_path else "EXTERNAL"
 
             # Fallback per metadati SCIP (external symbols)
-            if not src and e.get('metadata', {}).get('is_external'): s_file = "EXTERNAL_LIB"
-            if not tgt and e.get('metadata', {}).get('is_external'): t_file = "EXTERNAL_LIB"
+            if not src and e.get('metadata', {}).get('is_external'):
+                s_file = "EXTERNAL_LIB"
+            if not tgt and e.get('metadata', {}).get('is_external'):
+                t_file = "EXTERNAL_LIB"
 
             res.append(DbAdapter.RelView(
                 source_id=e['source_id'],
@@ -199,7 +203,7 @@ class HtmlGenerator:
 
         <script>
             const DATA = __DATA_JSON__;
-            
+
             window.onload = function() {
                 document.getElementById('file-path').innerText = DATA.file;
                 document.getElementById('chunk-count').innerText = DATA.nodes.length;
@@ -225,12 +229,12 @@ class HtmlGenerator:
                     div.className = 'list-item';
                     div.id = 'li-' + n.id;
                     div.onclick = () => selectChunk(n.id);
-                    
+
                     let color = '#888';
                     if (n.type.includes('function')) color = '#dcdcaa';
                     else if (n.type.includes('class')) color = '#4ec9b0';
                     else if (n.type.includes('signature')) color = '#c586c0';
-                    
+
                     div.innerHTML = `<span class="badge" style="background:${color}">${n.type.substring(0,4)}</span><span style="font-family:monospace; overflow:hidden; text-overflow:ellipsis;">${n.id.substring(0,8)}...</span>`;
                     list.appendChild(div);
                 });
@@ -245,7 +249,7 @@ class HtmlGenerator:
 
                 const node = DATA.nodes.find(n => n.id === id);
                 if(!node) return;
-                
+
                 document.getElementById('info-box').style.display = 'block';
                 document.getElementById('info-id').innerText = node.id;
                 document.getElementById('info-type').innerText = node.type;
@@ -269,14 +273,14 @@ class HtmlGenerator:
                     const toolLabel = isScip ? 'SCIP' : (tool.includes('treesitter') ? 'TREE-SITTER' : 'UNK');
                     const badgeClass = isScip ? 'bg-scip' : (tool.includes('treesitter') ? 'bg-ts' : 'bg-unk');
                     const rowClass = isScip ? 'rel-scip' : 'rel-ts';
-                    
+
                     let metaHtml = '';
                     for (const [k, v] of Object.entries(meta)) {
                         if (k !== 'tool') metaHtml += `<div class="meta-kv"><div class="meta-k">${k}</div><div class="meta-v">${v}</div></div>`;
                     }
 
-                    const targetLabel = dir === 'out' ? 
-                        `-> ${r.target_file} : ${r.target_id ? r.target_id.substring(0,8)+'...' : '?'}` : 
+                    const targetLabel = dir === 'out' ?
+                        `-> ${r.target_file} : ${r.target_id ? r.target_id.substring(0,8)+'...' : '?'}` :
                         `<- ${r.source_file} : ${r.source_id ? r.source_id.substring(0,8)+'...' : '?'}`;
 
                     return `
@@ -306,7 +310,13 @@ class HtmlGenerator:
     """
 
     @staticmethod
-    def prepare_payload(target_file_abs: str, repo_root: str, nodes: List[Any], contents: Dict[str, Any], relations: List[Any]) -> str:
+    def prepare_payload(
+        target_file_abs: str,
+        repo_root: str,
+        nodes: List[Any],
+        contents: Dict[str, Any],
+        relations: List[Any]
+    ) -> str:
         # --- FIX CRITICO: Filtro rigoroso per Path Relativo ---
         # Calcoliamo il path relativo esatto come lo calcola il Parser
         target_rel_path = os.path.relpath(target_file_abs, repo_root)
@@ -327,8 +337,10 @@ class HtmlGenerator:
 
         # HTML Code Generation
         try:
-            with open(target_file_abs, 'rb') as f: source_bytes = f.read()
-        except Exception: source_bytes = b"[File not found]"
+            with open(target_file_abs, 'rb') as f:
+                source_bytes = f.read()
+        except Exception:
+            source_bytes = b"[File not found]"
 
         events = []
         for n in file_nodes:
@@ -358,10 +370,15 @@ class HtmlGenerator:
 
             if type == 1: # Start
                 cls = "chunk"
-                if "class" in node.type: cls += " type-class"
-                elif "function" in node.type or "method" in node.type: cls += " type-func"
+                if "class" in node.type:
+                    cls += " type-class"
+                elif "function" in node.type or "method" in node.type:
+                    cls += " type-func"
 
-                html_parts.append(f'<span id="chunk-{node.id}" class="{cls}" onclick="selectChunk(\'{node.id}\'); event.stopPropagation();">')
+                html_parts.append(
+                    f'<span id="chunk-{node.id}" class="{cls}" '
+                    f'onclick="selectChunk(\'{node.id}\'); event.stopPropagation();">'
+                )
                 nodes_json.append({"id": node.id, "type": node.type})
             else: # End
                 html_parts.append('</span>')
@@ -415,7 +432,9 @@ class DebugHandler(BaseHTTPRequestHandler):
             print("✅ Page Served.")
 
         elif parsed.path == '/rerun':
-            self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
         else:
             self.send_error(404)
 

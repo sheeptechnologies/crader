@@ -17,19 +17,19 @@ try:
 except ImportError:
     pass
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import HumanMessage, SystemMessage  # noqa: E402
+from langchain_core.tools import tool  # noqa: E402
+from langchain_openai import ChatOpenAI  # noqa: E402
+from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
 
 # LangGraph
-from langgraph.prebuilt import create_react_agent
-from pydantic import BaseModel, Field
+from langgraph.prebuilt import create_react_agent  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
 # --- IMPORT LIBRERIA ---
-from crader import CodebaseIndexer, CodeNavigator, CodeReader, CodeRetriever
-from crader.schema import VALID_CATEGORIES, VALID_ROLES
-from crader.storage.postgres import PostgresGraphStorage
+from crader import CodebaseIndexer, CodeNavigator, CodeReader, CodeRetriever  # noqa: E402
+from crader.schema import VALID_CATEGORIES, VALID_ROLES  # noqa: E402
+from crader.storage.postgres import PostgresGraphStorage  # noqa: E402
 
 # Import dinamico provider
 try:
@@ -129,7 +129,7 @@ class SearchFiltersInput(BaseModel):
 @tool
 def list_repo_structure(path: str = "", max_depth: int = 2):
     """
-    Elenca file e cartelle nella repository. 
+    Elenca file e cartelle nella repository.
     Usa questo tool ALL'INIZIO per capire com'è organizzato il progetto (es. dove sono i source file, dove sono i test).
     """
     try:
@@ -150,9 +150,11 @@ def list_repo_structure(path: str = "", max_depth: int = 2):
                             break
                         sub_icon = "  └─ 📁" if sub['type'] == 'dir' else "  └─ 📄"
                         output.append(f"{sub_icon} {sub['name']}")
-                except: pass
+                except Exception:
+                    pass
         return "\n".join(output)
-    except Exception as e: return f"Errore listing: {e}"
+    except Exception as e:
+        return f"Errore listing: {e}"
 
 @tool
 def search_codebase(query: str, filters: Optional[SearchFiltersInput] = None):

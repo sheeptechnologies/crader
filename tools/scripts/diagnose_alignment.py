@@ -14,11 +14,12 @@ except ImportError:
 # --- SETUP PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
-if src_dir not in sys.path: sys.path.insert(0, src_dir)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
 
-from crader import CodebaseIndexer, CodeRetriever
-from crader.providers.embedding import OpenAIEmbeddingProvider
-from crader.storage.postgres import PostgresGraphStorage
+from crader import CodebaseIndexer, CodeRetriever  # noqa: E402
+from crader.providers.embedding import OpenAIEmbeddingProvider  # noqa: E402
+from crader.storage.postgres import PostgresGraphStorage  # noqa: E402
 
 # Logging Setup
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
@@ -31,7 +32,8 @@ REPO_DIR = os.path.abspath("temp_rigorous_repo")
 
 def setup_complex_repo(path):
     """Crea una repo complessa per testare tutti i casi d'uso semantici."""
-    if os.path.exists(path): shutil.rmtree(path)
+    if os.path.exists(path):
+        shutil.rmtree(path)
     os.makedirs(path)
     os.makedirs(os.path.join(path, "src", "backend"), exist_ok=True)
     os.makedirs(os.path.join(path, "src", "frontend"), exist_ok=True)
@@ -99,7 +101,7 @@ def assert_retrieval(retriever, repo_id, name, query, filters, expect_files=[], 
         raise e
 
     found_files = [r.file_path for r in results]
-    found_labels = [l for r in results for l in r.semantic_labels]
+    found_labels = [label for r in results for label in r.semantic_labels]
 
     # Check Files Expected
     for f in expect_files:
@@ -116,7 +118,7 @@ def assert_retrieval(retriever, repo_id, name, query, filters, expect_files=[], 
     # Check Tags Expected
     for tag in expect_tags:
         # Cerchiamo parzialmente nel testo delle label
-        if not any(tag.lower() in l.lower() for l in found_labels):
+        if not any(tag.lower() in label.lower() for label in found_labels):
             logger.error(f"❌ FAIL: Tag semantico '{tag}' mancante nei risultati.")
             return False
 
@@ -147,9 +149,13 @@ def run_rigorous_test():
 
         stats2 = storage.get_stats()
         if stats1['total_nodes'] != stats2['total_nodes']:
-            raise AssertionError(f"❌ FAIL Idempotenza: Nodi cambiati {stats1['total_nodes']} -> {stats2['total_nodes']}")
+            raise AssertionError(
+                f"❌ FAIL Idempotenza: Nodi cambiati {stats1['total_nodes']} -> {stats2['total_nodes']}"
+            )
         if stats1['embeddings'] != stats2['embeddings']:
-            raise AssertionError(f"❌ FAIL Idempotenza: Embeddings cambiati {stats1['embeddings']} -> {stats2['embeddings']}")
+            raise AssertionError(
+                f"❌ FAIL Idempotenza: Embeddings cambiati {stats1['embeddings']} -> {stats2['embeddings']}"
+            )
         logger.info("✅ PASS: Idempotenza confermata.")
 
         repo_id = indexer.parser.repo_id
@@ -225,8 +231,10 @@ def run_rigorous_test():
         import traceback
         traceback.print_exc()
     finally:
-        if 'storage' in locals(): storage.close()
-        if os.path.exists(REPO_DIR): shutil.rmtree(REPO_DIR)
+        if 'storage' in locals():
+            storage.close()
+        if os.path.exists(REPO_DIR):
+            shutil.rmtree(REPO_DIR)
 
 if __name__ == "__main__":
     run_rigorous_test()

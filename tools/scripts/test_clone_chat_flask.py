@@ -21,19 +21,19 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 # --- LIBRARIES ---
-from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.prebuilt import create_react_agent
-from pydantic import BaseModel, Field
+from langchain_core.messages import HumanMessage, SystemMessage  # noqa: E402
+from langchain_core.tools import tool  # noqa: E402
+from langchain_openai import ChatOpenAI  # noqa: E402
+from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
+from langgraph.prebuilt import create_react_agent  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
 # --- SHEEP COMPONENTS ---
-from crader.indexer import CodebaseIndexer
-from crader.navigator import CodeNavigator
-from crader.providers.embedding import OpenAIEmbeddingProvider
-from crader.reader import CodeReader
-from crader.retriever import CodeRetriever
+from crader.indexer import CodebaseIndexer  # noqa: E402
+from crader.navigator import CodeNavigator  # noqa: E402
+from crader.providers.embedding import OpenAIEmbeddingProvider  # noqa: E402
+from crader.reader import CodeReader  # noqa: E402
+from crader.retriever import CodeRetriever  # noqa: E402
 
 # --- CONFIGURAZIONE ---
 DB_URL = os.getenv("DB_URL", "postgresql://sheep_user:sheep_password@localhost:6432/sheep_index")
@@ -108,7 +108,10 @@ async def main_async():
                 print(f"   ✨ Embedding: {update.get('total_embedded')} vectors...", end='\r')
             elif status == 'completed':
                 stats = update
-                print(f"\n✅ Embedding Sync Complete. (New: {stats.get('newly_embedded')}, Recovered: {stats.get('recovered_from_history')})")
+                logger.info(
+                    f"✅ Snapshot {snapshot_id} Ready! (New: {stats.get('newly_embedded')}, "
+                    f"Recovered: {stats.get('recovered_from_history')})"
+                )
 
         # 5. SETUP RETRIEVAL FACADE
         # Usiamo il connettore dell'indexer per risparmiare risorse, o ne creiamo uno nuovo
@@ -117,7 +120,9 @@ async def main_async():
         navigator = CodeNavigator(indexer.storage)
 
         # Otteniamo repo_id stabile per le query
-        repo_info = indexer.storage.get_repository(indexer.storage.ensure_repository(repo_url_local, REPO_BRANCH, "flask"))
+        repo_info = indexer.storage.get_repository(
+            indexer.storage.ensure_repository(repo_url_local, REPO_BRANCH, "flask")
+        )
         repo_id = repo_info['id']
 
         # ==============================================================================
@@ -147,7 +152,8 @@ async def main_async():
                     strategy="hybrid",
                     filters=f_dict
                 )
-                if not results: return "Nessun risultato trovato."
+                if not results:
+                    return "Nessun risultato trovato."
                 return "\n".join([r.render() for r in results])
             except Exception as e:
                 return f"Errore ricerca: {e}"
@@ -157,7 +163,8 @@ async def main_async():
             """Legge il contenuto di un file."""
             try:
                 data = reader.read_file(snapshot_id, file_path, start_line, end_line)
-                if not data: return "File non trovato o vuoto."
+                if not data:
+                    return "File non trovato o vuoto."
                 return f"File: {data['file_path']}\nContent:\n{data['content']}"
             except Exception as e:
                 return f"Errore lettura: {e}"
@@ -174,7 +181,8 @@ async def main_async():
                 refs = navigator.analyze_impact(node_id)
                 if refs:
                     report.append(f"⬅️ CALLED BY ({len(refs)}):")
-                    for r in refs[:5]: report.append(f"   - {r['file']} L{r['line']} ({r['relation']})")
+                    for r in refs[:5]:
+                        report.append(f"   - {r['file']} L{r['line']} ({r['relation']})")
                 else:
                     report.append("⬅️ CALLED BY: None detected.")
 
@@ -198,13 +206,13 @@ async def main_async():
         SYSTEM_PROMPT = f"""
         Sei un Senior Software Engineer che analizza la repository 'Flask'.
         Hai accesso a un Knowledge Graph avanzato.
-        
+
         SNAPSHOT ID: {snapshot_id}
-        
+
         Usa 'search_codebase' per trovare punti di ingresso.
         Usa 'read_file' per leggere il codice.
         Usa 'inspect_node' sugli UUID trovati per capire le dipendenze (Graph RAG).
-        
+
         Rispondi in modo conciso e tecnico.
         """
 
@@ -220,7 +228,8 @@ async def main_async():
         while True:
             try:
                 user_input = input("\nUser: ").strip()
-                if user_input.lower() in ["exit", "quit"]: break
+                if user_input.lower() in ["exit", "quit"]:
+                    break
 
                 print("Thinking...", end="", flush=True)
 

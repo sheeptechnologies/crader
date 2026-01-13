@@ -11,11 +11,12 @@ import time
 # --- SETUP PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
-if src_dir not in sys.path: sys.path.insert(0, src_dir)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
 
-from crader import CodebaseIndexer, CodeRetriever
-from crader.providers.embedding import FastEmbedProvider
-from crader.storage.postgres import PostgresGraphStorage
+from crader import CodebaseIndexer, CodeRetriever  # noqa: E402
+from crader.providers.embedding import FastEmbedProvider  # noqa: E402
+from crader.storage.postgres import PostgresGraphStorage  # noqa: E402
 
 # Configurazione Logging (Thread-safe format)
 logging.basicConfig(
@@ -31,7 +32,8 @@ DB_URL = "postgresql://sheep_user:sheep_password@localhost:5433/sheep_index"
 
 def setup_repo(path, name, unique_function):
     """Crea una repo dummy con un contenuto unico."""
-    if os.path.exists(path): shutil.rmtree(path)
+    if os.path.exists(path):
+        shutil.rmtree(path)
     os.makedirs(path)
     os.makedirs(os.path.join(path, "src"), exist_ok=True)
 
@@ -48,13 +50,16 @@ def process_{name}_transaction(data):
     subprocess.run(["git", "add", "."], cwd=path, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "commit", "-m", f"init {name}"], cwd=path, stdout=subprocess.DEVNULL)
     # URL remoto finto per generare ID diversi
-    subprocess.run(["git", "remote", "add", "origin", f"https://github.com/fake/repo-{name}.git"], cwd=path, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "remote", "add", "origin", f"https://github.com/fake/repo-{name}.git"],
+        cwd=path, stdout=subprocess.DEVNULL
+    )
 
 def worker_pipeline(storage, provider, repo_path, repo_name, unique_keyword):
     """
     Funzione eseguita da ogni thread: Index -> Embed -> Check Isolation.
     """
-    thread_name = threading.current_thread().name
+    _ = threading.current_thread().name
     logger.info(f"🚀 START Pipeline per {repo_name}")
 
     try:
@@ -144,8 +149,10 @@ def run_concurrent_test():
 
     finally:
         storage.close()
-        if os.path.exists(path_a): shutil.rmtree(path_a)
-        if os.path.exists(path_b): shutil.rmtree(path_b)
+        if os.path.exists(path_a):
+            shutil.rmtree(path_a)
+        if os.path.exists(path_b):
+            shutil.rmtree(path_b)
 
 if __name__ == "__main__":
     run_concurrent_test()

@@ -6,10 +6,11 @@ import sys
 # --- SETUP PATH ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
 src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
-if src_dir not in sys.path: sys.path.insert(0, src_dir)
+if src_dir not in sys.path:
+    sys.path.insert(0, src_dir)
 
-from crader import CodebaseIndexer
-from crader.storage.postgres import PostgresGraphStorage
+from crader import CodebaseIndexer  # noqa: E402
+from crader.storage.postgres import PostgresGraphStorage  # noqa: E402
 
 # Configurazione Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s', datefmt='%H:%M:%S')
@@ -22,7 +23,8 @@ def setup_toxic_repo(path):
     """
     Genera una repository piena di file 'tossici' per testare la robustezza.
     """
-    if os.path.exists(path): shutil.rmtree(path)
+    if os.path.exists(path):
+        shutil.rmtree(path)
     os.makedirs(path)
     os.makedirs(os.path.join(path, "src"), exist_ok=True)
 
@@ -61,7 +63,7 @@ def setup_toxic_repo(path):
     "module": "commonjs"
   },
   "include": ["src/**/*"],
-  "exclude": ["src/heavy.js"] 
+  "exclude": ["src/heavy.js"]
 }
 """)
 
@@ -130,7 +132,9 @@ def run_chaos_test():
         # ASSERT 4: ENCODING / SYNTAX
         bad_syntax = db_files.get("src/bad_syntax.py")
         if bad_syntax:
-            logger.info(f"ℹ️ Info: Bad Syntax file status: {bad_syntax['status']} (Tree-sitter handles errors gracefully)")
+            logger.info(
+                f"ℹ️ Info: Bad Syntax file status: {bad_syntax['status']} (Tree-sitter handles errors gracefully)"
+            )
 
         logger.info("\n🎉 CHAOS TEST PASSED: Il sistema è resiliente!")
 
@@ -140,7 +144,8 @@ def run_chaos_test():
         traceback.print_exc()
     finally:
         storage.close()
-        if os.path.exists(test_repo_path): shutil.rmtree(test_repo_path)
+        if os.path.exists(test_repo_path):
+            shutil.rmtree(test_repo_path)
 
 if __name__ == "__main__":
     run_chaos_test()

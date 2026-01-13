@@ -19,9 +19,9 @@ src_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from crader.indexer import CodebaseIndexer
-from crader.providers.embedding import OpenAIEmbeddingProvider
-from crader.storage.connector import PooledConnector
+from crader.indexer import CodebaseIndexer  # noqa: E402
+from crader.providers.embedding import OpenAIEmbeddingProvider  # noqa: E402
+from crader.storage.connector import PooledConnector  # noqa: E402
 
 # --- CONFIGURAZIONE ---
 DB_DSN = os.getenv("DB_URL", "postgresql://sheep_user:sheep_password@localhost:6432/sheep_index")

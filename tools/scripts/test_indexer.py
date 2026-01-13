@@ -78,7 +78,8 @@ def test_indexing_full(repo_path: str, output_json: str = None, branch: str = "m
 
     count = 0
     for node in nodes:
-        if count >= 3: break
+        if count >= 3:
+            break
         raw_content = content_map.get(node.get('chunk_hash', ''), "[NO CONTENT]")
         preview = raw_content[:100].replace('\n', ' ↵ ')
 

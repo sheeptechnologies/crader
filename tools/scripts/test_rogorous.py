@@ -10,8 +10,8 @@ src_dir = os.path.abspath(os.path.join(current_dir, "..", "src"))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from crader import CodebaseIndexer, CodeReader
-from crader.storage.postgres import PostgresGraphStorage
+from crader import CodebaseIndexer, CodeReader  # noqa: E402
+from crader.storage.postgres import PostgresGraphStorage  # noqa: E402
 
 # Configurazione Logging
 logging.basicConfig(
@@ -97,7 +97,8 @@ def test_1_stampede(storage):
         futures = [executor.submit(worker_index_task, storage, False) for _ in range(20)]
         for f in as_completed(futures):
             res = f.result()
-            if res: snapshots.append(res)
+            if res:
+                snapshots.append(res)
 
     elapsed = time.time() - start_time
     unique_snaps = set(snapshots)
@@ -133,7 +134,8 @@ def test_3_pool_stress(storage, snap_id):
     with ThreadPoolExecutor(max_workers=50) as executor:
         futures = [executor.submit(worker_read_task, storage, snap_id) for _ in range(50)]
         for f in as_completed(futures):
-            if f.result(): successes += 1
+            if f.result():
+                successes += 1
 
     elapsed = time.time() - start
     print(f"   ⏱️  Tempo: {elapsed:.2f}s")

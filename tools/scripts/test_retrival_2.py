@@ -165,7 +165,7 @@ def run_advanced_tests():
 class _Legacy$Handler_v99:
     def __init__(self):
         self.DATA_$$_CACHE = {}
-    
+
     def exec_cmd_#42(self):
         # Handles ticket #42 specific edge case
         pass
@@ -193,7 +193,8 @@ class _Legacy$Handler_v99:
         import traceback
         traceback.print_exc()
     finally:
-        if 'indexer' in locals(): storage.close()
+        if 'indexer' in locals():
+            storage.close()
         shutil.rmtree(temp_dir)
         logger.info("\n🧹 Pulizia completata.")
 

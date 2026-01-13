@@ -56,7 +56,12 @@ def main():
 
     # 1. SETUP AMBIENTE
     logger.info(f"⬇️  Cloning Flask in {REPO_PATH}...")
-    subprocess.run(["git", "clone", "--depth", "1", REPO_URL, REPO_PATH], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "clone", "--depth", "1", REPO_URL, REPO_PATH],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL
+    )
 
     try:
         storage = PostgresGraphStorage(DB_URL)

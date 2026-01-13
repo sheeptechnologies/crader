@@ -11,16 +11,16 @@ src_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.trace import ProxyTracerProvider
+from opentelemetry import trace  # noqa: E402
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter  # noqa: E402
+from opentelemetry.sdk.resources import Resource  # noqa: E402
+from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
+from opentelemetry.sdk.trace.export import BatchSpanProcessor  # noqa: E402
+from opentelemetry.trace import ProxyTracerProvider  # noqa: E402
 
-from crader import CodebaseIndexer
-from crader.storage.connector import PooledConnector
-from crader.storage.postgres import PostgresGraphStorage
+from crader import CodebaseIndexer  # noqa: E402
+from crader.storage.connector import PooledConnector  # noqa: E402
+from crader.storage.postgres import PostgresGraphStorage  # noqa: E402
 
 
 # [TELEMETRY HOOK]

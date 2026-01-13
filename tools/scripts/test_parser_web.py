@@ -1,3 +1,5 @@
+# ruff: noqa: E501, W291, W293
+
 import argparse
 import html
 import json
@@ -15,7 +17,7 @@ if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
 try:
-    from crader.models import ChunkNode, ParsingResult
+    from crader.models import ChunkNode
     from crader.parsing.parser import TreeSitterRepoParser
 except ImportError as e:
     print(f"[FATAL] Errore importazione: {e}")
@@ -187,7 +189,8 @@ class HtmlVisualizer:
         # 1. Aggiungi relazioni geometriche (Fallback)
         for child in current_nodes:
             for possible_parent in current_nodes:
-                if child.id == possible_parent.id: continue
+                if child.id == possible_parent.id:
+                    continue
                 if (possible_parent.byte_range[0] <= child.byte_range[0] and
                     possible_parent.byte_range[1] >= child.byte_range[1]):
                     # Solo se non c'è già una relazione esplicita più forte
@@ -215,8 +218,10 @@ class HtmlVisualizer:
                         relations_map[tgt]["others"].append({"target": src, "type": f"⬅ {rtype}"})
 
         try:
-            with open(file_path, 'rb') as f: source_bytes = f.read()
-        except: return "", "[]", "{}"
+            with open(file_path, 'rb') as f:
+                source_bytes = f.read()
+        except Exception:
+            return "", "[]", "{}"
 
         events = []
         for n in current_nodes:
@@ -253,8 +258,10 @@ class HtmlVisualizer:
 
             if evt_type == 1:
                 bg = "rgba(255,255,255,0.05)"
-                if "class" in node.type: bg = "rgba(78, 201, 176, 0.1)"
-                elif "function" in node.type: bg = "rgba(220, 220, 170, 0.1)"
+                if "class" in node.type:
+                    bg = "rgba(78, 201, 176, 0.1)"
+                elif "function" in node.type:
+                    bg = "rgba(220, 220, 170, 0.1)"
 
                 html_buffer.append(f'<span id="{node.id}" class="code-chunk" style="background:{bg}" title="{node.type}">')
 
@@ -271,9 +278,12 @@ class HtmlVisualizer:
         if last_idx < len(source_bytes):
             html_buffer.append(html.escape(source_bytes[last_idx:].decode('utf-8', errors='replace')))
 
-        seen = set(); unique = []
+        seen = set()
+        unique = []
         for x in chunk_json_list:
-            if x['id'] not in seen: unique.append(x); seen.add(x['id'])
+            if x['id'] not in seen:
+                unique.append(x)
+                seen.add(x['id'])
 
         return "".join(html_buffer), json.dumps(unique), json.dumps(relations_map)
 
@@ -281,17 +291,28 @@ class DebugServer(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == '/':
-            self.send_response(200); self.send_header('Content-type', 'text/html'); self.end_headers()
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
             print(f"Running parser on: {current_repo_root}")
             parser = TreeSitterRepoParser(repo_path=current_repo_root)
             result = parser.extract_semantic_chunks()
             relations = getattr(result, 'relations', [])
-            code_html, chunks_json, rels_json = HtmlVisualizer.prepare_data(current_target_file, result.nodes, result.contents, relations)
-            out = HtmlVisualizer.TEMPLATE.replace('__CODE_HTML__', code_html).replace('__CHUNKS_JSON__', chunks_json).replace('__RELATIONS_JSON__', rels_json).replace('__CHUNK_COUNT__', str(len(json.loads(chunks_json))))
+            code_html, chunks_json, rels_json = HtmlVisualizer.prepare_data(
+                current_target_file, result.nodes, result.contents, relations
+            )
+            out = HtmlVisualizer.TEMPLATE.replace('__CODE_HTML__', code_html)
+            out = out.replace('__CHUNKS_JSON__', chunks_json)
+            out = out.replace('__RELATIONS_JSON__', rels_json)
+            out = out.replace('__CHUNK_COUNT__', str(len(json.loads(chunks_json))))
             self.wfile.write(out.encode('utf-8'))
         elif parsed.path == '/rerun':
-            self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
-        else: self.send_response(404); self.end_headers()
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        else:
+            self.send_response(404)
+            self.end_headers()
 
 def main():
     global current_target_file, current_repo_root

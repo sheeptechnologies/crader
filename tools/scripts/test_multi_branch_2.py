@@ -10,9 +10,9 @@ src_dir = os.path.abspath(os.path.join(current_dir, '..', 'src'))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from crader import CodebaseIndexer, CodeRetriever
-from crader.providers.embedding import DummyEmbeddingProvider
-from crader.storage.sqlite import SqliteGraphStorage
+from crader import CodebaseIndexer, CodeRetriever  # noqa: E402
+from crader.providers.embedding import DummyEmbeddingProvider  # noqa: E402
+from crader.storage.sqlite import SqliteGraphStorage  # noqa: E402
 
 # Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%H:%M:%S')
@@ -29,7 +29,8 @@ def run_lifecycle_test():
     repo_path = os.path.join(base_dir, "repo")
     db_path = os.path.join(base_dir, "graph.db")
 
-    if os.path.exists(base_dir): shutil.rmtree(base_dir)
+    if os.path.exists(base_dir):
+        shutil.rmtree(base_dir)
     os.makedirs(repo_path)
 
     # 1. INIT REPO
@@ -122,7 +123,10 @@ def run_lifecycle_test():
     # L'ID dovrebbe essere LO STESSO di prima (stesso url, stesso branch), ma i dati aggiornati
     id_main_v2 = indexer_main_v2.parser.repo_id
     if id_main_v2 != id_main:
-        logger.warning(f"⚠️ Nota: L'ID è cambiato ({id_main} -> {id_main_v2}). Questo è accettabile se l'implementazione rigenera l'UUID, ma ideale se stabile.")
+        logger.warning(
+            f"⚠️ Nota: L'ID è cambiato ({id_main} -> {id_main_v2}). "
+            "Questo è accettabile se l'implementazione rigenera l'UUID, ma ideale se stabile."
+        )
 
     # Verifica che il vecchio contenuto 'OLD_LOGIC_MAIN' sia sparito
     res_v2_old = retriever.retrieve("OLD_LOGIC_MAIN", repo_id=id_main_v2, strategy="keyword")

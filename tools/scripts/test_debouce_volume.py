@@ -11,8 +11,8 @@ src_dir = os.path.abspath(os.path.join(current_dir, "..", "src"))
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-from crader import CodebaseIndexer
-from crader.storage.postgres import PostgresGraphStorage
+from crader import CodebaseIndexer  # noqa: E402
+from crader.storage.postgres import PostgresGraphStorage  # noqa: E402
 
 # Configurazione Logging
 logging.basicConfig(
@@ -44,7 +44,8 @@ def run_indexing_job(branch_name: str) -> Tuple[str, str, float]:
 
     try:
         # Ogni worker ha la sua istanza di storage (ma condividono il pool sottostante se ben configurato)
-        # In un test reale, userebbero lo stesso pool globale. Qui ne creiamo uno per semplicità o usiamo quello globale.
+        # In un test reale, userebbero lo stesso pool globale.
+        # Qui ne creiamo uno per semplicità o usiamo quello globale.
         # Per stressare il pool, creiamo una connessione dedicata.
         storage = PostgresGraphStorage(DB_URL, min_size=1, max_size=5)
 
