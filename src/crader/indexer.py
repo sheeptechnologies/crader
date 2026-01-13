@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 _worker_parser = None
 _worker_storage = None
+_worker_builder = None
 
 
 def _init_worker_process(
@@ -73,7 +74,7 @@ def _init_worker_process(
         except Exception as e:
             print(f"⚠️ [WORKER INIT] Custom telemetry setup failed: {e}")
 
-    global _worker_parser, _worker_storage
+    global _worker_parser, _worker_storage, _worker_builder
 
     # 1. Init Parser (Cpu Bound)
     _worker_parser = TreeSitterRepoParser(repo_path=worktree_path)
@@ -91,9 +92,11 @@ def _init_worker_process(
     try:
         connector = SingleConnector(dsn=db_url)
         _worker_storage = PostgresGraphStorage(connector=connector)
+        _worker_builder = KnowledgeGraphBuilder(_worker_storage)
     except Exception as e:
         print(f"❌ [WORKER INIT ERROR] DB Connect failed: {e}")
         _worker_storage = None
+        _worker_builder = None
 
 
 def _process_and_insert_chunk(file_paths: List[str], carrier: Dict[str, str]) -> Tuple[int, Dict[str, float]]:
@@ -117,15 +120,15 @@ def _process_and_insert_chunk(file_paths: List[str], carrier: Dict[str, str]) ->
         Tuple[int, Dict[str, float]]: A tuple containing the count of successfully processed files and an empty metrics dictionary (reserved for future use).
     """
     gc.disable()
-    global _worker_parser, _worker_storage
-    if not _worker_storage:
+    global _worker_parser, _worker_storage, _worker_builder
+    if not _worker_storage or not _worker_builder:
         return 0, {}
 
     ctx = extract(carrier)
     BATCH_SIZE_NODES = 50000
     BATCH_SIZE_FILES = 500
 
-    buffer = {"files": [], "nodes": [], "contents": [], "rels": []}
+    buffer = {"files": [], "nodes": [], "contents": [], "rels": [], "fts": []}
     processed_count = 0
 
     def flush_buffers():
@@ -143,10 +146,16 @@ def _process_and_insert_chunk(file_paths: List[str], carrier: Dict[str, str]) ->
                     _worker_storage.add_nodes_raw(buffer["nodes"])
                 if buffer["rels"]:
                     _worker_storage.add_relations_raw(buffer["rels"])
+                
+                # Flush Full-Text Search (FTS) entries *after* nodes to ensure referential integrity.
+                if buffer["fts"]:
+                     _worker_storage.add_search_index(buffer["fts"])
+
             buffer["files"].clear()
             buffer["nodes"].clear()
             buffer["contents"].clear()
             buffer["rels"].clear()
+            buffer["fts"].clear()
         except Exception as e:
             logger.error(f"❌ [WORKER FLUSH ERROR] {e}")
             raise e
@@ -193,6 +202,13 @@ def _process_and_insert_chunk(file_paths: List[str], carrier: Dict[str, str]) ->
                         buffer["contents"].append((c.chunk_hash, c.content))
                     for r in rels:
                         buffer["rels"].append((r.source_id, r.target_id, r.relation_type, json.dumps(r.metadata)))
+                    
+                    # Buffer FTS documents for batch insertion.
+                    # We defer insertion to the flush phase to ensure nodes exist first.
+                    if nodes and contents:
+                         content_map = {c.chunk_hash: c for c in contents}
+                         fts_docs = _worker_builder.build_search_documents(nodes, content_map)
+                         buffer["fts"].extend(fts_docs)
 
                     processed_count += 1
                     if len(buffer["nodes"]) >= BATCH_SIZE_NODES or len(buffer["files"]) >= BATCH_SIZE_FILES:

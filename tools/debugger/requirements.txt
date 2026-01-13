@@ -46,8 +46,6 @@ starlette==0.50.0
 sympy==1.14.0
 tokenizers==0.22.1
 tqdm==4.67.1
-tree-sitter
-tree-sitter-languages
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.5.0

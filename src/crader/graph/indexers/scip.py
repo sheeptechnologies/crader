@@ -183,6 +183,10 @@ class SCIPRunner:
             removed_dirs = 0
             removed_files = 0
 
+
+            pruned_dirs_list = []
+            pruned_files_list = []
+
             for root, dirs, files in os.walk(project_root, topdown=True):
                 # 1. Directory Pruning (Blacklist)
                 dirs_to_remove = set()
@@ -200,8 +204,10 @@ class SCIPRunner:
 
                 for d in dirs_to_remove:
                     try:
-                        shutil.rmtree(os.path.join(root, d))
+                        full_path = os.path.join(root, d)
+                        shutil.rmtree(full_path)
                         removed_dirs += 1
+                        pruned_dirs_list.append(os.path.relpath(full_path, project_root))
                     except OSError:
                         pass
 
@@ -223,13 +229,21 @@ class SCIPRunner:
 
                     # If we get here, it's a useless file (e.g. .jpg, .csv, .log) -> DELETE
                     try:
-                        os.remove(os.path.join(root, f))
+                        full_path = os.path.join(root, f)
+                        os.remove(full_path)
                         removed_files += 1
+                        pruned_files_list.append(os.path.relpath(full_path, project_root))
                     except OSError:
                         pass
 
             span.set_attribute("scip.prune.removed_dirs", removed_dirs)
             span.set_attribute("scip.prune.removed_files", removed_files)
+            
+            if pruned_dirs_list:
+                logger.info(f"✂️ [SCIP Prune] Removed Directories: {', '.join(pruned_dirs_list)}")
+            if pruned_files_list:
+                logger.info(f"✂️ [SCIP Prune] Removed Files: {', '.join(pruned_files_list)}")
+            
             logger.info(f"✂️ [SCIP Prune] Cleaned {removed_dirs} dirs and {removed_files} junk files.")
 
     def prepare_indices(self) -> List[Tuple[str, str]]:

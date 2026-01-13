@@ -20,15 +20,28 @@ except ImportError as e:
     logger.error(f"❌ Errore importazione: {e}")
     sys.exit(1)
 
-def test_indexing_full(repo_path: str, output_json: str = None):
+def test_indexing_full(repo_path: str, output_json: str = None, branch: str = "main"):
     repo_path = os.path.abspath(repo_path)
     if not os.path.isdir(repo_path):
         logger.error(f"Cartella non trovata: {repo_path}")
         return
 
-    logger.info(f"🚀 TEST INDEXER SU: {repo_path}")
+    logger.info(f"🚀 TEST INDEXER SU: {repo_path} (Branch: {branch})")
 
-    indexer = CodebaseIndexer(repo_path)
+    indexer = CodebaseIndexer(repo_path, branch=branch, db_url="postgresql://mock:mock@localhost:5432/mock")
+
+    # MOCK STORAGE FOR DEMO
+    from unittest.mock import MagicMock
+    indexer.connector = MagicMock()
+    indexer.storage = MagicMock()
+    # Ensure ensure_repository returns a dummy ID
+    indexer.storage.ensure_repository.return_value = "repo-123"
+    # Ensure create_snapshot returns a dummy ID and new=True
+    indexer.storage.create_snapshot.return_value = ("snap-123", True)
+    # Ensure check_and_reset returns False
+    indexer.storage.check_and_reset_reindex_flag.return_value = False
+    
+    logger.info("⚠️ RUNNING WITH MOCKED STORAGE (DB Bypass) ⚠️")
 
     # 1. ESECUZIONE
     logger.info("\n--- FASE 1: INDICIZZAZIONE ---")
@@ -71,6 +84,7 @@ def test_indexing_full(repo_path: str, output_json: str = None):
 
         print(f"[{count+1}] {node['file_path']} (L{node['start_line']}-{node['end_line']})")
         print(f"    Type: {node['type']}")
+        print(f"    Metadata: {node.get('metadata', 'N/A')}")
         print(f"    Code: \"{preview}...\"")
         print("-" * 60)
         count += 1
@@ -109,5 +123,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("repo_path", type=str)
     parser.add_argument("--out", type=str, default="debug_full_dump.json")
+    parser.add_argument("--branch", type=str, default="main")  # ADDED
     args = parser.parse_args()
-    test_indexing_full(args.repo_path, args.out)
+    test_indexing_full(args.repo_path, args.out, branch=args.branch)

@@ -57,6 +57,7 @@ class TestParserCoverage:
         parser._get_semantic_captures(MagicMock(), "python")
         assert parser._query_cache["python"] is None
 
+    @patch("crader.parsing.parser.QueryCursor", None)
     def test_get_semantic_captures_ignore_bad_captures(self):
         parser = TreeSitterRepoParser("/tmp")
         # Setup valid query mock

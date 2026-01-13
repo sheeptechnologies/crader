@@ -185,7 +185,7 @@ def index_repo(repo_id: str, req: IndexRequest, background_tasks: BackgroundTask
             # We pass DB_URL to it so it can connect
             indexer = CodebaseIndexer(repo_url, branch, db_url=DB_URL)
             try:
-                snapshot_id = indexer.index(force=req.force)
+                snapshot_id = indexer.index(force=True)
                 logger.info(f"Indexing completed. Snapshot ID: {snapshot_id}")
             finally:
                 indexer.close()

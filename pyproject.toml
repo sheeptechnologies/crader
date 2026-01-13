@@ -25,8 +25,8 @@ keywords = ["code-analysis", "graph", "tree-sitter", "scip", "indexing"]
 
 dependencies = [
     "networkx>=3.0",
-    "tree-sitter>=0.21.3",
-    "tree-sitter-language-pack",
+    "tree-sitter==0.21.3",
+    "tree-sitter-languages==1.8.0",
     "alembic>=1.7.0",
     "click>=8.0",
     "GitPython>=3.1",

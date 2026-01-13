@@ -7,7 +7,16 @@ from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 from opentelemetry import trace
 from tree_sitter import Node, Parser
-from tree_sitter_language_pack import get_language
+# Safe import for QueryCursor (some versions might differ or it might be missing in mocks)
+try:
+    from tree_sitter import QueryCursor
+except ImportError:
+    QueryCursor = None
+
+try:
+    from tree_sitter_languages import get_language
+except ImportError:
+    from tree_sitter_language_pack import get_language
 
 from ..models import ChunkContent, ChunkNode, CodeRelation, FileRecord
 from ..providers.metadata import GitMetadataProvider, LocalMetadataProvider, MetadataProvider
@@ -245,12 +254,32 @@ class TreeSitterRepoParser:
 
         try:
             # 3. EXECUTE (C-Speed)
-            # Ora misuriamo solo l'esecuzione pura, senza l'overhead di compilazione
-            captures = query.captures(tree.root_node)
-
+            # Supporto per tree-sitter >= 0.22 (usa QueryCursor)
+            if QueryCursor:
+                cursor = QueryCursor(query)
+                captures = cursor.captures(tree.root_node)
+            else:
+                # Legacy support
+                captures = query.captures(tree.root_node)
+            
+            # Normalize dictionary results (New API) to list of tuples (Old Logic)
+            if isinstance(captures, dict):
+                flat_captures = []
+                for name, nodes_list in captures.items():
+                    # captures dict values can be single nodes or lists?
+                    # Test output showed list: {'m': [<Node ...>]}
+                    if not isinstance(nodes_list, list):
+                        nodes_list = [nodes_list]
+                    for n in nodes_list:
+                        flat_captures.append((n, name))
+                captures = flat_captures
+            
             results = []
+            
             # Ottimizzazione Loop: riduciamo lookup e split
             for node, capture_name in captures:
+                # print(f"[DEBUG] Capture: {capture_name} at {node.start_byte}-{node.end_byte}")
+                
                 # capture_name è es: "role.class"
                 if "." not in capture_name:
                     continue
@@ -269,8 +298,11 @@ class TreeSitterRepoParser:
                         },
                     }
                 )
+            
+            # print(f"[DEBUG] Found {len(results)} matches for {language_name}")
             return results
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] Capture error for {language_name}: {e}")
             return []
 
     # ==============================================================================

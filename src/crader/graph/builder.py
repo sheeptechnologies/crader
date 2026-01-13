@@ -32,13 +32,10 @@ class KnowledgeGraphBuilder:
     def add_contents(self, contents: List):
         self.storage.add_contents(contents)
 
-    def index_search_content(self, nodes: List[ChunkNode], contents: Dict[str, ChunkContent]):
+    def build_search_documents(self, nodes: List[ChunkNode], contents: Dict[str, ChunkContent]) -> List[Dict]:
         """
-        Populates the Lexical Search Index (FTS).
-
-        Aggregates semantic tags, roles, and raw code content into a unified "Search Document".
-        This empowers the search engine to find code not just by text match but by concepts
-        (e.g. "auth controller", "retry logic").
+        Generates search documents (FTS) from Nodes and Contents.
+        Does NOT insert into DB.
         """
         search_batch = []
         for node in nodes:
@@ -60,6 +57,13 @@ class KnowledgeGraphBuilder:
             search_batch.append(
                 {"node_id": node.id, "file_path": node.file_path, "tags": tags_str, "content": raw_content}
             )
+        return search_batch
+
+    def index_search_content(self, nodes: List[ChunkNode], contents: Dict[str, ChunkContent]):
+        """
+        Populates the Lexical Search Index (FTS).
+        """
+        search_batch = self.build_search_documents(nodes, contents)
 
         if hasattr(self.storage, "add_search_index"):
             self.storage.add_search_index(search_batch)
@@ -83,7 +87,7 @@ class KnowledgeGraphBuilder:
         if not relations:
             return
 
-        logger.info(f"Elaborazione di {len(relations)} relazioni (Context Snap: {snapshot_id})...")
+        logger.info(f"Processing {len(relations)} relations (Context Snapshot: {snapshot_id})...")
         lookup_cache = {}
 
         # Helper to resolve ID from range
@@ -112,13 +116,13 @@ class KnowledgeGraphBuilder:
             # 2. Target Resolution
             if not rel.target_id:
                 if rel.metadata.get("is_external"):
-                    # Gestione nodi esterni (es. librerie std) - Placeholder
+                    # Handle external nodes (e.g. standard library) - Placeholder
                     # self.storage.ensure_external_node(rel.target_file)
                     rel.target_id = rel.target_file  # Simplification for phantom nodes
                 elif rel.target_byte_range and len(rel.target_byte_range) == 2:
                     rel.target_id = resolve_id(rel.target_file, rel.target_byte_range)
 
-            # 3. Scrittura Edge
+            # 3. Write Edge
             if rel.target_id and rel.source_id != rel.target_id:
                 self.storage.add_edge(rel.source_id, rel.target_id, rel.relation_type, rel.metadata)
 
