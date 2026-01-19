@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crader"
-version = "0.1.2rc1"
+version = "0.1.0"
 description = "Crader is a production-ready library that transforms source code into a queryable Code Property Graph (CPG) with semantic embeddings. Built for AI-powered code analysis, intelligent retrieval, and agentic workflows."
 readme = "README.md"
 requires-python = ">=3.10"
