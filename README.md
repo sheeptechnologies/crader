@@ -115,11 +115,9 @@ Crader scans files by extension during indexing:
 - .php
 - .html, .css
 
-Semantic tagging via Tree-sitter queries is currently provided for Python, JavaScript, and TypeScript. SCIP relations require the relevant SCIP tools to be installed and available on PATH. SCIP is currently the bottleneck for file-incremental indexing; we are building a Python stack-graphs library to address this: https://github.com/sheeptechnologies/mycelium.git.
+Semantic tagging via Tree-sitter queries is currently provided for Python, JavaScript, and TypeScript. SCIP relations require the relevant SCIP tools to be installed and available on PATH.
 
-## SCIP and incremental indexing
-
-SCIP is required today to build cross-file relations, but it prevents a file-incremental approach. We are developing Mycelium, a Python implementation of GitHub-style stack graphs, to replace SCIP in the pipeline and unlock incremental semantic indexing. See [Roadmap](docs/roadmap.md) for the planned migration.
+SCIP is required today to build cross-file relations.
 
 ## Configuration
 

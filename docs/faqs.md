@@ -6,7 +6,7 @@ Crader indexes Git repositories into a code property graph stored in PostgreSQL.
 
 ## Do I need SCIP?
 
-Yes. SCIP tooling is required to build the cross-file relations used by the graph. This is currently Crader's main bottleneck because it prevents a file-incremental approach. To address this, we are building a supporting library that implements GitHub's stack graphs in Python to enable incremental semantic indexing: https://github.com/sheeptechnologies/mycelium.git.
+Yes. SCIP tooling is required to build the cross-file relations used by the graph. This is currently Crader's main bottleneck because it prevents a file-incremental approach.
 
 ## Does Crader do incremental indexing?
 
@@ -26,7 +26,7 @@ Indexing scans files by extension:
 - .php
 - .html, .css
 
-Semantic tagging via Tree-sitter queries is currently provided for Python, JavaScript, and TypeScript. SCIP relations require the installed indexers (see [Roadmap](roadmap.md) for the current bottleneck and Mycelium plan).
+Semantic tagging via Tree-sitter queries is currently provided for Python, JavaScript, and TypeScript. SCIP relations require the installed indexers.
 
 ## Why PostgreSQL instead of a separate vector database?
 

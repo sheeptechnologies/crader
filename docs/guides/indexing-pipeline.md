@@ -32,7 +32,7 @@ The indexer performs a full scan of a repository commit and writes files, chunks
 5. **SCIP relations**
    - `SCIPIndexer` runs in a parallel thread and extracts cross-file relations.
    - Relations are resolved to node IDs in the database by byte range.
-   - This step is currently the bottleneck for file-incremental indexing; the roadmap includes replacing SCIP with Mycelium (stack graphs in Python): https://github.com/sheeptechnologies/mycelium.git.
+   - This step is currently the bottleneck for file-incremental indexing.
 
 6. **Snapshot activation**
    - Indexing stats and a file manifest are generated.

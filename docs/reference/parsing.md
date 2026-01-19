@@ -35,7 +35,7 @@ Yields:
 
 ## SCIPIndexer
 
-`SCIPIndexer` runs external SCIP tools to extract cross-file relations such as calls and definitions. This is currently the bottleneck for file-incremental indexing; the roadmap includes replacing SCIP with Mycelium (stack graphs in Python): https://github.com/sheeptechnologies/mycelium.git.
+`SCIPIndexer` runs external SCIP tools to extract cross-file relations such as calls and definitions.
 
 ```python
 from crader.graph.indexers.scip import SCIPIndexer

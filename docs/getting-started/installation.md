@@ -35,7 +35,7 @@ The migration enables the `vector` extension and creates all required tables.
 
 ## SCIP tooling
 
-SCIP relations require the CLI tools to be installed and available on PATH. This is currently the bottleneck for file-incremental indexing; the roadmap includes a Mycelium-based replacement (https://github.com/sheeptechnologies/mycelium.git). Install the ones you need for your languages, for example:
+SCIP relations require the CLI tools to be installed and available on PATH. This is currently the bottleneck for file-incremental indexing. Install the ones you need for your languages, for example:
 
 ```bash
 npm install -g @sourcegraph/scip @sourcegraph/scip-python @sourcegraph/scip-typescript
