@@ -25,7 +25,7 @@ storage = PostgresGraphStorage(connector)
 
 - `add_files`, `add_nodes`, `add_contents`
 - `add_search_index` builds the FTS table
-- `add_edge` and `ingest_scip_relations` add relations
+- `add_edge` and `add_relations_raw` add relations
 - Raw bulk variants exist for high-throughput inserts (`add_nodes_raw`, etc.)
 
 ### Search

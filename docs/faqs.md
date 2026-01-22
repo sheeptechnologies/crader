@@ -2,15 +2,11 @@
 
 ## What is Crader?
 
-Crader indexes Git repositories into a code property graph stored in PostgreSQL. It parses code into chunks, stores relationships, and supports keyword and vector search.
-
-## Do I need SCIP?
-
-Yes. SCIP tooling is required to build the cross-file relations used by the graph. This is currently Crader's main bottleneck because it prevents a file-incremental approach.
+Crader indexes Git repositories into a code property graph stored in PostgreSQL. It parses code into chunks using Tree-sitter, stores structural relationships, and supports keyword and vector search.
 
 ## Does Crader do incremental indexing?
 
-Crader indexes a full commit. It skips re-indexing if the same commit already has a completed snapshot. Embeddings are deduplicated across snapshots by `vector_hash`, but file-level incremental parsing is not implemented.
+Yes. Crader supports file-incremental indexing. When re-indexing a repository, only changed files are processed. Embeddings are deduplicated across snapshots by `vector_hash`.
 
 ## Which languages are supported?
 
@@ -26,7 +22,7 @@ Indexing scans files by extension:
 - .php
 - .html, .css
 
-Semantic tagging via Tree-sitter queries is currently provided for Python, JavaScript, and TypeScript. SCIP relations require the installed indexers.
+Semantic tagging via Tree-sitter queries is currently provided for Python, JavaScript, and TypeScript.
 
 ## Why PostgreSQL instead of a separate vector database?
 

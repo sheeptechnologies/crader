@@ -32,9 +32,6 @@ class TestCodebaseIndexerLifecycle(unittest.TestCase):
         self.ppe_patcher = patch("crader.indexer.concurrent.futures.ProcessPoolExecutor")
         self.mock_ppe = self.ppe_patcher.start()
 
-        self.tpe_patcher = patch("crader.indexer.concurrent.futures.ThreadPoolExecutor")
-        self.mock_tpe = self.tpe_patcher.start()
-
         # Patch as_completed because it hangs on Mocks
         self.as_completed_patcher = patch("crader.indexer.concurrent.futures.as_completed")
         self.mock_as_completed = self.as_completed_patcher.start()
@@ -48,7 +45,6 @@ class TestCodebaseIndexerLifecycle(unittest.TestCase):
         self.conn_patcher.stop()
         self.parser_patcher.stop()
         self.ppe_patcher.stop()
-        self.tpe_patcher.stop()
         self.as_completed_patcher.stop()
 
     def test_initialization(self):
@@ -73,11 +69,6 @@ class TestCodebaseIndexerLifecycle(unittest.TestCase):
         mock_future = MagicMock()
         mock_future.result.return_value = (1, [])
         mock_executor_instance.submit.return_value = mock_future
-
-        mock_scip_executor = self.mock_tpe.return_value.__enter__.return_value
-        mock_scip_future = MagicMock()
-        mock_scip_future.result.return_value = []
-        mock_scip_executor.submit.return_value = mock_scip_future
 
         with patch("os.walk", return_value=[("/tmp", [], ["file.py"])]):
             snap_id = indexer.index()

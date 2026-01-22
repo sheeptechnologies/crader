@@ -19,7 +19,6 @@ tracer = trace.get_tracer(__name__)
 # Internal Components
 from .embedding.embedder import CodeEmbedder
 from .graph.builder import KnowledgeGraphBuilder
-from .graph.indexers.scip import SCIPIndexer
 from .parsing.parser import TreeSitterRepoParser
 from .providers.embedding import EmbeddingProvider
 from .storage.connector import PooledConnector, SingleConnector
@@ -247,7 +246,6 @@ class CodebaseIndexer:
     *   **Repository Synchronization**: Using `GitVolumeManager` to fetch and update the local code cache.
     *   **Snapshot Management**: creating, validating, and activating snapshots in the `GraphStorage`.
     *   **Parallel Parsing**: Distributing the parsing workload across multiple worker processes using `ProcessPoolExecutor`.
-    *   **SCIP Analysis**: Integrating SCIP (Stack Graph) analysis for precise code intelligence and cross-file references.
     *   **Graph Construction**: Orchestrating the storage of nodes, edges, and semantic metadata into the PostgreSQL backend.
 
     Attributes:
@@ -297,7 +295,7 @@ class CodebaseIndexer:
 
     def index(self, force: bool = False, auto_prune: bool = False) -> str:
         """
-        Executes the full indexing pipeline: Repository Sync -> Parsing + SCIP -> Activation.
+        Executes the full indexing pipeline: Repository Sync -> Parsing -> Activation.
 
         This method encapsulates the core logic for checking the repository state and performing the indexing if necessary.
 
@@ -306,8 +304,8 @@ class CodebaseIndexer:
         2.  **Snapshot Creation**: Checks if a snapshot for the current commit already exists.
             *   If yes and `force` is False, returns the existing snapshot ID.
             *   If no (or `force` is True), creates a new snapshot with status 'indexing'.
-        3.  **Worktree Setup**: Creates ephemeral worktrees for isolated parsing and SCIP analysis.
-        4.  **Pipeline Execution**: Invokes `_run_indexing_pipeline` to perform the heavy lifting (parsing, SCIP extraction, DB ingestion).
+        3.  **Worktree Setup**: Creates an ephemeral worktree for isolated parsing.
+        4.  **Pipeline Execution**: Invokes `_run_indexing_pipeline` to perform the heavy lifting (parsing, DB ingestion).
         5.  **Completion & Activation**:
             *   On success: Marks the snapshot as 'completed', activates it (updating the repository's current pointer), and generates the file manifest.
             *   On failure: Marks the snapshot as 'failed' and re-raises the exception.
@@ -344,11 +342,11 @@ class CodebaseIndexer:
                     snapshot_id, is_new = self.storage.create_snapshot(repo_id, commit, force_new=force)
 
                 if not is_new and snapshot_id is None:
-                    logger.info("⏸️  Repo occupata, richiesta accodata.")
+                    logger.info("⏸️  Repo occupata, richiesta accodata.") #translate_english
                     return "queued"
 
                 if not is_new and snapshot_id and not force:
-                    logger.info(f"✅ Snapshot {snapshot_id} già valido.")
+                    logger.info(f"✅ Snapshot {snapshot_id} già valido.") #translate_english
                     return snapshot_id
 
                 active_snapshot_id = snapshot_id
@@ -358,23 +356,21 @@ class CodebaseIndexer:
                         parser_worktree = stack.enter_context(
                             self.git_manager.ephemeral_worktree(self.repo_url, commit)
                         )
-                        scip_worktree = stack.enter_context(self.git_manager.ephemeral_worktree(self.repo_url, commit))
 
-                        logger.info("⚙️  Worktrees montati.")
+                        logger.info("⚙️  Worktree mounted.")
 
                         self._run_indexing_pipeline(
                             repo_id=repo_id,
                             snapshot_id=snapshot_id,
                             commit=commit,
-                            parser_worktree=parser_worktree,
-                            scip_worktree=scip_worktree,
+                            worktree_path=parser_worktree,
                         )
                     if self.storage.check_and_reset_reindex_flag(repo_id):
-                        logger.info("🔁 Rilevata nuova richiesta pendente. Riavvio loop...")
+                        logger.info("🔁 Rilevata nuova richiesta pendente. Riavvio loop...") #translate_english
                         force = True
                         continue
                     else:
-                        logger.info("✅ Indicizzazione completata.")
+                        logger.info("✅ Indicizzazione completata.") #translate_english
                         break
 
                 except Exception as e:
@@ -389,35 +385,29 @@ class CodebaseIndexer:
         return active_snapshot_id
 
     def _run_indexing_pipeline(
-        self, repo_id: str, snapshot_id: str, commit: str, parser_worktree: str, scip_worktree: str
+        self, repo_id: str, snapshot_id: str, commit: str, worktree_path: str
     ):
         """
-        Internal engine driving the parsing and analysis pipeline.
+        Internal engine driving the parsing pipeline.
 
-        This method orchestrates the parallel execution of file parsing and the concurrent execution of SCIP analysis.
+        This method orchestrates the parallel execution of file parsing.
 
         **Components:**
-        *   **File Enumeration**: Scans the `parser_worktree` to identify relevant source files, respecting ignore patterns.
+        *   **File Enumeration**: Scans the `worktree_path` to identify relevant source files, respecting ignore patterns.
         *   **Parallel Parsing**: Uses a `ProcessPoolExecutor` to spawn worker processes that parse files in chunks and ingest them into the DB.
-        *   **SCIP Analysis**: concurrently runs the `SCIPIndexer` in a separate thread to extract cross-file relationship data.
-        *   **Normalization**: Merges SCIP data with the parsed nodes to create a rich property graph (resolved edges).
         *   **Snapshot Finalization**: Compiles statistics and generates the file structure manifest before activating the snapshot.
 
         Args:
             repo_id (str): The internal ID of the repository.
             snapshot_id (str): The ID of the current snapshot being populated.
             commit (str): The commit hash.
-            parser_worktree (str): Path to the worktree dedicated to AST parsing.
-            scip_worktree (str): Path to the worktree dedicated to SCIP analysis.
+            worktree_path (str): Path to the worktree dedicated to AST parsing.
         """
-        scip_indexer = SCIPIndexer(repo_path=scip_worktree)
-        current_context = context.get_current()
-
         logger.info("🔍 Scanning files...")
         all_files = []
         IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "dist", "build", "target", "vendor"}
 
-        for root, dirs, files in os.walk(parser_worktree):
+        for root, dirs, files in os.walk(worktree_path):
             dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
             for file in files:
                 _, ext = os.path.splitext(file)
@@ -436,91 +426,47 @@ class CodebaseIndexer:
                     ".html",
                     ".css",
                 }:
-                    rel_path = os.path.relpath(os.path.join(root, file), parser_worktree)
+                    rel_path = os.path.relpath(os.path.join(root, file), worktree_path)
                     all_files.append(rel_path)
 
         carrier = {}
         inject(carrier)
 
-        total_cpus = multiprocessing.cpu_count()
         num_workers = 5  # [TODO] Adjust based on system resources
         mp_context = multiprocessing.get_context("spawn")
         file_chunks = list(_chunked_iterable(all_files, 50))
 
-        logger.info(f"🔨 Parsing & SCIP with {num_workers} workers...")
+        logger.info(f"🔨 Parsing with {num_workers} workers...")
 
-        def _run_scip_buffered(ctx):
-            token = context.attach(ctx)
-            try:
-                with tracer.start_as_current_span("scip.binary_execution") as span:
-                    try:
-                        return list(scip_indexer.stream_relations())
-                    except Exception as e:
-                        logger.error(f"SCIP Extraction Failed: {e}")
-                        return []
-            finally:
-                context.detach(token)
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=num_workers,
+            mp_context=mp_context,
+            initializer=_init_worker_process,
+            initargs=(
+                worktree_path,
+                snapshot_id,
+                commit,
+                self.repo_url,
+                self.branch,
+                self.db_url,
+                self.worker_telemetry_init,
+            ),
+        ) as executor:
+            future_to_chunk = {
+                executor.submit(_process_and_insert_chunk, chunk, carrier): chunk for chunk in file_chunks
+            }
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as scip_executor:
-            future_scip = scip_executor.submit(_run_scip_buffered, current_context)
-
-            with concurrent.futures.ProcessPoolExecutor(
-                max_workers=num_workers,
-                mp_context=mp_context,
-                initializer=_init_worker_process,
-                initargs=(
-                    parser_worktree,
-                    snapshot_id,
-                    commit,
-                    self.repo_url,
-                    self.branch,
-                    self.db_url,
-                    self.worker_telemetry_init,
-                ),
-            ) as executor:
-                future_to_chunk = {
-                    executor.submit(_process_and_insert_chunk, chunk, carrier): chunk for chunk in file_chunks
-                }
-
-                total_processed = 0
-                completed_chunks = 0
-                for future in concurrent.futures.as_completed(future_to_chunk):
-                    try:
-                        count, _ = future.result()
-                        total_processed += count
-                        completed_chunks += 1
-                        if completed_chunks % 10 == 0:
-                            logger.info(f"⏳ Parsed {total_processed}/{len(all_files)} files...")
-                    except Exception as e:
-                        logger.error(f"❌ Worker Error: {e}")
-
-            logger.info("🔗 Waiting for SCIP relations extraction...")
-            scip_relations = future_scip.result()
-
-            if scip_relations:
-                logger.info(f"🔗 Processing {len(scip_relations)} SCIP relations (SQL Batch Mode)...")
-                raw_batch = []
-                BATCH_SIZE = 10000
-                for rel in scip_relations:
-                    if not rel.source_byte_range or not rel.target_byte_range:
-                        continue
-                    raw_batch.append(
-                        (
-                            rel.source_file,
-                            rel.source_byte_range[0],
-                            rel.source_byte_range[1],
-                            rel.target_file,
-                            rel.target_byte_range[0],
-                            rel.target_byte_range[1],
-                            rel.relation_type,
-                            json.dumps(rel.metadata),
-                        )
-                    )
-                    if len(raw_batch) >= BATCH_SIZE:
-                        self.storage.ingest_scip_relations(raw_batch, snapshot_id)
-                        raw_batch = []
-                if raw_batch:
-                    self.storage.ingest_scip_relations(raw_batch, snapshot_id)
+            total_processed = 0
+            completed_chunks = 0
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                try:
+                    count, _ = future.result()
+                    total_processed += count
+                    completed_chunks += 1
+                    if completed_chunks % 10 == 0:
+                        logger.info(f"⏳ Parsed {total_processed}/{len(all_files)} files...")
+                except Exception as e:
+                    logger.error(f"❌ Worker Error: {e}")
 
         current_stats = self.storage.get_stats()
         stats = {

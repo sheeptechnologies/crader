@@ -5,18 +5,17 @@ Crader builds a code property graph (CPG) and embeddings from Git repositories. 
 ## Core capabilities
 
 - Tree-sitter parsing and chunking with byte-precise ranges
-- SCIP-based relations for cross-file references (current bottleneck for file-incremental indexing; see [Roadmap](docs/roadmap.md))
 - Full-text index for keyword search
 - Vector embeddings and pgvector search
 - Snapshot-based reads for consistent retrieval
-- Graph navigation helpers (parent blocks, callers, callees)
+- Graph navigation helpers (parent blocks, children)
+- File-incremental indexing
 
 ## Requirements
 
 - Python 3.10+
 - PostgreSQL with the pgvector extension
 - git
-- SCIP CLI and language indexers (scip, scip-python, scip-typescript, scip-java, scip-go, scip-rust, scip-php, scip-clang). This is the current bottleneck for file-incremental indexing; see [Roadmap](docs/roadmap.md).
 - Optional: OpenAI API key if you use OpenAI embeddings
 
 ## Install
@@ -38,7 +37,7 @@ The migration enables the `vector` extension and creates the schema used by the 
 
 ## Quick start
 
-Index a repository (parsing, chunking, SCIP relations; see [Roadmap](docs/roadmap.md) for the current bottleneck):
+Index a repository:
 
 ```bash
 crader index https://github.com/pallets/flask.git --branch main
@@ -115,9 +114,7 @@ Crader scans files by extension during indexing:
 - .php
 - .html, .css
 
-Semantic tagging via Tree-sitter queries is currently provided for Python, JavaScript, and TypeScript. SCIP relations require the relevant SCIP tools to be installed and available on PATH.
-
-SCIP is required today to build cross-file relations.
+Semantic tagging via Tree-sitter queries is currently provided for Python, JavaScript, and TypeScript.
 
 ## Configuration
 

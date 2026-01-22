@@ -2,9 +2,6 @@
 set -e
 
 # Data definition
-SCIP_VERSION="v0.4.0" # Sticking to a known stable version or latest v0.6.1 if desired, but v0.4.0 is very common. Let's use 0.4.0 for broader compatibility unless specified. Actually user has 0.6.1. Let's aim for 0.6.1
-SCIP_VERSION="v0.6.1"
-INSTALL_DIR="/usr/local/bin"
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 RED='\033[0;31m'
@@ -52,48 +49,6 @@ if [ -z "$TARGET_PYTHON" ]; then
 fi
 
 echo -e "   🔍 Selected Python interpreter: ${TARGET_PYTHON} ($( $TARGET_PYTHON --version ))"
-
-echo -e "\n${GREEN}🔍 Checking system dependencies...${NC}"
-
-# Check/Install SCIP
-if ! command -v scip &> /dev/null; then
-    echo -e "   ${BLUE}⚙️  SCIP not found. Installing scip ${SCIP_VERSION}...${NC}"
-    
-    OS="$(uname -s)"
-    ARCH="$(uname -m)"
-    
-    if [ "$OS" = "Darwin" ]; then
-        PLATFORM="macosx"
-    elif [ "$OS" = "Linux" ]; then
-        PLATFORM="linux"
-    else
-        echo -e "${RED}❌ Unsupported OS: $OS${NC}"
-        exit 1
-    fi
-
-    if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "aarch64" ]; then
-        ARCH="aarch64"
-    else
-        ARCH="x86_64"
-    fi
-
-    DOWNLOAD_URL="https://github.com/sourcegraph/scip/releases/download/${SCIP_VERSION}/scip-${PLATFORM}-${ARCH}.tar.gz"
-    
-    echo -e "   📥 Downloading from: $DOWNLOAD_URL"
-    curl -L "$DOWNLOAD_URL" -o scip.tar.gz
-    
-    echo -e "   📦 Extracting..."
-    tar -xzf scip.tar.gz
-    
-    echo -e "   🔐 Requesting sudo access to move binary to /usr/local/bin..."
-    sudo mv scip /usr/local/bin/
-    rm scip.tar.gz
-    
-    echo -e "   ✅ SCIP installed successfully!"
-else
-    CURRENT_SCIP=$(scip --version)
-    echo -e "   ✅ SCIP is already installed: ${CURRENT_SCIP}"
-fi
 
 # Check for Virtual Environment
 if [[ -z "$VIRTUAL_ENV" ]] || [[ ! -d "$VIRTUAL_ENV" ]]; then

@@ -2,15 +2,13 @@
 
 This page describes the near-term direction for Crader.
 
-## Current bottleneck
+## Current status
 
-SCIP is required to build cross-file relations, but it does not support file-incremental indexing in our pipeline. This makes SCIP the current bottleneck for incremental updates.
-
-
+Crader uses Tree-sitter for parsing and chunking, enabling true file-incremental indexing. The indexer only processes changed files when re-indexing a repository.
 
 ## Planned work
 
-
-- Enable file-incremental semantic indexing.
-- Preserve the current storage model and retrieval APIs
-- Extend language coverage to all major programming languages.
+- Extend semantic tagging queries to all supported languages.
+- Preserve the current storage model and retrieval APIs.
+- Add support for additional programming languages.
+- Improve chunking strategies for large files.

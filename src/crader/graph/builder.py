@@ -81,7 +81,7 @@ class KnowledgeGraphBuilder:
         3.  **Persist**: Writes valid edges to the `edges` table.
 
         Args:
-            relations: List of relationship descriptors found during parsing (SCIP/TreeSitter).
+            relations: List of relationship descriptors found during parsing (TreeSitter).
             snapshot_id: Required context to perform range-to-node lookups in the specific version of the code.
         """
         if not relations:

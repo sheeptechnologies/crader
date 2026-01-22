@@ -49,10 +49,9 @@ def setup_toxic_repo(path):
     with open(os.path.join(path, "src", "heavy.js"), "w") as f:
         f.write("const huge = '" + "a" * (15 * 1024 * 1024) + "';")
 
-    # [FIX CRITICO] 6. TSConfig per proteggere SCIP
-    # Senza questo, scip-typescript fallisce (missing config).
-    # Inoltre, ESCLUDIAMO heavy.js dalla config di SCIP per evitare che crashi il subprocess.
-    # Vogliamo testare che il NOSTRO parser (Python) lo rilevi e lo skippi, non che SCIP muoia.
+    # 6. TSConfig for TypeScript parsing
+    # ESCLUDIAMO heavy.js per evitare problemi con file troppo grandi.
+    # Vogliamo testare che il parser (Python) lo rilevi e lo skippi.
     with open(os.path.join(path, "tsconfig.json"), "w") as f:
         f.write("""
 {

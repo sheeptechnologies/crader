@@ -54,7 +54,7 @@ GLOBAL_IGNORE_DIRS = {
 }
 
 # Directories containing code but with low structural value (Semantic Noise)
-# SCIP should ignore these to avoid bloating the graph.
+# These are ignored to avoid bloating the graph.
 SEMANTIC_NOISE_DIRS = {
     "migrations",
     "fixture",

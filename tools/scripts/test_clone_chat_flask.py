@@ -87,7 +87,7 @@ async def main_async():
         # Provider (Enterprise Async)
         provider = OpenAIEmbeddingProvider(model="text-embedding-3-small", max_concurrency=10)
 
-        # 3. RUN INDEXING PIPELINE (Parsing -> SCIP -> Graph)
+        # 3. RUN INDEXING PIPELINE (Parsing -> Graph)
         logger.info("🚀 Phase 1: Parsing & Graph Building...")
         # force=False: se abbiamo già indicizzato questo commit, riusa lo snapshot
         snapshot_id = indexer.index(force=False)
