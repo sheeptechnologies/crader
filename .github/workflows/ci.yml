@@ -25,13 +25,6 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -e .[dev]
-        
-    - name: Install SCIP
-      run: |
-        wget -O scip.tar.gz https://github.com/sourcegraph/scip/releases/download/v0.4.0/scip-linux-amd64.tar.gz
-        tar -xzf scip.tar.gz
-        sudo mv scip /usr/local/bin/
-        rm scip.tar.gz
 
     - name: Lint with Ruff
       run: |

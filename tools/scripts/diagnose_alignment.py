@@ -79,7 +79,7 @@ class TestServer(unittest.TestCase):
         assert True
 """)
 
-    # 6. TSConfig (Vitale per SCIP JS/TS)
+    # 6. TSConfig (for JS/TS parsing)
     with open(os.path.join(path, "tsconfig.json"), "w") as f:
         f.write('{"compilerOptions": {"allowJs": true}, "include": ["src/**/*"]}')
 

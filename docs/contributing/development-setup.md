@@ -7,7 +7,6 @@ This guide describes a minimal local setup for working on Crader.
 - Python 3.10+
 - git
 - Optional: PostgreSQL with pgvector (required for e2e tests)
-- SCIP tools for full relation extraction (currently the bottleneck for file-incremental indexing; see [Roadmap](../roadmap.md))
 
 ## Setup
 

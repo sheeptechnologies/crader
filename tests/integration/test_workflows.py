@@ -79,7 +79,6 @@ class TestPythonWorkflow:
         with (
             patch("crader.indexer.GitVolumeManager") as mock_git,
             patch("crader.indexer.TreeSitterRepoParser") as mock_parser,
-            patch("crader.indexer.SCIPIndexer") as mock_scip,
         ):
             # Setup mocks
             mock_git.return_value.ensure_repo_updated.return_value = None
@@ -90,9 +89,6 @@ class TestPythonWorkflow:
                 [Mock(id="chunk_1", content="def route():\n    pass")],  # chunks
                 [],  # relations
             )
-
-            mock_scip.return_value.prepare_indices.return_value = ["index.scip"]
-            mock_scip.return_value.stream_documents.return_value = iter([])
 
             # Create indexer with patched dependencies
             with (

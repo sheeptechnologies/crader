@@ -196,21 +196,6 @@ class TestPostgresGraphStorage(unittest.TestCase):
         self.storage.save_embeddings(batch)
         self.mock_cursor.executemany.assert_called_once()
 
-    def test_ingest_scip_relations(self):
-        """Test batch ingestion of SCIP relations."""
-        relations_batch = [("file1.py", 10, 20, "file2.py", 30, 40, "imports", '{"meta": "data"}')]
-
-        # Mock the copy context manager
-        mock_copy = MagicMock()
-        self.mock_cursor.copy.return_value.__enter__.return_value = mock_copy
-
-        self.storage.ingest_scip_relations(relations_batch, "snap-123")
-
-        # Verify COPY was used
-        self.mock_cursor.copy.assert_called()
-        mock_copy.write_row.assert_called()
-        self.assertEqual(mock_copy.write_row.call_count, 1)
-
     def test_check_and_reset_reindex_flag(self):
         """Test checking reindex flag."""
         # Case 1: Flag is set (row returned)
@@ -417,30 +402,6 @@ class TestPostgresGraphStorage(unittest.TestCase):
         self.storage.add_contents_raw(contents)
         self.mock_cursor.executemany.assert_called()
         self.assertIn("INSERT INTO contents", self.mock_cursor.executemany.call_args[0][0])
-
-    def test_ingest_scip_relations_copy(self):
-        """Test SCIP relation ingestion using COPY."""
-        relations = [("s1", 1, 2, "t1", 3, 4, "ref", "{}")]
-
-        # Mock copy context manager
-        mock_copy_manager = MagicMock()
-        mock_copy_obj = MagicMock()
-        mock_copy_manager.__enter__.return_value = mock_copy_obj
-        self.mock_cursor.copy.return_value = mock_copy_manager
-
-        # Mock transaction context manager
-        mock_tx = MagicMock()
-        self.mock_conn.transaction.return_value = mock_tx
-        mock_tx.__enter__.return_value = None
-
-        self.storage.ingest_scip_relations(relations, "snap-1")
-
-        # Check for temp table creation
-        execute_calls = [c[0][0] for c in self.mock_cursor.execute.call_args_list]
-        self.assertTrue(any("CREATE TEMP TABLE" in sql for sql in execute_calls))
-
-        self.mock_cursor.copy.assert_called()
-        mock_copy_obj.write_row.assert_called()
 
     def test_get_incoming_definitions_bulk(self):
         """Test bulk definition checkout."""

@@ -29,12 +29,7 @@ The indexer performs a full scan of a repository commit and writes files, chunks
      - Emit `FileRecord`, `ChunkNode`, `ChunkContent`, and `child_of` relations.
      - Build FTS documents from chunk metadata and content.
 
-5. **SCIP relations**
-   - `SCIPIndexer` runs in a parallel thread and extracts cross-file relations.
-   - Relations are resolved to node IDs in the database by byte range.
-   - This step is currently the bottleneck for file-incremental indexing.
-
-6. **Snapshot activation**
+5. **Snapshot activation**
    - Indexing stats and a file manifest are generated.
    - The snapshot is marked `completed` and becomes the active snapshot.
 

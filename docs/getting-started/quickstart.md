@@ -26,7 +26,7 @@ crader db upgrade
 crader index https://github.com/pallets/flask.git --branch main
 ```
 
-This step parses files, builds chunks, and ingests cross-file relations via SCIP tooling. SCIP is currently the bottleneck for file-incremental indexing. It does not generate embeddings.
+This step parses files using Tree-sitter, builds semantic chunks, and stores structural relations. It does not generate embeddings.
 
 ## 4. Generate embeddings
 

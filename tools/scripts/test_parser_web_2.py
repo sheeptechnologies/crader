@@ -89,7 +89,7 @@ class DbAdapter:
             s_file = src.file_path if src and src.file_path else "EXTERNAL"
             t_file = tgt.file_path if tgt and tgt.file_path else "EXTERNAL"
 
-            # Fallback per metadati SCIP (external symbols)
+            # Fallback per metadati (external symbols)
             if not src and e.get('metadata', {}).get('is_external'):
                 s_file = "EXTERNAL_LIB"
             if not tgt and e.get('metadata', {}).get('is_external'):
@@ -114,10 +114,10 @@ class HtmlGenerator:
     <head>
         <title>Sheep Graph Debugger</title>
         <style>
-            :root { 
-                --bg: #1e1e1e; --panel: #252526; --text: #cccccc; 
-                --accent: #0e639c; --border: #3e3e42; 
-                --scip: #4fc1ff; --ts: #6a9955; --unk: #888;
+            :root {
+                --bg: #1e1e1e; --panel: #252526; --text: #cccccc;
+                --accent: #0e639c; --border: #3e3e42;
+                --ts: #6a9955; --unk: #888;
             }
             body { margin:0; font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
             
@@ -135,7 +135,7 @@ class HtmlGenerator:
             #code-view { font-family: 'Consolas', monospace; font-size: 13px; line-height: 1.5; white-space: pre-wrap; padding: 20px; color: #d4d4d4; }
             .chunk { cursor: pointer; border-radius: 2px; transition: background 0.1s; }
             .chunk:hover { background: rgba(255, 255, 255, 0.05); outline: 1px solid #555; }
-            .chunk.selected { background: rgba(38, 79, 120, 0.5) !important; outline: 1px solid var(--scip); box-shadow: 0 0 10px rgba(0,0,0,0.5); z-index: 10; position: relative; }
+            .chunk.selected { background: rgba(38, 79, 120, 0.5) !important; outline: 1px solid var(--ts); box-shadow: 0 0 10px rgba(0,0,0,0.5); z-index: 10; position: relative; }
             .chunk.type-class { background: rgba(78, 201, 176, 0.15); }
             .chunk.type-func { background: rgba(220, 220, 170, 0.15); }
 
@@ -148,12 +148,10 @@ class HtmlGenerator:
             .rel-row { padding: 8px 10px; border-bottom: 1px solid #333; display: flex; flex-direction: column; cursor: pointer; border-left: 3px solid transparent; }
             .rel-row:hover { background: #2d2d30; }
             .rel-row.rel-ts { border-left-color: var(--ts); }
-            .rel-row.rel-scip { border-left-color: var(--scip); }
             
             .rel-main { display: flex; align-items: center; justify-content: space-between; }
             .rel-type { font-weight: bold; font-size: 12px; color: #ccc; }
             .rel-tool { font-size: 9px; padding: 1px 4px; border-radius: 2px; margin-left: 8px; font-weight: bold; color: #fff; }
-            .bg-scip { background: var(--scip); color: #000; }
             .bg-ts { background: var(--ts); color: #000; }
             
             .rel-target { font-family: monospace; font-size: 11px; color: #aaa; margin-top: 4px; word-break: break-all; }
@@ -166,7 +164,7 @@ class HtmlGenerator:
 
             #info-box { padding: 15px; border-bottom: 1px solid var(--border); background: #222; }
             #info-id { font-family: monospace; font-size: 11px; color: #fff; margin-bottom: 5px; word-break: break-all; }
-            #info-type { font-size: 11px; color: var(--scip); font-weight: bold; text-transform: uppercase; }
+            #info-type { font-size: 11px; color: var(--ts); font-weight: bold; text-transform: uppercase; }
 
             ::-webkit-scrollbar { width: 10px; background: #1e1e1e; }
             ::-webkit-scrollbar-thumb { background: #424242; border-radius: 5px; border: 2px solid #1e1e1e; }
@@ -269,10 +267,9 @@ class HtmlGenerator:
                 const createRelRow = (r, dir) => {
                     const meta = r.metadata || {};
                     const tool = meta.tool || 'unknown';
-                    const isScip = tool.includes('scip');
-                    const toolLabel = isScip ? 'SCIP' : (tool.includes('treesitter') ? 'TREE-SITTER' : 'UNK');
-                    const badgeClass = isScip ? 'bg-scip' : (tool.includes('treesitter') ? 'bg-ts' : 'bg-unk');
-                    const rowClass = isScip ? 'rel-scip' : 'rel-ts';
+                    const toolLabel = tool.includes('treesitter') ? 'TREE-SITTER' : 'UNK';
+                    const badgeClass = tool.includes('treesitter') ? 'bg-ts' : 'bg-unk';
+                    const rowClass = 'rel-ts';
 
                     let metaHtml = '';
                     for (const [k, v] of Object.entries(meta)) {

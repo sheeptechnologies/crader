@@ -90,7 +90,7 @@ def get_db_stats():
 
 def run_session(mode_name: str, single_core: bool):
     print(f"\n{'='*60}")
-    print(f"🚀 AVVIO SESSIONE: {mode_name} (Full Stack: Parser + SCIP)")
+    print(f"🚀 AVVIO SESSIONE: {mode_name} (Full Stack: Parser)")
     print(f"{'='*60}")
 
     clean_database()
@@ -131,7 +131,7 @@ def run_session(mode_name: str, single_core: bool):
 
 def print_report(optimized):
     print("\n\n")
-    print("🏆 FINAL BENCHMARK REPORT (Full Stack SCIP)")
+    print("🏆 FINAL BENCHMARK REPORT (Full Stack)")
     print(f"{'Metrica':<20} | {'Baseline (Ref)':<20} | {'Enterprise (Multi)':<20} | {'Speedup'}")
     print("-" * 85)
 

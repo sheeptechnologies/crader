@@ -20,7 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Operating System :: OS Independent",
 ]
-keywords = ["code-analysis", "graph", "tree-sitter", "scip", "indexing"]
+keywords = ["code-analysis", "graph", "tree-sitter", "indexing"]
 
 
 dependencies = [
@@ -106,7 +106,6 @@ ignore = []
 "src/crader/indexer.py" = ["E501", "F841", "E402"]
 "src/crader/models.py" = ["E501"]
 "src/crader/graph/builder.py" = ["E501"]
-"src/crader/graph/indexers/scip.py" = ["E501", "E722", "E741", "F841"]
 "src/crader/embedding/embedder.py" = ["F841", "E501", "E722"]
 "src/crader/config.py" = ["W291"]
 

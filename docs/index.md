@@ -1,6 +1,6 @@
 # Crader
 
-Crader turns Git repositories into a code property graph stored in PostgreSQL. It parses code into semantic chunks, adds SCIP relations, and supports keyword and vector search with snapshot isolation. SCIP is currently the bottleneck for file-incremental indexing; see [Roadmap](roadmap.md).
+Crader turns Git repositories into a code property graph stored in PostgreSQL. It parses code into semantic chunks using Tree-sitter, stores structural relations, and supports keyword and vector search with snapshot isolation.
 
 ## What you can do
 
@@ -13,7 +13,6 @@ Crader turns Git repositories into a code property graph stored in PostgreSQL. I
 ## Key notes
 
 - Semantic tagging via Tree-sitter queries is currently provided for Python, JavaScript, and TypeScript.
-- SCIP relations require the relevant SCIP tools to be installed and on PATH.
 - The indexer always uses PostgreSQL; SQLite is intended for local experiments and tests. You can implement additional storage providers by extending the `GraphStorage` interface.
 
 ## Documentation

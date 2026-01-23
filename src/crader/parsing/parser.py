@@ -133,8 +133,7 @@ class TreeSitterRepoParser:
         self.parser = Parser()
 
         # The parser ignores BOTH technical noise (node_modules) AND semantic noise (if configured).
-        # However, in our design, the Parser ACCEPTS semantic noise (e.g., test files) but SCIP does not.
-        # So here we only ignore GLOBAL_IGNORE_DIRS (technical noise).
+        # Here we only ignore GLOBAL_IGNORE_DIRS (technical noise).
         # If you want the parser to ignore tests as well, add SEMANTIC_NOISE_DIRS here.
         self.all_ignore_dirs = GLOBAL_IGNORE_DIRS  # | SEMANTIC_NOISE_DIRS
 
@@ -496,9 +495,7 @@ class TreeSitterRepoParser:
             for pattern in config.get("exclude_patterns", []):
                 if fnmatch.fnmatch(filename, pattern) or fnmatch.fnmatch(rel_path, pattern):
                     # Se è un pattern escluso (es. test), decidiamo se il parser lo vuole o no.
-                    # Nel design discusso: Parser VUOLE i test (Semantic Context), SCIP no.
-                    # Quindi qui ritorniamo True (o meglio, non ritorniamo False).
-                    # SE invece vuoi che il parser ignori i test, scommenta:
+                    # SE vuoi che il parser ignori i test, scommenta:
                     # return False
                     pass
 

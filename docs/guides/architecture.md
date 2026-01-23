@@ -6,7 +6,6 @@ Crader is split into a write path (indexing and embedding) and a read path (sear
 
 - **Repository sync**: `GitVolumeManager` maintains a bare mirror cache and creates ephemeral worktrees for specific commits. Repositories are stored under `CRADER_REPO_VOLUME` (default: `./sheep_data/repositories`).
 - **Parsing and chunking**: `TreeSitterRepoParser` loads Tree-sitter grammars by extension and splits code into chunks. Chunks include byte ranges, line ranges, and metadata tags. Parent-child edges (`child_of`) are created during parsing.
-- **SCIP relations**: `SCIPIndexer` runs language-specific SCIP tools to extract cross-file relations. Relations are resolved to node IDs and stored as edges in the graph.
 - **Storage**: `PostgresGraphStorage` persists repositories, snapshots, files, nodes, contents, edges, and the FTS index.
 - **Embeddings (separate step)**: `CodeEmbedder` stages node content, deduplicates by hash, then calls an embedding provider. Vectors are stored in `node_embeddings` for vector search.
 
