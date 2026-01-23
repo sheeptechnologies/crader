@@ -6,7 +6,7 @@ import logging
 import os
 import random
 import uuid
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from typing import Any, AsyncGenerator, Dict, List, Tuple
 
 from ..providers.embedding import EmbeddingProvider
@@ -117,14 +117,22 @@ class CodeEmbedder:
     Attributes:
         storage (GraphStorage): Persistent storage interface.
         provider (EmbeddingProvider): External AI service wrapper.
-        process_pool (ProcessPoolExecutor): Thread pool for CPU-intensive hashing operations.
+        process_pool: Executor for CPU-intensive hashing operations.
     """
 
     def __init__(self, storage: GraphStorage, provider: EmbeddingProvider):
         self.storage = storage
         self.provider = provider
-        # Executor to offload CPU tasks (hashing and string manipulation)
-        self.process_pool = ProcessPoolExecutor(max_workers=min(4, os.cpu_count() or 1))
+        # Executor to offload CPU tasks (hashing and string manipulation).
+        max_workers = min(4, os.cpu_count() or 1)
+        try:
+            self.process_pool = ProcessPoolExecutor(max_workers=max_workers)
+        except (PermissionError, NotImplementedError, OSError) as exc:
+            logger.warning(
+                "ProcessPoolExecutor unavailable (%s); falling back to ThreadPoolExecutor.",
+                exc,
+            )
+            self.process_pool = ThreadPoolExecutor(max_workers=max_workers)
 
     async def run_indexing(
         self, snapshot_id: str, batch_size: int = 1000, mock_api: bool = False

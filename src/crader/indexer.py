@@ -11,7 +11,7 @@ import multiprocessing
 from contextlib import ExitStack
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
 
-from opentelemetry import context, trace
+from opentelemetry import trace
 from opentelemetry.propagate import extract, inject
 
 tracer = trace.get_tracer(__name__)
