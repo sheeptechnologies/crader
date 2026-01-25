@@ -189,7 +189,7 @@ class CodeEmbedder:
             if hasattr(self.storage, "backfill_staging_vectors"):
                 recovered_count = self.storage.backfill_staging_vectors(snapshot_id)
             yield {"status": "deduplication_stats", "recovered": recovered_count}
-
+            
             # 4. FLUSH HITS
             flushed_hits = 0
             if hasattr(self.storage, "flush_staged_hits"):
