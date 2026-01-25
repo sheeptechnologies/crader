@@ -148,7 +148,7 @@ def _process_and_insert_chunk(file_paths: List[str], carrier: Dict[str, str]) ->
 
                 # Flush Full-Text Search (FTS) entries *after* nodes to ensure referential integrity.
                 if buffer["fts"]:
-                     _worker_storage.add_search_index(buffer["fts"])
+                     _worker_storage.add_search_index(buffer["fts"]) #[TODO] shouldnt be triggered by db?
 
             buffer["files"].clear()
             buffer["nodes"].clear()
@@ -288,10 +288,10 @@ class CodebaseIndexer:
         logger.info(f"🔌 Connecting to DB (Pool): {safe_log_url}")
 
         self.connector = PooledConnector(dsn=self.db_url)
-        self.storage = PostgresGraphStorage(connector=self.connector)
+        self.storage = PostgresGraphStorage(connector=self.connector) #[TODO]should be passed params
 
-        self.git_manager = GitVolumeManager()
-        self.builder = KnowledgeGraphBuilder(self.storage)
+        self.git_manager = GitVolumeManager() #[TODO]should be passed params
+        self.builder = KnowledgeGraphBuilder(self.storage) #[TODO]unused?
 
     def index(self, force: bool = False, auto_prune: bool = False) -> str:
         """
@@ -342,11 +342,11 @@ class CodebaseIndexer:
                     snapshot_id, is_new = self.storage.create_snapshot(repo_id, commit, force_new=force)
 
                 if not is_new and snapshot_id is None:
-                    logger.info("⏸️  Repo occupata, richiesta accodata.") #translate_english
+                    logger.info("⏸️  Repo occupata, richiesta accodata.") #[TODO]translate_english
                     return "queued"
 
                 if not is_new and snapshot_id and not force:
-                    logger.info(f"✅ Snapshot {snapshot_id} già valido.") #translate_english
+                    logger.info(f"✅ Snapshot {snapshot_id} già valido.") #[TODO]translate_english
                     return snapshot_id
 
                 active_snapshot_id = snapshot_id
@@ -405,8 +405,9 @@ class CodebaseIndexer:
         """
         logger.info("🔍 Scanning files...")
         all_files = []
-        IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "dist", "build", "target", "vendor"}
+        IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "dist", "build", "target", "vendor"} # [TODO]create a unified ignore system
 
+        # [TODO]: This filtering is crap
         for root, dirs, files in os.walk(worktree_path):
             dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
             for file in files:
