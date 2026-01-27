@@ -408,6 +408,7 @@ class CodebaseIndexer:
         IGNORE_DIRS = {".git", "node_modules", "__pycache__", ".venv", "dist", "build", "target", "vendor"} # [TODO]create a unified ignore system
 
         # [TODO]: This filtering is crap
+        # To be deleted
         for root, dirs, files in os.walk(worktree_path):
             dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
             for file in files:
@@ -435,7 +436,7 @@ class CodebaseIndexer:
 
         num_workers = 5  # [TODO] Adjust based on system resources
         mp_context = multiprocessing.get_context("spawn")
-        file_chunks = list(_chunked_iterable(all_files, 50))
+        file_chunks = list(_chunked_iterable(all_files, 50)) #crap
 
         logger.info(f"🔨 Parsing with {num_workers} workers...")
 
@@ -453,8 +454,9 @@ class CodebaseIndexer:
                 self.worker_telemetry_init,
             ),
         ) as executor:
+            #[TODO] Before these we should cache hit by commit hash, already parsed files etc
             future_to_chunk = {
-                executor.submit(_process_and_insert_chunk, chunk, carrier): chunk for chunk in file_chunks
+                executor.submit(_process_and_insert_chunk, chunk, carrier): chunk for chunk in file_chunks #this ll become a streaming process
             }
 
             total_processed = 0
@@ -476,6 +478,7 @@ class CodebaseIndexer:
             "engine": "v9_enterprise_streaming",
         }
 
+        # [TODO]  Deprecatred manifest generation
         manifest_tree = {"type": "dir", "children": {}}
         db_files = self.storage.list_file_paths(snapshot_id)
         for path in db_files:
