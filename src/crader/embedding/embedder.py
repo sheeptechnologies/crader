@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 # --- CPU BOUND TASKS ---
 
-
 def _compute_prompt_and_hash(node: Dict[str, Any]) -> Tuple[str, str]:
     """
     Constructs the semantic context window and its deterministic hash.
@@ -76,7 +75,6 @@ def _compute_prompt_and_hash(node: Dict[str, Any]) -> Tuple[str, str]:
 
     return full_text, v_hash
 
-
 def _prepare_batch_for_staging(nodes: List[Dict], model_name: str, snapshot_id: str) -> List[Tuple]:
     prepared_rows = []
     for node in nodes:
@@ -96,7 +94,6 @@ def _prepare_batch_for_staging(nodes: List[Dict], model_name: str, snapshot_id: 
         )
         prepared_rows.append(row)
     return prepared_rows
-
 
 class CodeEmbedder:
     """
@@ -189,7 +186,7 @@ class CodeEmbedder:
             if hasattr(self.storage, "backfill_staging_vectors"):
                 recovered_count = self.storage.backfill_staging_vectors(snapshot_id)
             yield {"status": "deduplication_stats", "recovered": recovered_count}
-            
+
             # 4. FLUSH HITS
             flushed_hits = 0
             if hasattr(self.storage, "flush_staged_hits"):
