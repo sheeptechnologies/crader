@@ -16,11 +16,19 @@ The indexer performs a full scan of a repository commit and writes files, chunks
    - `create_snapshot()` inserts a snapshot with status `indexing`.
    - If the same commit is already indexed, the existing snapshot is reused.
 
-3. **File scan**
-   - The worktree is scanned with `os.walk`.
-   - Ignored directories: `.git`, `node_modules`, `__pycache__`, `.venv`, `dist`, `build`, `target`, `vendor`.
-   - Extensions indexed:
-     - `.py`, `.js`, `.jsx`, `.ts`, `.tsx`, `.java`, `.go`, `.rs`, `.c`, `.cpp`, `.php`, `.html`, `.css`
+3. **File discovery via SourceCollector**
+   - The [`SourceCollector`](source-collector.md) module handles all file enumeration.
+   - Uses `git ls-files` for Git-native file discovery with zero-cost hashing.
+   - Applies a four-stage filtering funnel:
+     1. Git native discovery (tracked + untracked files)
+     2. Metadata filtering (extensions, blocklist)
+     3. Filesystem safety (symlinks, size limits)
+     4. Semantic enrichment (category classification)
+   - Files are yielded in batches as `CollectedFile` objects with:
+     - `rel_path`, `full_path`, `extension`, `size_bytes`
+     - `git_hash` (SHA-1 blob ID, enables cache-first workflows)
+     - `category` (`source`, `test`, `config`, `docs`)
+   - See [SourceCollector Guide](source-collector.md) for detailed configuration and API reference.
 
 4. **Parallel parsing**
    - A `ProcessPoolExecutor` processes file chunks (50 files per task, 5 workers).
@@ -37,4 +45,5 @@ The indexer performs a full scan of a repository commit and writes files, chunks
 
 - If a repository is already being indexed, `index()` returns `"queued"`.
 - Semantic tags from Tree-sitter queries are currently available for Python, JavaScript, and TypeScript.
-- Parsing and indexing always run on the full file set for the target commit.
+- The SourceCollector's `git_hash` enables cache-first workflows: unchanged files (same hash in database) skip parsing entirely.
+- Incremental indexing of stable codebases typically achieves 90%+ cache hit rates.

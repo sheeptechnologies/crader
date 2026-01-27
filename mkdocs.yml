@@ -66,6 +66,7 @@ nav:
   - Guides:
       - Database Schema: guides/schema/schema.md
       - Indexing Pipeline: guides/indexing-pipeline.md
+      - SourceCollector: guides/source-collector.md
       - Embedding Strategy: guides/embedding-strategy.md
       - Retrieval Strategies: guides/retrieval-strategies.md
   - API Reference:
