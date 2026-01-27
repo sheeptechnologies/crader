@@ -37,7 +37,6 @@ class MetadataProvider(ABC):
         """Returns a list of files changed between `since_commit` and HEAD."""
         pass
 
-
 class GitMetadataProvider(MetadataProvider):
     """
     Standard Git-based Metadata Provider.
@@ -155,7 +154,6 @@ class GitMetadataProvider(MetadataProvider):
 
     def get_changed_files(self, since_commit: str) -> List[str]:
         return self.git.get_changed_files(since_commit)
-
 
 class LocalMetadataProvider(MetadataProvider):
     """Fallback provider for non-git folders."""

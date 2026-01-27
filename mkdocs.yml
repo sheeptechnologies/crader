@@ -53,6 +53,8 @@ markdown_extensions:
 
 extra_javascript:
   - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js
+  - javascripts/mermaid.js
   - https://polyfill.io/v3/polyfill.min.js?features=es6
   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
@@ -62,8 +64,7 @@ nav:
       - Installation: getting-started/installation.md
       - Quickstart: getting-started/quickstart.md
   - Guides:
-      - Architecture: guides/architecture.md
-      - Data Model: guides/data_model.md
+      - Database Schema: guides/schema/schema.md
       - Indexing Pipeline: guides/indexing-pipeline.md
       - Embedding Strategy: guides/embedding-strategy.md
       - Retrieval Strategies: guides/retrieval-strategies.md

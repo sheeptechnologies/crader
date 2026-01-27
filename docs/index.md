@@ -18,7 +18,7 @@ Crader turns Git repositories into a code property graph stored in PostgreSQL. I
 ## Documentation
 
 - Getting started: [Installation](getting-started/installation.md), [Quickstart](getting-started/quickstart.md)
-- Guides: [Architecture](guides/architecture.md), [Indexing pipeline](guides/indexing-pipeline.md), [Embedding strategy](guides/embedding-strategy.md), [Retrieval strategies](guides/retrieval-strategies.md), [Data model](guides/data_model.md)
+- Guides: [Database schema](guides/schema/schema.md), [Indexing pipeline](guides/indexing-pipeline.md), [Embedding strategy](guides/embedding-strategy.md), [Retrieval strategies](guides/retrieval-strategies.md)
 - API reference: [Indexer](reference/indexer.md), [Parsing](reference/parsing.md), [Embedding](reference/embedding.md), [Retrieval](reference/retrieval.md), [Storage](reference/storage.md), [Models](reference/models.md), [Reader](reference/reading.md), [Navigator](reference/navigation.md)
 - Examples: [Advanced usage](examples/advanced_usage.md)
 - Contributing: [Development setup](contributing/development-setup.md), [Code of conduct](contributing/code-of-conduct.md)

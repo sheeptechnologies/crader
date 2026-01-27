@@ -2,8 +2,26 @@
 
 Revision ID: c7afc7db3cb4
 Revises:
-Create Date: 2025-12-07 17:28:23.966354
+Create Date: 2026-01-25 17:28:23.966354
 
+BREAKING CHANGE: Requires full re-index of all repositories.
+
+Changes from v1:
+- Removed: `nodes` table (split into code_chunks + symbols)
+- Removed: `edges` table (replaced by symbols.parent_id)
+- Added: `code_chunks` table (physical storage for RAG)
+- Added: `symbols` table (logical structure for navigation)
+- Added: int4range for spatial queries
+- Added: partial indexes for query optimization
+- Vector index: HNSW (preferred for commit-driven mutable workload)
+
+IMPORTANT: vector_hash computation
+- Application must compute: SHA256(enrichment_version + "|" + enriched_text)
+- Including 'model' ensures different models produce different hashes
+- Cache lookup: WHERE vector_hash = $hash AND model = $model
+- See: docs/SCHEMA.md for enrichment strategy
+
+Ref: RFC-002 - Crader Architecture v2
 """
 from typing import Sequence, Union
 
@@ -12,223 +30,415 @@ from alembic import op
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects import postgresql
 
-# revision identifiers, used by Alembic.
 revision: str = 'c7afc7db3cb4'
-down_revision: Union[str, Sequence[str], None] = None
+down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # 1. Abilitazione estensione vector (fondamentale per gli embeddings)
+    # =================================================================
+    # EXTENSIONS
+    # =================================================================
+    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")  # For gen_random_uuid()
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    op.execute("CREATE EXTENSION IF NOT EXISTS btree_gist")
+    op.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
 
     # =================================================================
     # 1. CORE TABLES (Identity & State)
     # =================================================================
 
-    # REPOSITORIES: L'identità stabile del progetto
-    # Nota: current_snapshot_id punta a snapshots, ma lo definiamo dopo per evitare cicli
     op.create_table(
         'repositories',
-        sa.Column('id', sa.String(), nullable=False),
-        sa.Column('url', sa.String(), nullable=False),
-        sa.Column('branch', sa.String(), nullable=False),
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False,
+                  server_default=sa.text('gen_random_uuid()')),
         sa.Column('name', sa.String(), nullable=False),
-
+        sa.Column('url', sa.String(), nullable=False),
+        sa.Column('metadata', postgresql.JSONB(astext_type=sa.Text()), 
+                  server_default=sa.text("'{}'::jsonb"), nullable=False),
         sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
         sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-        # Questo campo verrà collegato via FK alla fine dello script
-        sa.Column('current_snapshot_id', sa.String(), nullable=True),
-        # Se valorizzato, significa "qualcuno ha chiesto un update mentre eri occupato"
-        sa.Column('reindex_requested_at', sa.DateTime(), nullable=True),
 
         sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('url', 'branch', name='uq_repo_url_branch')
-        # Impedisce fisicamente di avere due snapshot 'indexing' contemporaneamente per la stessa repo.
-
     )
 
+    # Trigger for updated_at (scoped naming)
+    op.execute("""
+        CREATE OR REPLACE FUNCTION crader_update_updated_at()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            NEW.updated_at = NOW();
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    """)
 
+    op.execute("""
+        CREATE TRIGGER repositories_updated_at
+        BEFORE UPDATE ON repositories
+        FOR EACH ROW EXECUTE FUNCTION crader_update_updated_at();
+    """)
 
-    # SNAPSHOTS: Lo stato immutabile (Versioni)
     op.create_table(
         'snapshots',
-        sa.Column('id', sa.String(), nullable=False),
-        sa.Column('repository_id', sa.String(), nullable=False),
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False,
+                  server_default=sa.text('gen_random_uuid()')),
+        sa.Column('repository_id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('commit_hash', sa.String(), nullable=False),
-        sa.Column(
-            'status', sa.String(), server_default='pending', nullable=False
-        ),  # pending, indexing, completed, failed
+        sa.Column('metadata', postgresql.JSONB(astext_type=sa.Text()), 
+                  server_default=sa.text("'{}'::jsonb"), nullable=False),
         sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-        sa.Column('completed_at', sa.DateTime(), nullable=True),
-        sa.Column('stats', postgresql.JSONB(astext_type=sa.Text()), server_default='{}', nullable=True),
-        sa.Column('file_manifest', postgresql.JSONB(astext_type=sa.Text()), server_default='{}', nullable=True),
 
         sa.PrimaryKeyConstraint('id'),
         sa.ForeignKeyConstraint(['repository_id'], ['repositories.id'], ondelete='CASCADE'),
-        # Garantisce Idempotenza: Non possono esistere due snapshot per lo stesso commit
-        # sa.UniqueConstraint('repository_id', 'commit_hash', name='uq_snapshot_repo_commit')
-        # rimosso per dinamiche di reindex force=True
+        sa.UniqueConstraint('repository_id', 'commit_hash', name='uq_snapshots_commit')
     )
 
-    # Ora possiamo aggiungere la FK circolare su repositories
-    op.create_foreign_key(
-        'fk_repo_current_snapshot',
-        'repositories', 'snapshots',
-        ['current_snapshot_id'], ['id'],
-        ondelete='SET NULL',  # Se cancello lo snapshot, la repo torna "vergine"
-        use_alter=True
-    )
-
-    # Questo delega la gestione della concorrenza a Postgres (molto robusto).
-    op.create_index(
-        'ix_one_active_indexing',
-        'snapshots',
-        ['repository_id'],
-        unique=True,
-        postgresql_where=sa.text("status = 'indexing'") # Partial Index
-    )
+    op.create_index('ix_snapshots_repo', 'snapshots', ['repository_id'])
 
     # =================================================================
     # 2. CONTENT ADDRESSABLE STORAGE (CAS)
     # =================================================================
 
-    # CONTENTS: Deduplicazione globale dei contenuti (Blob store)
     op.create_table(
         'contents',
         sa.Column('chunk_hash', sa.String(), nullable=False),
         sa.Column('content', sa.Text(), nullable=False),
-        sa.PrimaryKeyConstraint('chunk_hash')
+        sa.Column('size_bytes', sa.Integer(), nullable=False),
+
+        sa.PrimaryKeyConstraint('chunk_hash'),
+        sa.CheckConstraint('size_bytes > 0', name='ck_contents_positive_size')
     )
 
     # =================================================================
-    # 3. STRUCTURE (AST & Files)
+    # 3. FILES
     # =================================================================
 
-    # FILES: Appartengono a uno Snapshot specifico
     op.create_table(
         'files',
-        sa.Column('id', sa.String(), nullable=False),
-        sa.Column('snapshot_id', sa.String(), nullable=False),
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False,
+                  server_default=sa.text('gen_random_uuid()')),
+        sa.Column('snapshot_id', postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column('path', sa.String(), nullable=False),
-        sa.Column('file_hash', sa.String(), nullable=False),
-        sa.Column('commit_hash', sa.String(), nullable=True), # Utile per riferimento rapido
         sa.Column('language', sa.String(), nullable=False),
         sa.Column('size_bytes', sa.Integer(), nullable=False),
-        sa.Column('category', sa.String(), nullable=False), # test, source, config...
+        sa.Column('metadata', postgresql.JSONB(astext_type=sa.Text()), 
+                  server_default=sa.text("'{}'::jsonb"), nullable=False),
         sa.Column('indexed_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-        sa.Column('parsing_status', sa.String(), server_default='success', nullable=False),
-        sa.Column('parsing_error', sa.Text(), nullable=True),
 
         sa.PrimaryKeyConstraint('id'),
         sa.ForeignKeyConstraint(['snapshot_id'], ['snapshots.id'], ondelete='CASCADE'),
-        sa.UniqueConstraint('snapshot_id', 'path', name='uq_files_snapshot_path')
+        sa.UniqueConstraint('snapshot_id', 'path', name='uq_files_snapshot_path'),
+        sa.CheckConstraint('size_bytes >= 0', name='ck_files_nonnegative_size')
     )
 
-    # NODES: I mattoncini del codice (Classi, Funzioni, Blocchi)
+    op.create_index('ix_files_snapshot', 'files', ['snapshot_id'])
+    op.create_index('ix_files_language', 'files', ['language'])
+    op.create_index('ix_files_path_pattern', 'files', ['path'],
+                   postgresql_using='gin',
+                   postgresql_ops={'path': 'gin_trgm_ops'})
+
+    # =================================================================
+    # 4. PHYSICAL STORAGE: CODE_CHUNKS (optimized for RAG)
+    # =================================================================
+
     op.create_table(
-        'nodes',
-        sa.Column('id', sa.String(), nullable=False),
-        sa.Column('file_id', sa.String(), nullable=False),
-        sa.Column('file_path', sa.String(), nullable=False), # Denormalizzato per comodità
-        sa.Column('chunk_hash', sa.String(), nullable=False), # Link al CAS
-        sa.Column('start_line', sa.Integer(), nullable=False),
-        sa.Column('end_line', sa.Integer(), nullable=False),
-        sa.Column('byte_start', sa.Integer(), nullable=False),
-        sa.Column('byte_end', sa.Integer(), nullable=False),
-        sa.Column('size', sa.Integer(), nullable=False),
-        sa.Column('metadata', postgresql.JSONB(astext_type=sa.Text()), server_default='{}', nullable=True),
+        'code_chunks',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False,
+                  server_default=sa.text('gen_random_uuid()')),
+        sa.Column('file_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('chunk_hash', sa.String(), nullable=False),
+        sa.Column('byte_range', postgresql.INT4RANGE(), nullable=False),
+        sa.Column('metadata', postgresql.JSONB(astext_type=sa.Text()), 
+                  server_default=sa.text("'{}'::jsonb"), nullable=False),
 
         sa.PrimaryKeyConstraint('id'),
         sa.ForeignKeyConstraint(['file_id'], ['files.id'], ondelete='CASCADE'),
-        # Non mettiamo FK su chunk_hash verso contents per performance in insert massivi (è un soft link)
+        sa.ForeignKeyConstraint(['chunk_hash'], ['contents.chunk_hash'], ondelete='RESTRICT'),
+        sa.CheckConstraint('NOT isempty(byte_range) AND lower(byte_range) >= 0',
+                          name='ck_chunks_valid_range')
     )
 
-    # EDGES: Le relazioni del grafo (calls, inherits, imports...)
-    op.create_table(
-        'edges',
-        sa.Column('source_id', sa.String(), nullable=False),
-        sa.Column('target_id', sa.String(), nullable=False),
-        sa.Column('relation_type', sa.String(), nullable=False),
-        sa.Column('metadata', postgresql.JSONB(astext_type=sa.Text()), server_default='{}', nullable=True),
-
-        sa.ForeignKeyConstraint(['source_id'], ['nodes.id'], ondelete='CASCADE'),
-        sa.ForeignKeyConstraint(['target_id'], ['nodes.id'], ondelete='CASCADE')
-    )
-    # Indici per navigazione veloce grafo
-    op.create_index('ix_edges_source', 'edges', ['source_id'])
-    op.create_index('ix_edges_target', 'edges', ['target_id'])
+    op.create_index('ix_code_chunks_file', 'code_chunks', ['file_id'])
+    op.create_index('ix_code_chunks_hash', 'code_chunks', ['chunk_hash'])
+    op.create_index('ix_code_chunks_spatial', 'code_chunks',
+                   ['file_id', 'byte_range'],
+                   postgresql_using='gist')
 
     # =================================================================
-    # 4. SEARCH INDICES (Vectors & FTS)
+    # 5. LOGICAL STRUCTURE: SYMBOLS (optimized for navigation)
     # =================================================================
 
-    # NODE_EMBEDDINGS: Vettori semantici
-    # NOTA: Qui denormalizziamo snapshot_id per query ultra-veloci
-    op.create_table(
-        'node_embeddings',
-        sa.Column('id', sa.String(), nullable=False),
-        sa.Column('chunk_id', sa.String(), nullable=False),
-        sa.Column('snapshot_id', sa.String(), nullable=False), # Denormalizzato
-        sa.Column('vector_hash', sa.String(), nullable=False), # Per cache lookup
-        sa.Column('model_name', sa.String(), nullable=False),
-        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
-        # Campi denormalizzati utili per filtering pre-vettoriale senza JOIN pesanti
-        sa.Column('file_path', sa.String(), nullable=True),
-        sa.Column('language', sa.String(), nullable=True),
-        sa.Column('category', sa.String(), nullable=True),
-        sa.Column('start_line', sa.Integer(), nullable=True),
-        sa.Column('end_line', sa.Integer(), nullable=True),
+    op.execute("""
+        CREATE OR REPLACE FUNCTION crader_qualified_name(scope_path text[], name text)
+        RETURNS text
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$
+            SELECT CASE
+                WHEN array_length(scope_path, 1) > 0
+                THEN array_to_string(scope_path, '.') || '.' || name
+                ELSE name
+            END;
+        $$;
+    """)
 
-        # Il vettore vero e proprio (dimensione standard OpenAI 1536)
-        sa.Column('embedding', Vector(1536), nullable=True),
+    op.create_table(
+        'symbols',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False,
+                  server_default=sa.text('gen_random_uuid()')),
+        sa.Column('file_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('snapshot_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('kind', sa.String(), nullable=False),
+        sa.Column('name', sa.String(), nullable=False),
+        sa.Column('scope_path', postgresql.ARRAY(sa.String()), 
+                  server_default=sa.text("'{}'::text[]"), nullable=False),
+        sa.Column('qualified_name', sa.String(),
+                  sa.Computed(
+                      "crader_qualified_name(scope_path, name)"
+                  ),
+                  nullable=False),
+        sa.Column('byte_range', postgresql.INT4RANGE(), nullable=False),
+        sa.Column('parent_id', postgresql.UUID(as_uuid=True), nullable=True),
+        sa.Column('metadata', postgresql.JSONB(astext_type=sa.Text()), 
+                  server_default=sa.text("'{}'::jsonb"), nullable=False),
 
         sa.PrimaryKeyConstraint('id'),
-        sa.ForeignKeyConstraint(['chunk_id'], ['nodes.id'], ondelete='CASCADE'),
-        sa.ForeignKeyConstraint(['snapshot_id'], ['snapshots.id'], ondelete='CASCADE')
-    )
-    # Indice HNSW partizionato per snapshot sarebbe ideale, ma iniziamo con indice standard su embedding
-    # e indice btree su snapshot_id per il filtering.
-    op.create_index('ix_embeddings_snapshot', 'node_embeddings', ['snapshot_id'])
-    op.create_index('ix_node_embeddings_vector_hash', 'node_embeddings', ['vector_hash'])
-    # op.create_index(
-    #     'ix_embeddings_vector',
-    #     'node_embeddings',
-    #     ['embedding'],
-    #     postgresql_using='hnsw',
-    #     postgresql_ops={'embedding': 'vector_cosine_ops'}
-    # )
-    # (L'indice HNSW spesso si crea manualmente post-data load per performance, o si lascia qui se il DB è piccolo)
+        sa.ForeignKeyConstraint(['file_id'], ['files.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['snapshot_id'], ['snapshots.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['parent_id'], ['symbols.id'], ondelete='CASCADE'),
+        sa.CheckConstraint(
+            "kind IN ('function', 'class', 'method', 'variable', 'import', 'export')",
+            name='ck_symbols_valid_kind'
+        ),
+        sa.CheckConstraint('NOT isempty(byte_range) AND lower(byte_range) >= 0',
+                          name='ck_symbols_valid_range'),
 
-    # NODES_FTS: Full Text Search
+        # NOTE: bulk insert of symbols with parent_id
+        # If you insert symbols in a batch where a child arrives before its parent, the foreign key constraint fails.
+        # Sort on the application side (recommended — zero database overhead).
+        sa.CheckConstraint('parent_id IS NULL OR parent_id != id',
+                          name='ck_symbols_no_self_parent')
+    )
+
+    # Consistency trigger: enforce snapshot_id matches file's snapshot_id
+    op.execute("""
+        CREATE OR REPLACE FUNCTION crader_symbols_check_snapshot()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            -- Verify snapshot_id matches the file's snapshot_id
+            IF NOT EXISTS (
+                SELECT 1 FROM files f 
+                WHERE f.id = NEW.file_id 
+                  AND f.snapshot_id = NEW.snapshot_id
+            ) THEN
+                RAISE EXCEPTION 'symbols.snapshot_id must match files.snapshot_id for file_id=%', NEW.file_id;
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    """)
+
+    op.execute("""
+        CREATE TRIGGER symbols_check_snapshot
+        BEFORE INSERT OR UPDATE ON symbols
+        FOR EACH ROW EXECUTE FUNCTION crader_symbols_check_snapshot();
+    """)
+
+    # Partial indexes
+    op.create_index('ix_symbols_defs', 'symbols',
+                   ['snapshot_id', 'qualified_name'],
+                   postgresql_where=sa.text(
+                       "kind IN ('function', 'class', 'method', 'variable')"
+                   ))
+
+    op.create_index('ix_symbols_imports', 'symbols',
+                   ['snapshot_id', 'name', 'file_id'],
+                   postgresql_where=sa.text("kind = 'import'"))
+
+    op.create_index('ix_symbols_parent', 'symbols', ['parent_id'],
+                   postgresql_where=sa.text("parent_id IS NOT NULL"))
+
+    # Spatial index
+    op.create_index('ix_symbols_spatial', 'symbols',
+                   ['file_id', 'byte_range'],
+                   postgresql_using='gist')
+
+    # Standard indexes
+    op.create_index('ix_symbols_snapshot', 'symbols', ['snapshot_id'])
+    op.create_index('ix_symbols_file', 'symbols', ['file_id'])
+    op.create_index('ix_symbols_name', 'symbols', ['snapshot_id', 'name'])
+
+    # =================================================================
+    # 6. SEMANTIC VECTORS: CODE_CHUNK_EMBEDDINGS
+    # =================================================================
+
     op.create_table(
-        'nodes_fts',
-        sa.Column('node_id', sa.String(), nullable=False),
-        sa.Column('file_path', sa.String(), nullable=False),
-        sa.Column('content', sa.Text(), nullable=True),
-        sa.Column('semantic_tags', sa.Text(), nullable=True),
-        sa.Column('search_vector', postgresql.TSVECTOR(), nullable=True),
+        'code_chunk_embeddings',
+        sa.Column('id', postgresql.UUID(as_uuid=True), nullable=False,
+                  server_default=sa.text('gen_random_uuid()')),
+        sa.Column('chunk_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('snapshot_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('file_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('vector_hash', sa.String(), nullable=False),
+        sa.Column('embedding', Vector(1536), nullable=False),
+        sa.Column('model', sa.String(), nullable=False),
 
-        sa.PrimaryKeyConstraint('node_id'),
-        sa.ForeignKeyConstraint(['node_id'], ['nodes.id'], ondelete='CASCADE')
+        sa.PrimaryKeyConstraint('id'),
+        sa.ForeignKeyConstraint(['chunk_id'], ['code_chunks.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['snapshot_id'], ['snapshots.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['file_id'], ['files.id'], ondelete='CASCADE'),
     )
-    op.create_index('ix_nodes_fts_vector', 'nodes_fts', ['search_vector'], postgresql_using='gin')
+
+    # Consistency trigger: enforce snapshot_id and file_id match chunk's file
+    op.execute("""
+        CREATE OR REPLACE FUNCTION crader_embeddings_check_refs()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            -- Verify snapshot_id and file_id match the chunk's file
+            IF NOT EXISTS (
+                SELECT 1 
+                FROM code_chunks c
+                JOIN files f ON f.id = c.file_id
+                WHERE c.id = NEW.chunk_id
+                  AND c.file_id = NEW.file_id
+                  AND f.snapshot_id = NEW.snapshot_id
+            ) THEN
+                RAISE EXCEPTION 'embeddings snapshot_id/file_id must match chunk''s file';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    """)
+
+    op.execute("""
+        CREATE TRIGGER embeddings_check_refs
+        BEFORE INSERT OR UPDATE ON code_chunk_embeddings
+        FOR EACH ROW EXECUTE FUNCTION crader_embeddings_check_refs();
+    """)
+
+    # NOTE: vector_hash is a global cache key for embedding reuse (compute-dedup).
+    # We may store the same embedding multiple times across chunks/snapshots to keep
+    # vector search filterable by snapshot_id (no joins).
+    
+    # Cache lookup index: composite (vector_hash, model)
+    # Query pattern: SELECT embedding WHERE vector_hash = $hash AND model = $model
+    op.create_index(
+        'ix_embeddings_cache_key',
+        'code_chunk_embeddings',
+        ['vector_hash', 'model']
+    )
+    
+    # Idempotency: prevent duplicate embeddings for same chunk+model
+    # Protects against re-indexing, retries, or job crashes
+    op.create_index(
+        'uq_embeddings_chunk_model',
+        'code_chunk_embeddings',
+        ['chunk_id', 'model'],
+        unique=True
+    )
+  
+    # Standard indexes for filtering
+    op.create_index('ix_embeddings_snapshot', 'code_chunk_embeddings', ['snapshot_id'])
+    op.create_index('ix_embeddings_file', 'code_chunk_embeddings', ['file_id'])
+
+    # Vector index: HNSW (preferred for commit-driven mutable workload)
+    # Rationale: Crader's embedding workload is snapshot-based with frequent
+    # insert/delete cycles and bounded size via GC. HNSW handles this better
+    # than IVFFLAT, which requires periodic rebuilds for optimal recall.
+    # See: docs/VECTOR_INDEX_STRATEGY.md
+    op.create_index(
+        'ix_embeddings_vector',
+        'code_chunk_embeddings',
+        ['embedding'],
+        postgresql_using='hnsw',
+        postgresql_with={'m': 16, 'ef_construction': 64},
+        postgresql_ops={'embedding': 'vector_cosine_ops'}
+    )
+
+    # =================================================================
+    # 7. LEXICAL SEARCH: CODE_CHUNK_FTS
+    # =================================================================
+
+    op.create_table(
+        'code_chunk_fts',
+        sa.Column('chunk_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('snapshot_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('file_id', postgresql.UUID(as_uuid=True), nullable=False),
+        sa.Column('search_vector', postgresql.TSVECTOR(), nullable=False),
+
+        sa.PrimaryKeyConstraint('chunk_id'),
+        sa.ForeignKeyConstraint(['chunk_id'], ['code_chunks.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['snapshot_id'], ['snapshots.id'], ondelete='CASCADE'),
+        sa.ForeignKeyConstraint(['file_id'], ['files.id'], ondelete='CASCADE'),
+    )
+
+    op.create_index('ix_fts_vector', 'code_chunk_fts', ['search_vector'], 
+                   postgresql_using='gin')
+    op.create_index('ix_fts_snapshot', 'code_chunk_fts', ['snapshot_id'])
+    op.create_index('ix_fts_file', 'code_chunk_fts', ['file_id'])
+
+    # FTS Trigger: automatically populate FTS table when chunks are inserted
+    # NOTE: Uses 'simple' config instead of 'english' to avoid stemming code
+    # English stemming (e.g., "running" -> "run") is inappropriate for code.
+    # 'simple' does basic tokenization without language-specific processing.
+    op.execute("""
+        CREATE OR REPLACE FUNCTION crader_update_fts_vector()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            INSERT INTO code_chunk_fts (chunk_id, snapshot_id, file_id, search_vector)
+            SELECT 
+                NEW.id,
+                f.snapshot_id,
+                NEW.file_id,
+                to_tsvector('simple', co.content)
+            FROM contents co
+            JOIN files f ON f.id = NEW.file_id
+            WHERE co.chunk_hash = NEW.chunk_hash
+            ON CONFLICT (chunk_id) DO UPDATE
+            SET search_vector = EXCLUDED.search_vector,
+                snapshot_id = EXCLUDED.snapshot_id,
+                file_id = EXCLUDED.file_id;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    """)
+
+    op.execute("""
+        CREATE TRIGGER code_chunks_fts_trigger
+        AFTER INSERT OR UPDATE ON code_chunks
+        FOR EACH ROW EXECUTE FUNCTION crader_update_fts_vector();
+    """)
 
 
 def downgrade() -> None:
-    # Ordine inverso di drop per rispettare le FK
-    op.drop_table('nodes_fts')
-    op.drop_table('node_embeddings')
-    op.drop_table('edges')
-    op.drop_table('nodes')
+    # Drop triggers and functions first
+    op.execute("DROP TRIGGER IF EXISTS code_chunks_fts_trigger ON code_chunks")
+    op.execute("DROP FUNCTION IF EXISTS crader_update_fts_vector()")
+    
+    op.execute("DROP TRIGGER IF EXISTS embeddings_check_refs ON code_chunk_embeddings")
+    op.execute("DROP FUNCTION IF EXISTS crader_embeddings_check_refs()")
+    
+    op.execute("DROP TRIGGER IF EXISTS symbols_check_snapshot ON symbols")
+    op.execute("DROP FUNCTION IF EXISTS crader_symbols_check_snapshot()")
+    op.execute("DROP FUNCTION IF EXISTS crader_qualified_name(text[], text)")
+    
+    op.execute("DROP TRIGGER IF EXISTS repositories_updated_at ON repositories")
+    op.execute("DROP FUNCTION IF EXISTS crader_update_updated_at()")
+
+    # Drop tables in reverse order
+    op.drop_table('code_chunk_fts')
+    op.drop_table('code_chunk_embeddings')
+    op.drop_table('symbols')
+    op.drop_table('code_chunks')
     op.drop_table('files')
     op.drop_table('contents')
-
-    # Rimuovi FK circolare prima di droppare le tabelle
-    op.drop_constraint('fk_repo_current_snapshot', 'repositories', type_='foreignkey')
-
     op.drop_table('snapshots')
     op.drop_table('repositories')
 
+    # Drop extensions
+    op.execute("DROP EXTENSION IF EXISTS pg_trgm")
+    op.execute("DROP EXTENSION IF EXISTS btree_gist")
     op.execute("DROP EXTENSION IF EXISTS vector")
+    op.execute("DROP EXTENSION IF EXISTS pgcrypto")

@@ -51,18 +51,19 @@ class TreeSitterRepoParser:
     4.  **Chunking**: Recursively breaks down the code into manageable blocks ("Chunks") preserving lexical scope.
     """
 
-    EXT_TO_LANG_CONFIG = {
-        ".py": "python",
-        ".js": "javascript",
-        ".jsx": "javascript",
-        ".ts": "javascript",
-        ".tsx": "javascript",
-        ".java": "java",
-        ".go": "go",
-        ".html": "web",
-        ".css": "web",
-        ".json": "web",
-    }
+    # Unused 
+    # EXT_TO_LANG_CONFIG = {
+    #     ".py": "python",
+    #     ".js": "javascript",
+    #     ".jsx": "javascript",
+    #     ".ts": "javascript",
+    #     ".tsx": "javascript",
+    #     ".java": "java",
+    #     ".go": "go",
+    #     ".html": "web",
+    #     ".css": "web",
+    #     ".json": "web",
+    # }
 
     LANGUAGE_MAP = {
         ".py": "python",
@@ -460,50 +461,50 @@ class TreeSitterRepoParser:
     #         for item in c: contents[item.chunk_hash] = item
     #     return ParsingResult(files, nodes, contents, all_rels)
 
-    def _should_process_file(self, rel_path: str) -> bool:
-        """
-        Enterprise Filtering Logic.
+    # def _should_process_file(self, rel_path: str) -> bool:
+    #     """
+    #     Enterprise Filtering Logic.
 
-        Determines if a file is suitable for indexing based on:
-        1.  **Global Blacklists**: `node_modules`, `.git`, temporary folders.
-        2.  **Language Rules**: Allowed extensions, specific exclude patterns (e.g., `_test.go`).
-        3.  **Heuristics**: Dotfiles, lockfiles.
+    #     Determines if a file is suitable for indexing based on:
+    #     1.  **Global Blacklists**: `node_modules`, `.git`, temporary folders.
+    #     2.  **Language Rules**: Allowed extensions, specific exclude patterns (e.g., `_test.go`).
+    #     3.  **Heuristics**: Dotfiles, lockfiles.
 
-        Returns:
-            bool: True if the file should be parsed.
-        """
-        parts = rel_path.split(os.sep)
-        filename = parts[-1]
-        _, ext = os.path.splitext(filename)
+    #     Returns:
+    #         bool: True if the file should be parsed.
+    #     """
+    #     parts = rel_path.split(os.sep)
+    #     filename = parts[-1]
+    #     _, ext = os.path.splitext(filename)
 
-        # 1. Fast Directory Check (O(1) lookup)
-        # Controlla se una qualsiasi directory genitore è nella blacklist
-        for part in parts[:-1]:
-            if part in self.all_ignore_dirs or part.startswith("."):
-                return False
+    #     # 1. Fast Directory Check (O(1) lookup)
+    #     # Controlla se una qualsiasi directory genitore è nella blacklist
+    #     for part in parts[:-1]:
+    #         if part in self.all_ignore_dirs or part.startswith("."):
+    #             return False
 
-        # 2. Configurazione Specifica Linguaggio
-        lang_key = self.EXT_TO_LANG_CONFIG.get(ext)
-        if lang_key:
-            config = LANGUAGE_SPECIFIC_FILTERS[lang_key]
+    #     # 2. Configurazione Specifica Linguaggio
+    #     lang_key = self.EXT_TO_LANG_CONFIG.get(ext)
+    #     if lang_key:
+    #         config = LANGUAGE_SPECIFIC_FILTERS[lang_key]
 
-            # Check Estensioni proibite (es. .pyc, .min.js)
-            if ext in config.get("exclude_extensions", set()):
-                return False
+    #         # Check Estensioni proibite (es. .pyc, .min.js)
+    #         if ext in config.get("exclude_extensions", set()):
+    #             return False
 
-            # Check Patterns (Glob matching, es. *_test.py)
-            for pattern in config.get("exclude_patterns", []):
-                if fnmatch.fnmatch(filename, pattern) or fnmatch.fnmatch(rel_path, pattern):
-                    # Se è un pattern escluso (es. test), decidiamo se il parser lo vuole o no.
-                    # SE vuoi che il parser ignori i test, scommenta:
-                    # return False
-                    pass
+    #         # Check Patterns (Glob matching, es. *_test.py)
+    #         for pattern in config.get("exclude_patterns", []):
+    #             if fnmatch.fnmatch(filename, pattern) or fnmatch.fnmatch(rel_path, pattern):
+    #                 # Se è un pattern escluso (es. test), decidiamo se il parser lo vuole o no.
+    #                 # SE vuoi che il parser ignori i test, scommenta:
+    #                 # return False
+    #                 pass
 
-        # 3. Check Generici (Lockfiles, Dotfiles nascosti)
-        if filename.startswith(".") or filename.endswith(".lock"):
-            return False
+    #     # 3. Check Generici (Lockfiles, Dotfiles nascosti)
+    #     if filename.startswith(".") or filename.endswith(".lock"):
+    #         return False
 
-        return True
+    #     return True
 
     # ==============================================================================
     #  LOGICA CHUNKING (OPTIMIZED - ZERO COPY & BYTEARRAY)
